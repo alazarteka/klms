@@ -1,5 +1,7 @@
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -41,6 +43,67 @@ struct Cookie {
 pub struct AuthSession {
     pub status: AuthStatus,
     pub cookie_header: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionCache {
+    origin: String,
+    sesskey: String,
+    stored_at: u64,
+}
+
+pub fn cached_sesskey(base_url: &Url) -> Option<String> {
+    let path = session_cache_path()?;
+    let bytes = fs::read(path).ok()?;
+    let cache: SessionCache = serde_json::from_slice(&bytes).ok()?;
+    (cache.origin == origin(base_url) && valid_sesskey(&cache.sesskey)).then_some(cache.sesskey)
+}
+
+pub fn cache_sesskey(base_url: &Url, sesskey: &str) {
+    if !valid_sesskey(sesskey) {
+        return;
+    }
+    let Some(path) = session_cache_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else { return };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    set_private_dir(parent);
+    let cache = SessionCache {
+        origin: origin(base_url),
+        sesskey: sesskey.into(),
+        stored_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&cache) else {
+        return;
+    };
+    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(mut file) = options.open(&temp) else {
+        return;
+    };
+    if file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .is_err()
+    {
+        let _ = fs::remove_file(&temp);
+        return;
+    }
+    if fs::rename(&temp, &path).is_err() {
+        let _ = fs::remove_file(temp);
+    }
 }
 
 pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
@@ -138,14 +201,54 @@ fn valid_cookie_name(name: &str) -> bool {
             .all(|byte| byte > 0x20 && byte < 0x7f && !b"()<>@,;:\\\"/[]?={} \t".contains(&byte))
 }
 
+fn session_cache_path() -> Option<PathBuf> {
+    env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .map(|root| root.join("klms/session.json"))
+}
+
+fn origin(url: &Url) -> String {
+    format!(
+        "{}://{}:{}",
+        url.scheme(),
+        url.host_str().unwrap_or_default(),
+        url.port_or_known_default().unwrap_or(0)
+    )
+}
+
+fn valid_sesskey(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+#[cfg(unix)]
+fn set_private_dir(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_private_dir(_path: &std::path::Path) {}
+
 #[cfg(test)]
 mod tests {
-    use super::valid_cookie_name;
+    use super::{valid_cookie_name, valid_sesskey};
 
     #[test]
     fn rejects_cookie_header_injection() {
         assert!(valid_cookie_name("MoodleSession"));
         assert!(!valid_cookie_name("bad\r\nheader"));
         assert!(!valid_cookie_name("bad;name"));
+    }
+
+    #[test]
+    fn rejects_invalid_cached_session_keys() {
+        assert!(valid_sesskey("abc123"));
+        assert!(!valid_sesskey("bad&key"));
+        assert!(!valid_sesskey(""));
     }
 }

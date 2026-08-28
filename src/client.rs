@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use reqwest::{
     blocking::Client,
-    header::{CONTENT_LENGTH, COOKIE, HeaderValue},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderValue},
     redirect::{Attempt, Policy},
 };
 use url::Url;
@@ -22,8 +22,18 @@ pub struct HtmlResponse {
     pub text: String,
 }
 
+pub struct ByteResponse {
+    pub url: Url,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 impl KlmsClient {
-    pub fn new(base: &str, cookie_header: Option<&str>) -> Result<Self, AppError> {
+    pub fn new(
+        base: &str,
+        cookie_header: Option<&str>,
+        timeout_seconds: u64,
+    ) -> Result<Self, AppError> {
         let base_url = validate_base_url(base)?;
         let expected_origin = origin(&base_url);
         let policy = Policy::custom(move |attempt: Attempt<'_>| {
@@ -36,7 +46,7 @@ impl KlmsClient {
             attempt.follow()
         });
         let http = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(timeout_seconds))
             .connect_timeout(Duration::from_secs(8))
             .redirect(policy)
             .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
@@ -55,6 +65,18 @@ impl KlmsClient {
     }
 
     pub fn get(&self, path: &str) -> Result<HtmlResponse, AppError> {
+        let response = self.get_bytes(path, MAX_BODY_BYTES)?;
+        let text = String::from_utf8_lossy(&response.bytes).into_owned();
+        if looks_logged_out(&response.url, &text) {
+            return Err(expired_session());
+        }
+        Ok(HtmlResponse {
+            url: response.url,
+            text,
+        })
+    }
+
+    pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let url = self
             .base_url
             .join(path)
@@ -66,7 +88,7 @@ impl KlmsClient {
         if !self.cookie.is_empty() {
             request = request.header(COOKIE, self.cookie.clone());
         }
-        let response = request
+        let mut response = request
             .send()
             .map_err(|error| AppError::network(format!("KLMS request failed: {error}")))?;
         let status = response.status();
@@ -82,28 +104,127 @@ impl KlmsClient {
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > MAX_BODY_BYTES)
+            .is_some_and(|length| length > max_bytes)
         {
-            return Err(AppError::network("KLMS response exceeded the 8 MiB limit"));
+            return Err(AppError::network(format!(
+                "KLMS response exceeded the {max_bytes} byte limit"
+            )));
         }
-        let body = response
-            .bytes()
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
+        response
+            .by_ref()
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut body)
             .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-        if body.len() > MAX_BODY_BYTES {
-            return Err(AppError::network("KLMS response exceeded the 8 MiB limit"));
+        if body.len() > max_bytes {
+            return Err(AppError::network(format!(
+                "KLMS response exceeded the {max_bytes} byte limit"
+            )));
         }
-        let text = String::from_utf8_lossy(&body).into_owned();
-        if looks_logged_out(&final_url, &text) {
-            return Err(AppError::auth(
-                "the saved KLMS session is missing or expired",
-                "Sign in with kaist-cli once, or set KLMS_STORAGE_STATE to a fresh Playwright storage-state file.",
-            ));
+        if content_type
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+        {
+            let text = String::from_utf8_lossy(&body);
+            if looks_logged_out(&final_url, &text) {
+                return Err(expired_session());
+            }
         }
-        Ok(HtmlResponse {
+        Ok(ByteResponse {
             url: final_url,
-            text,
+            content_type,
+            bytes: body,
         })
     }
+
+    pub fn ajax(&self, sesskey: &str, method: &'static str) -> Result<serde_json::Value, AppError> {
+        const ALLOWED: &[&str] = &["core_session_time_remaining", "core_session_touch"];
+        if !ALLOWED.contains(&method) {
+            return Err(AppError::internal(
+                "attempted a non-allowlisted Moodle AJAX method",
+            ));
+        }
+        let mut url = self
+            .base_url
+            .join("/lib/ajax/service.php")
+            .expect("valid built-in path");
+        url.query_pairs_mut()
+            .append_pair("sesskey", sesskey)
+            .append_pair("info", method);
+        let payload = serde_json::json!([{"index": 0, "methodname": method, "args": {}}]);
+        let body = serde_json::to_vec(&payload).map_err(|error| {
+            AppError::internal(format!("failed to encode AJAX request: {error}"))
+        })?;
+        let mut response = self
+            .http
+            .post(url)
+            .header(COOKIE, self.cookie.clone())
+            .header("X-Requested-With", "XMLHttpRequest")
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .map_err(|error| AppError::network(format!("KLMS AJAX request failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(AppError::network(format!(
+                "KLMS AJAX returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > MAX_BODY_BYTES)
+        {
+            return Err(AppError::network(
+                "KLMS AJAX response exceeded the 8 MiB limit",
+            ));
+        }
+        let mut response_body = Vec::with_capacity(64 * 1024);
+        response
+            .by_ref()
+            .take(MAX_BODY_BYTES as u64 + 1)
+            .read_to_end(&mut response_body)
+            .map_err(|error| {
+                AppError::network(format!("failed to read KLMS AJAX response: {error}"))
+            })?;
+        if response_body.len() > MAX_BODY_BYTES {
+            return Err(AppError::network(
+                "KLMS AJAX response exceeded the 8 MiB limit",
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&response_body)
+            .map_err(|error| AppError::shape(format!("invalid KLMS AJAX response: {error}")))?;
+        let first = value
+            .as_array()
+            .and_then(|rows| rows.first())
+            .ok_or_else(|| AppError::shape("KLMS AJAX response was not a non-empty array"))?;
+        if first.get("error").and_then(serde_json::Value::as_bool) == Some(true) {
+            let message = first
+                .pointer("/exception/message")
+                .or_else(|| first.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("KLMS AJAX returned an error");
+            return Err(AppError::network(message));
+        }
+        Ok(first
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+fn expired_session() -> AppError {
+    AppError::auth(
+        "the saved KLMS session is missing or expired",
+        "Refresh the storage-state session, or set KLMS_STORAGE_STATE to a fresh Playwright storage-state file.",
+    )
 }
 
 pub fn validate_base_url(value: &str) -> Result<Url, AppError> {

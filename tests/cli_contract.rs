@@ -97,3 +97,132 @@ fn loopback_dashboard_exercises_cookie_transport_and_parser() {
     assert_eq!(value["data"]["course_count"], 1);
     assert_eq!(value["data"]["courses"][0]["id"], "42");
 }
+
+#[test]
+fn auth_extend_uses_allowlisted_ajax_and_reports_remaining_time() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = match index {
+                0 => {
+                    assert!(request.starts_with("GET /my/ HTTP/1.1"));
+                    r#"<script>var cfg={"sesskey":"abc123"}</script><a href="/course/view.php?id=42">Compilers(CS.420_2026_2)</a>"#
+                }
+                1 => {
+                    assert!(request.contains("info=core_session_touch"));
+                    assert!(request.contains("\"methodname\":\"core_session_touch\""));
+                    r#"[{"error":false,"data":true}]"#
+                }
+                _ => {
+                    assert!(request.contains("info=core_session_time_remaining"));
+                    r#"[{"error":false,"data":{"userid":7,"timeremaining":10800}}]"#
+                }
+            };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", if index == 0 { "text/html" } else { "application/json" }, body.len(), body).unwrap();
+        }
+    });
+
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "auth",
+            "extend",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["command"], "auth.extend");
+    assert_eq!(value["data"]["remaining_seconds"], 10800);
+    assert_eq!(value["data"]["remaining"], "03:00:00");
+}
+
+#[test]
+fn auth_time_left_uses_cached_sesskey_without_dashboard_touch() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let length = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..length]);
+        assert!(request.starts_with("POST /lib/ajax/service.php?"));
+        assert!(request.contains("info=core_session_time_remaining"));
+        let body = r#"[{"error":false,"data":{"timeremaining":7211}}]"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let cache_dir = state_dir.path().join("cache/klms");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(
+        cache_dir.join("session.json"),
+        format!(
+            r#"{{"origin":"http://127.0.0.1:{}","sesskey":"abc123","stored_at":1}}"#,
+            address.port()
+        ),
+    )
+    .unwrap();
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_CACHE_HOME", state_dir.path().join("cache"))
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "auth",
+            "time-left",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["remaining_seconds"], 7211);
+    assert_eq!(value["data"]["bootstrap_may_have_extended_session"], false);
+}
+
+#[test]
+fn top_level_help_exposes_the_agent_resource_surface() {
+    let output = binary().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for command in [
+        "auth",
+        "courses",
+        "activities",
+        "assignments",
+        "quizzes",
+        "calendar",
+        "boards",
+        "files",
+        "videos",
+        "grades",
+        "attendance",
+        "request",
+    ] {
+        assert!(help.contains(command), "missing {command} in help");
+    }
+}
