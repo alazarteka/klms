@@ -5,7 +5,9 @@ use url::Url;
 
 use crate::{
     error::AppError,
-    models::{Activity, Course, CourseDetail, Dashboard, LinkItem, Report},
+    models::{
+        Activity, BoardPost, Course, CourseDetail, Dashboard, LinkItem, Report, ResourceDetail,
+    },
 };
 
 pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
@@ -43,8 +45,17 @@ pub fn course_detail(
     mut course: Course,
 ) -> Result<CourseDetail, AppError> {
     let document = Html::parse_document(html);
-    if let Some(title) = first_text(&document, ".page-header-headings h1, h1")? {
-        course.title = title;
+    if let Some(title) = first_text(
+        &document,
+        ".page-header-headings h1, a.h1[href*='course/view.php'], h1",
+    )? {
+        course.code = course_code(&title).or(course.code);
+        course.term = course
+            .code
+            .as_deref()
+            .and_then(term_from_code)
+            .or(course.term);
+        course.title = title.split('(').next().unwrap_or(&title).trim().to_owned();
     }
     let professors = professors(&document)?;
     let activity_count = activities_from_document(&document, base_url)?.len();
@@ -78,6 +89,114 @@ pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
 
 pub fn attendance(html: &str, course_id: String) -> Result<Report, AppError> {
     table_report(html, course_id, &["date", "attended", "absent"])
+}
+
+pub fn sesskey(html: &str) -> Result<String, AppError> {
+    for marker in ["\"sesskey\":\"", "\"sesskey\": \"", "sesskey="] {
+        if let Some(rest) = html.split(marker).nth(1) {
+            let value: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if !value.is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+    let document = Html::parse_document(html);
+    let input = selector("input[name=sesskey]")?;
+    document
+        .select(&input)
+        .find_map(|node| node.value().attr("value"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::shape("authenticated page did not expose a Moodle sesskey"))
+}
+
+pub fn resource_detail(
+    html: &str,
+    base_url: &Url,
+    url: &Url,
+    kind: &str,
+) -> Result<ResourceDetail, AppError> {
+    let document = Html::parse_document(html);
+    let title = first_text(
+        &document,
+        ".page-header-headings h1, #page-header h1, h1, title",
+    )?
+    .unwrap_or_else(|| format!("{kind} detail"));
+    let main = selector("main, #region-main, [role=main], body")?;
+    let text_value = document.select(&main).next().map(text).unwrap_or_default();
+    let links = link_items(
+        &document,
+        base_url,
+        "main a[href], #region-main a[href], [role=main] a[href]",
+        100,
+    )?;
+    Ok(ResourceDetail {
+        id: query_id(url, &["id", "bwid"]),
+        kind: kind.into(),
+        title,
+        url: url.to_string(),
+        text: text_value.chars().take(100_000).collect(),
+        links,
+    })
+}
+
+pub fn board_posts(
+    html: &str,
+    base_url: &Url,
+    board_id: Option<String>,
+) -> Result<Vec<BoardPost>, AppError> {
+    let document = Html::parse_document(html);
+    let anchors = selector("a[href*='/mod/courseboard/article.php']")?;
+    let cells = selector("td")?;
+    let mut seen = HashSet::new();
+    let mut posts = Vec::new();
+    for anchor in document.select(&anchors) {
+        let Some(href) = anchor.value().attr("href") else {
+            continue;
+        };
+        let Ok(url) = base_url.join(href) else {
+            continue;
+        };
+        let id = query_id(&url, &["bwid"]);
+        let key = id.clone().unwrap_or_else(|| url.to_string());
+        if !seen.insert(key) {
+            continue;
+        }
+        let title = text(anchor);
+        if title.is_empty() {
+            continue;
+        }
+        let posted = anchor
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|node| node.value().name() == "tr")
+            .and_then(|row| {
+                row.select(&cells)
+                    .map(text)
+                    .find(|value| looks_like_date(value))
+            });
+        posts.push(BoardPost {
+            board_id: board_id.clone(),
+            id,
+            title,
+            posted,
+            url: url.into(),
+        });
+    }
+    Ok(posts)
+}
+
+pub fn calendar(html: &str, base_url: &Url, limit: usize) -> Result<Vec<LinkItem>, AppError> {
+    let document = Html::parse_document(html);
+    link_items(
+        &document,
+        base_url,
+        ".event a[href], [data-region=event-list-content] a[href], .calendarwrapper a[href]",
+        limit,
+    )
 }
 
 fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>, AppError> {
@@ -218,13 +337,29 @@ fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Repo
 }
 
 fn professors(document: &Html) -> Result<Vec<String>, AppError> {
-    let selector =
+    let generic_selector =
         selector(".teachers a, .teacher a, [class*=professor] a, [class*=instructor] a")?;
     let mut names = Vec::new();
-    for node in document.select(&selector) {
+    for node in document.select(&generic_selector) {
         let value = text(node);
         if !value.is_empty() && !names.contains(&value) {
             names.push(value);
+        }
+    }
+    let course_info = selector(".courseinfo .border-left")?;
+    let anchors = selector("a.dropdown-toggle.text-primary")?;
+    for container in document.select(&course_info) {
+        if !text(container)
+            .to_ascii_lowercase()
+            .starts_with("professors")
+        {
+            continue;
+        }
+        for node in container.select(&anchors) {
+            let value = text(node);
+            if !value.is_empty() && !names.contains(&value) {
+                names.push(value);
+            }
         }
     }
     Ok(names)
@@ -265,9 +400,8 @@ fn link_items(
 fn first_text(document: &Html, css: &str) -> Result<Option<String>, AppError> {
     Ok(document
         .select(&selector(css)?)
-        .next()
         .map(text)
-        .filter(|value| !value.is_empty()))
+        .find(|value| !value.is_empty()))
 }
 
 fn selected_value(document: &Html, css: &str) -> Option<String> {
@@ -297,10 +431,23 @@ fn text(element: ElementRef<'_>) -> String {
 }
 
 fn course_code(title: &str) -> Option<String> {
-    let start = title.rfind('(')? + 1;
-    let end = title[start..].find(')')? + start;
-    let value = title[start..end].trim();
-    (value.contains('_') && value.chars().any(|c| c.is_ascii_digit())).then(|| value.to_owned())
+    if let Some(start) = title.rfind('(').map(|index| index + 1) {
+        if let Some(relative_end) = title[start..].find(')') {
+            let value = title[start..start + relative_end].trim();
+            if value.contains('_') && value.chars().any(|c| c.is_ascii_digit()) {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    title
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | ':')))
+        .find(|token| {
+            token.contains('.')
+                && token.chars().any(|c| c.is_ascii_alphabetic())
+                && token.chars().any(|c| c.is_ascii_digit())
+        })
+        .map(str::to_owned)
 }
 
 fn is_noise_course(title: &str) -> bool {
@@ -345,9 +492,20 @@ fn same_origin(left: &Url, right: &Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
+fn query_id(url: &Url, names: &[&str]) -> Option<String> {
+    url.query_pairs()
+        .find_map(|(key, value)| names.contains(&key.as_ref()).then(|| value.into_owned()))
+}
+
+fn looks_like_date(value: &str) -> bool {
+    let digits = value.chars().filter(|c| c.is_ascii_digit()).count();
+    digits >= 6 && (value.contains('-') || value.contains('.') || value.contains('/'))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{activities, attendance, dashboard, grades};
+    use super::{activities, attendance, board_posts, course_detail, dashboard, grades, sesskey};
+    use crate::models::Course;
     use url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
@@ -394,5 +552,39 @@ mod tests {
             attendance(attendance_html, "42".into()).unwrap().rows.len(),
             1
         );
+    }
+
+    #[test]
+    fn extracts_session_key_without_exposing_it_elsewhere() {
+        assert_eq!(
+            sesskey(r#"<script>var cfg={"sesskey":"abc123"}</script>"#).unwrap(),
+            "abc123"
+        );
+    }
+
+    #[test]
+    fn parses_courseboard_posts() {
+        let html = r#"<table><tr><td><a href="/mod/courseboard/article.php?id=8&bwid=9">Exam notice</a></td><td>2026-08-29</td></tr></table>"#;
+        let rows = board_posts(html, &Url::parse(BASE).unwrap(), Some("8".into())).unwrap();
+        assert_eq!(rows[0].id.as_deref(), Some("9"));
+        assert_eq!(rows[0].posted.as_deref(), Some("2026-08-29"));
+    }
+
+    #[test]
+    fn parses_live_shape_course_header_and_professor() {
+        let html = r#"<a class="h1 mr-auto" href="/course/view.php?id=42">Programming Language(CS.30200_2026_3)</a>
+          <div class="d-flex courseinfo"><div class="border-left py-2">Professors
+          <div><a class="dropdown-toggle text-primary">Ryu Seokyoung</a></div></div></div>"#;
+        let course = Course {
+            id: "42".into(),
+            title: "Course 42".into(),
+            code: None,
+            term: None,
+            url: format!("{BASE}/course/view.php?id=42"),
+        };
+        let detail = course_detail(html, &Url::parse(BASE).unwrap(), course).unwrap();
+        assert_eq!(detail.course.title, "Programming Language");
+        assert_eq!(detail.course.code.as_deref(), Some("CS.30200_2026_3"));
+        assert_eq!(detail.professors, ["Ryu Seokyoung"]);
     }
 }

@@ -24,6 +24,11 @@ The CLI does not introduce a provider framework, service container, plugin
 registry, or persistent database before multiple real implementations require
 one.
 
+The only provider-state cache is a mode-0600 session-key record under the
+platform cache directory. It exists so `auth time-left` can observe the server
+timer without first touching the dashboard. A stale key is safe: the command
+falls back to authenticated bootstrap and replaces it.
+
 ## Trust boundaries
 
 KLMS HTML is untrusted input. Parsers use explicit selectors, preserve source
@@ -42,7 +47,7 @@ Playwright-compatible storage-state file. A dashboard request establishes that
 the session is authenticated. Commands then fetch the narrowest required page.
 Redirects that leave the configured origin are rejected.
 
-All requests have bounded response bodies and timeouts. Future fan-out is
-bounded and deterministic. No command performs an update check or analytics
-request during startup.
-
+All requests are bounded while streaming and have configurable, capped
+timeouts. Moodle AJAX methods are fixed in a client-side allowlist; arbitrary
+POST is not exposed. Future fan-out is bounded and deterministic. No command
+performs an update check or analytics request during startup.

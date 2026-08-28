@@ -4,24 +4,43 @@
 Management System. It reads the same authenticated HTML and Moodle endpoints as
 the web interface without launching a browser for ordinary commands.
 
-The project is under active development. The initial vertical slice covers the
-dashboard, courses, weekly activities, grades, attendance, and authentication
-diagnostics.
+The project is under active development. Its agent-facing surface covers the
+authenticated session, course discovery, weekly activities, assignments,
+quizzes, calendar events, course boards, files, video metadata, grades, and
+attendance.
 
 ## Command surface
 
 ```text
 klms doctor
 klms auth status
+klms auth time-left
+klms auth extend
 klms dashboard
 klms courses list
+klms courses resolve QUERY
 klms courses show COURSE
-klms activities list --course COURSE [--week N]
+klms activities list --course COURSE [--week N] [--kind KIND] [--limit N]
+klms assignments list --course COURSE
+klms assignments show ASSIGNMENT
+klms quizzes list --course COURSE
+klms quizzes show QUIZ
+klms calendar list
+klms boards list --course COURSE
+klms boards posts BOARD
+klms boards show POST
+klms files list --course COURSE
+klms files download URL --out PATH
+klms videos list --course COURSE
+klms videos show VIDEO
 klms grades show --course COURSE
 klms attendance show --course COURSE
+klms request get PATH [--max-bytes N]
 ```
 
 Pass `--json` before the command for deterministic machine-readable output.
+See [docs/COMMAND_CONTRACT.md](docs/COMMAND_CONTRACT.md) for resolution,
+output, retry, and safety semantics.
 
 ## Authentication
 
@@ -32,8 +51,10 @@ an existing authenticated KLMS session. Resolution order is:
 2. `~/.config/klms/storage-state.json`;
 3. `~/.kaist-cli/private/klms/storage_state.json` as a migration bridge.
 
-Cookie values are never printed. Use `klms doctor` or `klms auth status` to see
-which source was selected and whether its metadata is usable.
+Cookie values and Moodle session keys are never printed. Use `klms doctor` or
+`klms auth status` to see which source was selected and whether its metadata is
+usable. `auth time-left` reads the server timer; `auth extend` is the sole
+explicit remote mutation and refreshes that timer.
 
 ## Development
 
@@ -62,9 +83,9 @@ the established `kaist` CLI.
 
 ## Scope
 
-The current product performs remote reads and explicit local downloads only.
-It does not submit assignments, begin quiz attempts, post messages, check into
-attendance, or mutate third-party tools.
+The current product performs remote reads, explicit local downloads, and
+explicit session extension only. It does not submit assignments, begin quiz
+attempts, post messages, check into attendance, or mutate third-party tools.
 
 ## License
 
