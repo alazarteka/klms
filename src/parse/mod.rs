@@ -125,14 +125,18 @@ pub fn resource_detail(
         ".page-header-headings h1, #page-header h1, h1, title",
     )?
     .unwrap_or_else(|| format!("{kind} detail"));
-    let main = selector("main, #region-main, [role=main], body")?;
-    let text_value = document.select(&main).next().map(text).unwrap_or_default();
-    let links = link_items(
-        &document,
-        base_url,
-        "main a[href], #region-main a[href], [role=main] a[href]",
-        100,
-    )?;
+    let content = ["#region-main", "[role=main]", "main", "body"]
+        .into_iter()
+        .find_map(|css| {
+            Selector::parse(css)
+                .ok()
+                .and_then(|selector| document.select(&selector).next())
+        });
+    let text_value = content.map(visible_text).unwrap_or_default();
+    let links = match content {
+        Some(root) => link_items_in(root, base_url, 100)?,
+        None => Vec::new(),
+    };
     Ok(ResourceDetail {
         id: query_id(url, &["id", "bwid"]),
         kind: kind.into(),
@@ -244,6 +248,7 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>,
 fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activity>, AppError> {
     let modules = selector("li.activity, .activity-item[data-id]")?;
     let anchors = selector(".activityinstance a[href], a.aalink[href], a[href]")?;
+    let downloads = selector("[onclick*='downloadFile']")?;
     let names = selector(".instancename, .activityname, .activity-title")?;
     let headings = selector(".sectionname, .section-title, h3")?;
     let mut seen = HashSet::new();
@@ -256,8 +261,14 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
             .or_else(|| module.value().attr("data-id"))
             .map(str::to_owned);
         let anchor = module.select(&anchors).next();
-        let href = anchor.and_then(|node| node.value().attr("href"));
-        let url = href.and_then(|value| base_url.join(value).ok());
+        let href = anchor
+            .and_then(|node| node.value().attr("href").map(str::to_owned))
+            .or_else(|| {
+                module
+                    .select(&downloads)
+                    .find_map(|node| node.value().attr("onclick").and_then(download_url))
+            });
+        let url = href.as_deref().and_then(|value| base_url.join(value).ok());
         let title = module
             .select(&names)
             .next()
@@ -397,6 +408,37 @@ fn link_items(
     Ok(rows)
 }
 
+fn link_items_in(
+    root: ElementRef<'_>,
+    base_url: &Url,
+    limit: usize,
+) -> Result<Vec<LinkItem>, AppError> {
+    let anchors = selector("a[href]")?;
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for anchor in root.select(&anchors) {
+        let title = text(anchor);
+        let Some(url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| base_url.join(href).ok())
+        else {
+            continue;
+        };
+        if title.is_empty() || !seen.insert(url.to_string()) {
+            continue;
+        }
+        rows.push(LinkItem {
+            title,
+            url: url.into(),
+        });
+        if rows.len() == limit {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
 fn first_text(document: &Html, css: &str) -> Result<Option<String>, AppError> {
     Ok(document
         .select(&selector(css)?)
@@ -426,6 +468,27 @@ fn text(element: ElementRef<'_>) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn visible_text(element: ElementRef<'_>) -> String {
+    element
+        .descendants()
+        .filter_map(|node| {
+            let value = node.value().as_text()?;
+            let hidden = node
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .any(|ancestor| {
+                    matches!(
+                        ancestor.value().name(),
+                        "script" | "style" | "noscript" | "template"
+                    )
+                });
+            (!hidden).then_some(value.as_ref())
+        })
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -502,6 +565,20 @@ fn looks_like_date(value: &str) -> bool {
     digits >= 6 && (value.contains('-') || value.contains('.') || value.contains('/'))
 }
 
+fn download_url(script: &str) -> Option<String> {
+    for marker in ["downloadFile('", "downloadFile(\""] {
+        let Some(rest) = script.split(marker).nth(1) else {
+            continue;
+        };
+        let quote = marker.chars().last()?;
+        let value = rest.split(quote).next()?.trim();
+        if value.starts_with('/') || value.starts_with("https://") {
+            return Some(value.into());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{activities, attendance, board_posts, course_detail, dashboard, grades, sesskey};
@@ -541,6 +618,18 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(!rows[0].external);
         assert!(rows[1].external);
+    }
+
+    #[test]
+    fn extracts_direct_file_url_from_klms_download_handler() {
+        let html = r#"<li class="activity modtype_resource" id="module-9">
+          <div class="aalink" onclick="M.course.format.downloadFile('https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf', 'notes.pdf')">
+          <span class="instancename">Notes File</span></div></li>"#;
+        let rows = activities(html, &Url::parse(BASE).unwrap(), None).unwrap();
+        assert_eq!(
+            rows[0].url.as_deref(),
+            Some("https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf")
+        );
     }
 
     #[test]
