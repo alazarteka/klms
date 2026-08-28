@@ -1,0 +1,9 @@
+/Cargo.toml @alazarteka
+/Cargo.lock @alazarteka
+/deny.toml @alazarteka
+/supply-chain/ @alazarteka
+/.github/workflows/ @alazarteka
+/scripts/cargo-deny.sh @alazarteka
+/scripts/cargo-vet.sh @alazarteka
+/SECURITY.md @alazarteka
+
