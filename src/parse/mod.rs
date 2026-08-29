@@ -73,6 +73,11 @@ pub fn activities(
 ) -> Result<Vec<Activity>, AppError> {
     let document = Html::parse_document(html);
     let mut rows = activities_from_document(&document, base_url)?;
+    if rows.is_empty() && !has_any(&document, &[".course-content", "#region-main"])? {
+        return Err(AppError::shape(
+            "course page contained no recognizable activity region",
+        ));
+    }
     if let Some(week) = week {
         rows.retain(|row| row.week == Some(week));
     }
@@ -190,17 +195,64 @@ pub fn board_posts(
             url: url.into(),
         });
     }
+    if posts.is_empty()
+        && !has_any(
+            &document,
+            &["#region-main", ".courseboard", "table.generaltable"],
+        )?
+    {
+        return Err(AppError::shape(
+            "board page contained no recognizable post region",
+        ));
+    }
     Ok(posts)
 }
 
 pub fn calendar(html: &str, base_url: &Url, limit: usize) -> Result<Vec<LinkItem>, AppError> {
     let document = Html::parse_document(html);
-    link_items(
+    let rows = link_items(
         &document,
         base_url,
         ".event a[href], [data-region=event-list-content] a[href], .calendarwrapper a[href]",
         limit,
-    )
+    )?;
+    if rows.is_empty()
+        && !has_any(
+            &document,
+            &[
+                ".calendarwrapper",
+                "[data-region=event-list-content]",
+                "#region-main",
+            ],
+        )?
+    {
+        return Err(AppError::shape(
+            "calendar page contained no recognizable event region",
+        ));
+    }
+    Ok(rows)
+}
+
+pub fn safe_html_preview(html: &str) -> String {
+    let document = Html::parse_document(html);
+    ["#region-main", "[role=main]", "main", "body"]
+        .into_iter()
+        .find_map(|css| {
+            Selector::parse(css)
+                .ok()
+                .and_then(|selector| document.select(&selector).next())
+        })
+        .map(visible_text)
+        .unwrap_or_default()
+}
+
+fn has_any(document: &Html, selectors: &[&str]) -> Result<bool, AppError> {
+    for css in selectors {
+        if document.select(&selector(css)?).next().is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>, AppError> {
@@ -581,7 +633,9 @@ fn download_url(script: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{activities, attendance, board_posts, course_detail, dashboard, grades, sesskey};
+    use super::{
+        activities, attendance, board_posts, calendar, course_detail, dashboard, grades, sesskey,
+    };
     use crate::models::Course;
     use url::Url;
 
@@ -675,5 +729,14 @@ mod tests {
         assert_eq!(detail.course.title, "Programming Language");
         assert_eq!(detail.course.code.as_deref(), Some("CS.30200_2026_3"));
         assert_eq!(detail.professors, ["Ryu Seokyoung"]);
+    }
+
+    #[test]
+    fn empty_domain_pages_require_a_recognizable_container() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        assert!(activities("<html><body>maintenance</body></html>", &base, None).is_err());
+        assert!(activities("<main class='course-content'></main>", &base, None).is_ok());
+        assert!(calendar("<html><body>maintenance</body></html>", &base, 10).is_err());
+        assert!(calendar("<main id='region-main'></main>", &base, 10).is_ok());
     }
 }

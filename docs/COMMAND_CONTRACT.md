@@ -4,7 +4,13 @@
 `klms RESOURCE VERB [OPERAND] [OPTIONS]`, with a few top-level jobs such as
 `dashboard` and `doctor` where another noun would add noise.
 
-## Stable surface
+## Experimental 0.x surface
+
+The human grammar is intended to evolve additively. The machine contract is
+still experimental while the typed coursework model is completed; consumers
+should check `schema_version` and the installed binary version. We will make
+schema corrections deliberately and document them rather than preserving a
+misleading field forever.
 
 ```text
 klms doctor
@@ -56,8 +62,18 @@ KLMS to refresh the current session timer. It is safe to retry and reports the
 server-authoritative remaining duration after the touch.
 
 Downloads require `--out`, create a new file atomically, and refuse to replace
-an existing path. `request get` accepts only same-origin KLMS paths or URLs,
-uses GET, enforces the normal redirect policy, and bounds the returned body.
+an existing path even when another process creates it during the download.
+`request get` is an experimental repair hatch for same-origin text responses.
+It uses GET, enforces the normal redirect policy, emits a true bounded preview,
+removes HTML markup and scripts, redacts common token assignments and query
+parameters, and rejects binary content. Prefer a typed command whenever one
+exists.
+
+`doctor` validates the live session with a dashboard GET and reports whether a
+failure is missing configuration, expired authentication, network reachability,
+or another error. Because KLMS may count authenticated page reads as activity,
+`doctor` and a cold `auth time-left` disclose that their bootstrap request may
+refresh the session timer.
 
 The CLI does not submit assignments, begin quiz attempts, post to boards,
 check into attendance, or operate third-party services.

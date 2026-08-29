@@ -28,6 +28,13 @@ pub struct ByteResponse {
     pub bytes: Vec<u8>,
 }
 
+pub struct PreviewResponse {
+    pub url: Url,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+    pub truncated: bool,
+}
+
 impl KlmsClient {
     pub fn new(
         base: &str,
@@ -77,28 +84,8 @@ impl KlmsClient {
     }
 
     pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
-        let url = self
-            .base_url
-            .join(path)
-            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
-        if origin(&url) != origin(&self.base_url) {
-            return Err(AppError::config("cross-origin request path refused"));
-        }
-        let mut request = self.http.get(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        let mut response = request
-            .send()
-            .map_err(|error| AppError::network(format!("KLMS request failed: {error}")))?;
-        let status = response.status();
+        let mut response = self.send_get(path)?;
         let final_url = response.url().clone();
-        if !status.is_success() {
-            return Err(AppError::network(format!(
-                "KLMS returned HTTP {status} for {}",
-                final_url.path()
-            )));
-        }
         if response
             .headers()
             .get(CONTENT_LENGTH)
@@ -110,36 +97,57 @@ impl KlmsClient {
                 "KLMS response exceeded the {max_bytes} byte limit"
             )));
         }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
-        response
-            .by_ref()
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut body)
-            .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-        if body.len() > max_bytes {
-            return Err(AppError::network(format!(
-                "KLMS response exceeded the {max_bytes} byte limit"
-            )));
-        }
-        if content_type
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
-        {
-            let text = String::from_utf8_lossy(&body);
-            if looks_logged_out(&final_url, &text) {
-                return Err(expired_session());
-            }
-        }
+        let content_type = content_type(&response);
+        let bytes = read_bounded(&mut response, max_bytes, false)?;
+        check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
         Ok(ByteResponse {
             url: final_url,
             content_type,
-            bytes: body,
+            bytes,
         })
+    }
+
+    pub fn get_preview(&self, path: &str, max_bytes: usize) -> Result<PreviewResponse, AppError> {
+        let mut response = self.send_get(path)?;
+        let final_url = response.url().clone();
+        let content_type = content_type(&response);
+        let bytes = read_bounded(&mut response, max_bytes, true)?;
+        let truncated = bytes.len() > max_bytes;
+        let bytes = if truncated {
+            bytes[..max_bytes].to_vec()
+        } else {
+            bytes
+        };
+        check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
+        Ok(PreviewResponse {
+            url: final_url,
+            content_type,
+            bytes,
+            truncated,
+        })
+    }
+
+    fn send_get(&self, path: &str) -> Result<reqwest::blocking::Response, AppError> {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
+        if origin(&url) != origin(&self.base_url) {
+            return Err(AppError::config("cross-origin request path refused"));
+        }
+        let mut request = self.http.get(url);
+        if !self.cookie.is_empty() {
+            request = request.header(COOKIE, self.cookie.clone());
+        }
+        let response = request
+            .send()
+            .map_err(|error| AppError::network(format!("KLMS request failed: {error}")))?;
+        let status = response.status();
+        let final_url = response.url().clone();
+        if !status.is_success() {
+            return Err(AppError::http(status.as_u16(), final_url.path()));
+        }
+        Ok(response)
     }
 
     pub fn ajax(&self, sesskey: &str, method: &'static str) -> Result<serde_json::Value, AppError> {
@@ -218,6 +226,43 @@ impl KlmsClient {
             .cloned()
             .unwrap_or(serde_json::Value::Null))
     }
+}
+
+fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+fn read_bounded(
+    response: &mut reqwest::blocking::Response,
+    max_bytes: usize,
+    allow_truncation: bool,
+) -> Result<Vec<u8>, AppError> {
+    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
+    response
+        .by_ref()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
+    if body.len() > max_bytes && !allow_truncation {
+        return Err(AppError::network(format!(
+            "KLMS response exceeded the {max_bytes} byte limit"
+        )));
+    }
+    Ok(body)
+}
+
+fn check_logged_out(url: &Url, content_type: Option<&str>, bytes: &[u8]) -> Result<(), AppError> {
+    if content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html")) {
+        let text = String::from_utf8_lossy(bytes);
+        if looks_logged_out(url, &text) {
+            return Err(expired_session());
+        }
+    }
+    Ok(())
 }
 
 fn expired_session() -> AppError {

@@ -45,7 +45,10 @@ credentials into them.
 Ordinary reads use a direct HTTPS client with cookies selected from a protected
 Playwright-compatible storage-state file. A dashboard request establishes that
 the session is authenticated. Commands then fetch the narrowest required page.
-Redirects that leave the configured origin are rejected.
+Redirects that leave the configured origin are rejected. These operations are
+content-read-only: they do not submit coursework or change course data, though
+KLMS itself may refresh its session activity timer when serving an authenticated
+page. Commands that make a diagnostic bootstrap read disclose that effect.
 
 All requests are bounded while streaming and have configurable, capped
 timeouts. Moodle AJAX methods are fixed in a client-side allowlist; arbitrary
