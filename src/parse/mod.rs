@@ -333,7 +333,13 @@ pub fn calendar(html: &str, base_url: &Url) -> Result<Vec<CalendarEvent>, AppErr
         if !seen.insert(url.to_string()) {
             continue;
         }
-        let kind = module_kind(&url).unwrap_or_else(|| "event".into());
+        let kind = event
+            .value()
+            .attr("data-event-component")
+            .and_then(|value| value.strip_prefix("mod_"))
+            .map(str::to_owned)
+            .or_else(|| module_kind(&url))
+            .unwrap_or_else(|| "event".into());
         let reference = if kind == "event" {
             query_id(&url, &["id", "event"]).map(|id| ResourceRef::Calendar(id).to_string())
         } else {
@@ -345,7 +351,15 @@ pub fn calendar(html: &str, base_url: &Url) -> Result<Vec<CalendarEvent>, AppErr
         let starts_at = time
             .and_then(|node| node.value().attr("datetime"))
             .and_then(date::normalize_datetime)
-            .or_else(|| when_text.as_deref().and_then(date::moodle_datetime));
+            .or_else(|| when_text.as_deref().and_then(date::moodle_datetime))
+            .or_else(|| {
+                event
+                    .value()
+                    .attr("data-event-timestart")
+                    .or_else(|| event.value().attr("data-timestart"))
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .and_then(date::epoch_to_seoul)
+            });
         let course_link = event.select(&course_links).next();
         let course_url = course_link
             .and_then(|link| link.value().attr("href"))
@@ -354,7 +368,10 @@ pub fn calendar(html: &str, base_url: &Url) -> Result<Vec<CalendarEvent>, AppErr
             reference,
             kind,
             title: text(anchor),
-            course_id: course_url.as_ref().and_then(|url| query_id(url, &["id"])),
+            course_id: course_url
+                .as_ref()
+                .and_then(|url| query_id(url, &["id"]))
+                .or_else(|| event.value().attr("data-course-id").map(str::to_owned)),
             course: course_link.map(text).filter(|value| !value.is_empty()),
             starts_at,
             when_text,
