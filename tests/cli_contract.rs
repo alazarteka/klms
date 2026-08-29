@@ -52,6 +52,94 @@ fn json_usage_error_is_structured_and_exits_two() {
 }
 
 #[test]
+fn empty_course_queries_fail_before_authentication() {
+    for args in [
+        ["--json", "courses", "resolve", ""],
+        ["--json", "courses", "show", "   "],
+    ] {
+        let home = TempDir::new().unwrap();
+        let output = binary()
+            .env("HOME", home.path())
+            .env_remove("KLMS_STORAGE_STATE")
+            .env_remove("XDG_CONFIG_HOME")
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(value["error"]["code"], "USAGE");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("must not be empty")
+        );
+    }
+}
+
+#[test]
+fn doctor_fails_with_diagnostics_and_recovery_when_auth_is_missing() {
+    let home = TempDir::new().unwrap();
+    let output = binary()
+        .env("HOME", home.path())
+        .env_remove("KLMS_STORAGE_STATE")
+        .env_remove("XDG_CONFIG_HOME")
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(10));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "AUTH_REQUIRED");
+    assert_eq!(
+        value["error"]["details"]["session_status"],
+        "not_configured"
+    );
+    let hint = value["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains("kaist klms auth refresh"));
+    assert!(hint.contains("auth extend"));
+}
+
+#[test]
+fn doctor_fails_when_server_rejects_the_saved_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let length = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /my/ HTTP/1.1"));
+        let body = r#"<html><form><input name="username"><input name="password"></form></html>"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(10));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "AUTH_REQUIRED");
+    assert_eq!(value["error"]["details"]["session_status"], "expired");
+    assert_eq!(
+        value["error"]["details"]["session_error"]["code"],
+        "AUTH_REQUIRED"
+    );
+}
+
+#[test]
 fn loopback_dashboard_exercises_cookie_transport_and_parser() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -517,6 +605,54 @@ fn typed_show_rejects_a_mismatched_final_resource() {
     assert!(!output.status.success());
     let value: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(value["error"]["code"], "UPSTREAM_SHAPE_CHANGED");
+}
+
+#[test]
+fn board_post_identity_is_consistent_across_list_and_detail() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if index == 0 {
+                assert!(request.starts_with("GET /mod/courseboard/view.php?id=10 HTTP/1.1"));
+                "<table class='board-list'><tr><td><a href='/mod/courseboard/article.php?id=10&bwid=11'>Notice</a></td></tr></table>"
+            } else {
+                assert!(
+                    request.starts_with("GET /mod/courseboard/article.php?id=10&bwid=11 HTTP/1.1")
+                );
+                "<main><h1>Notice</h1><p>Details</p></main>"
+            };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    let mut records = Vec::new();
+    for args in [
+        vec!["boards", "posts", "board:10"],
+        vec!["boards", "show", "board-post:10:11"],
+        vec!["notices", "show", "board-post:10:11"],
+    ] {
+        let output = binary()
+            .env("KLMS_STORAGE_STATE", &state_path)
+            .args(["--json", "--base-url", &format!("http://{address}")])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        records.push(serde_json::from_slice::<Value>(&output.stdout).unwrap());
+    }
+    server.join().unwrap();
+    let listed = &records[0]["data"][0];
+    for detail in [&records[1]["data"], &records[2]["data"]] {
+        assert_eq!(detail["id"], listed["id"]);
+        assert_eq!(detail["board_id"], listed["board_id"]);
+        assert_eq!(detail["ref"], listed["ref"]);
+    }
 }
 
 #[test]

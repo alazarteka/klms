@@ -16,6 +16,11 @@ Errors use:
 {"schema_version":"2","ok":false,"error":{"code":"AUTH_REQUIRED","message":"...","hint":"...","retryable":false}}
 ```
 
+Errors may include a `details` object when structured diagnostics help recovery.
+In particular, an unhealthy `doctor` result is an error with a nonzero exit
+status and retains the diagnostic model under `error.details`; a healthy
+`doctor` result remains a normal success document.
+
 Collection commands include envelope-level `meta`. `returned` is the number of
 records in `data`; `limit` is the requested bound; `complete` says whether the
 result contains every record known from the fetched KLMS page; `total` is null
@@ -28,6 +33,8 @@ Resource records use the field `ref` for a canonical, round-trippable reference
 such as `course:180871`, `assign:1210516`, `quiz:1210482`,
 `board-post:1189554:439261`, or `file:1205160`. URLs remain available as source
 evidence, but agents should pass `ref` to follow-up commands.
+Board-post detail records use the post component as `id` and expose the
+containing board separately as `board_id`, matching board-post list records.
 
 `files.download` streams into a protected temporary file, atomically publishes
 it without replacement, and returns an absolute path, byte count, final

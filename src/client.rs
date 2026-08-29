@@ -346,10 +346,7 @@ fn check_logged_out(url: &Url, content_type: Option<&str>, bytes: &[u8]) -> Resu
 }
 
 fn expired_session() -> AppError {
-    AppError::auth(
-        "the saved KLMS session is missing or expired",
-        "Refresh the storage-state session, or set KLMS_STORAGE_STATE to a fresh Playwright storage-state file.",
-    )
+    AppError::auth_required("the saved KLMS session is missing or expired")
 }
 
 pub fn validate_base_url(value: &str) -> Result<Url, AppError> {

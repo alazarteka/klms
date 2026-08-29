@@ -69,6 +69,6 @@ path and refuse overwrites.
 
 Authentication comes from a Playwright storage-state file. Inspect it without
 printing secrets using `klms --json auth status`. If the result is
-`AUTH_REQUIRED`, use the separate `kaist` CLI's established auth refresh flow;
-`klms` does not own interactive login yet. Never display cookie values or ask
-the user to paste a password into chat.
+`AUTH_REQUIRED`, run `kaist klms auth refresh`; `klms auth extend` cannot log in
+or revive an expired session. `klms` does not own interactive login yet. Never
+display cookie values or ask the user to paste a password into chat.

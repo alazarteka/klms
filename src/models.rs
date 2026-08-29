@@ -130,6 +130,8 @@ pub struct Report {
 #[derive(Debug, Serialize)]
 pub struct ResourceDetail {
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<String>,
     #[serde(rename = "ref")]
     pub reference: Option<String>,
     pub kind: String,

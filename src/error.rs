@@ -1,6 +1,9 @@
 use std::fmt;
 
 use serde::Serialize;
+use serde_json::Value;
+
+pub const AUTH_RECOVERY_HINT: &str = "Run `kaist klms auth refresh` to sign in again, then retry. `klms auth extend` only extends a session that is still valid; it does not log in. Alternatively, set KLMS_STORAGE_STATE to a fresh Playwright storage-state file.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError {
@@ -8,6 +11,8 @@ pub struct AppError {
     pub message: String,
     pub hint: Option<String>,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
     #[serde(skip)]
     exit_code: u8,
 }
@@ -21,16 +26,17 @@ impl AppError {
         Self::new("AUTH_REQUIRED", message, Some(hint.into()), false, 10)
     }
 
+    pub fn auth_required(message: impl Into<String>) -> Self {
+        Self::auth(message, AUTH_RECOVERY_HINT)
+    }
+
     pub fn network(message: impl Into<String>) -> Self {
         Self::new("NETWORK_ERROR", message, None, true, 20)
     }
 
     pub fn http(status: u16, path: &str) -> Self {
         match status {
-            401 => Self::auth(
-                format!("KLMS rejected authentication for {path}"),
-                "Refresh the storage-state session and retry.",
-            ),
+            401 => Self::auth_required(format!("KLMS rejected authentication for {path}")),
             403 => Self::new(
                 "PERMISSION_DENIED",
                 format!("KLMS denied access to {path}"),
@@ -97,8 +103,14 @@ impl AppError {
             message: message.into(),
             hint,
             retryable,
+            details: None,
             exit_code,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn exit_code(&self) -> u8 {

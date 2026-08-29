@@ -88,7 +88,10 @@ typed command whenever one exists.
 
 `doctor` validates the live session with a dashboard GET and reports whether a
 failure is missing configuration, expired authentication, network reachability,
-or another error. Because KLMS may count authenticated page reads as activity,
+or another error. An unusable session is a nonzero command failure; JSON keeps
+the diagnostic model in `error.details`. Authentication errors point to
+`kaist klms auth refresh` and distinguish login recovery from `auth extend`,
+which cannot revive an expired session. Because KLMS may count authenticated page reads as activity,
 `doctor` and a cold `auth time-left` disclose that their bootstrap request may
 refresh the session timer.
 

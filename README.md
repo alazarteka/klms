@@ -64,6 +64,8 @@ Cookie values and Moodle session keys are never printed. Use `klms doctor` or
 `klms auth status` to see which source was selected and whether its metadata is
 usable. `auth time-left` reads the server timer; `auth extend` is the sole
 explicit remote mutation and refreshes that timer.
+If KLMS rejects the saved session, run `kaist klms auth refresh`; `auth extend`
+only extends an already-valid session and does not log in.
 
 ## Development
 

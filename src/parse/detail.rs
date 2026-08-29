@@ -56,17 +56,26 @@ pub fn resource_detail(
     };
     let links_truncated = links.len() > 100;
     links.truncate(100);
-    let id = query_id(url, &["id", "bwid"]);
-    let reference = if kind == "courseboard-post" {
-        query_id(url, &["id"])
-            .zip(query_id(url, &["bwid"]))
-            .map(|(board, post)| ResourceRef::BoardPost { board, post }.to_string())
+    let (id, board_id, reference) = if kind == "courseboard-post" {
+        let board = query_id(url, &["id"]);
+        let post = query_id(url, &["bwid"]);
+        let reference = board.as_ref().zip(post.as_ref()).map(|(board, post)| {
+            ResourceRef::BoardPost {
+                board: board.clone(),
+                post: post.clone(),
+            }
+            .to_string()
+        });
+        (post, board, reference)
     } else {
-        ResourceRef::from_activity(kind, id.as_deref(), Some(url.as_str()))
-            .map(|reference| reference.to_string())
+        let id = query_id(url, &["id", "bwid"]);
+        let reference = ResourceRef::from_activity(kind, id.as_deref(), Some(url.as_str()))
+            .map(|reference| reference.to_string());
+        (id, None, reference)
     };
     Ok(ResourceDetail {
         id,
+        board_id,
         reference,
         kind: kind.into(),
         title,
@@ -146,5 +155,18 @@ mod tests {
         assert!(!detail.text.contains("login_hint"));
         assert!(detail.text.contains("Course tool"));
         assert!(detail.text.contains("Ready"));
+    }
+
+    #[test]
+    fn board_post_detail_uses_post_id_and_preserves_board_id() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        let url = base
+            .join("/mod/courseboard/article.php?id=10&bwid=11")
+            .unwrap();
+        let detail =
+            resource_detail("<main>Notice</main>", &base, &url, "courseboard-post").unwrap();
+        assert_eq!(detail.id.as_deref(), Some("11"));
+        assert_eq!(detail.board_id.as_deref(), Some("10"));
+        assert_eq!(detail.reference.as_deref(), Some("board-post:10:11"));
     }
 }

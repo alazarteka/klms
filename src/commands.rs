@@ -28,12 +28,10 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
         }
         Command::Doctor => doctor(&base_url, session, cli.timeout),
         command => {
-            let cookie = session.cookie_header.as_deref().ok_or_else(|| {
-                AppError::auth(
-                    "no usable KLMS session was found",
-                    "Set KLMS_STORAGE_STATE or refresh an existing KLMS storage-state session.",
-                )
-            })?;
+            let cookie = session
+                .cookie_header
+                .as_deref()
+                .ok_or_else(|| AppError::auth_required("no usable KLMS session was found"))?;
             let client = KlmsClient::new(base_url.as_str(), Some(cookie), cli.timeout)?;
             live(command, &client, &base_url)
         }
@@ -63,16 +61,9 @@ struct Doctor {
     base_url: String,
     auth: auth::AuthStatus,
     session_status: &'static str,
-    session_error: Option<DoctorError>,
+    session_error: Option<AppError>,
     dashboard_url: Option<String>,
     check_may_have_extended_session: bool,
-}
-
-#[derive(Serialize)]
-struct DoctorError {
-    code: &'static str,
-    message: String,
-    retryable: bool,
 }
 
 fn doctor(
@@ -84,6 +75,7 @@ fn doctor(
     let mut session_error = None;
     let mut dashboard_url = None;
     let mut check_may_have_extended_session = false;
+    let mut failure = None;
     if let Some(cookie) = session.cookie_header.as_deref() {
         check_may_have_extended_session = true;
         match KlmsClient::new(base_url.as_str(), Some(cookie), timeout)
@@ -100,13 +92,14 @@ fn doctor(
                     "NETWORK_ERROR" => "unreachable",
                     _ => "error",
                 };
-                session_error = Some(DoctorError {
-                    code: error.code,
-                    message: error.message,
-                    retryable: error.retryable,
-                });
+                session_error = Some(error.clone());
+                failure = Some(error);
             }
         }
+    } else {
+        let error = AppError::auth_required("no usable KLMS session was found");
+        session_error = Some(error.clone());
+        failure = Some(error);
     }
     let model = Doctor {
         version: env!("CARGO_PKG_VERSION"),
@@ -117,6 +110,14 @@ fn doctor(
         dashboard_url,
         check_may_have_extended_session,
     };
+    if let Some(error) = failure {
+        let details = serde_json::to_value(&model).map_err(|encode_error| {
+            AppError::internal(format!(
+                "failed to encode doctor diagnostics: {encode_error}"
+            ))
+        })?;
+        return Err(error.with_details(details));
+    }
     let mut human = format!(
         "klms {}\nOrigin: {}\nStorage state: {}\nSession: {}",
         model.version,

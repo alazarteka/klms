@@ -142,6 +142,7 @@ pub enum CoursesCommand {
         after_help = "Examples:\n  klms courses resolve CS.30200\n  klms --json courses resolve 'machine learning' --limit 5"
     )]
     Resolve {
+        #[arg(value_parser = nonempty_operand)]
         query: String,
         #[command(flatten)]
         list: ListArgs,
@@ -150,7 +151,10 @@ pub enum CoursesCommand {
     #[command(
         after_help = "Examples:\n  klms courses show 189705\n  klms --json courses show CS.30200"
     )]
-    Show { course: String },
+    Show {
+        #[arg(value_parser = nonempty_operand)]
+        course: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -330,6 +334,14 @@ pub enum RequestCommand {
 
 fn parse_list_limit(value: &str) -> Result<usize, String> {
     parse_bounded(value, 1, 1_000, "limit")
+}
+
+fn nonempty_operand(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("course query must not be empty".into())
+    } else {
+        Ok(value.to_owned())
+    }
 }
 
 fn parse_preview_limit(value: &str) -> Result<usize, String> {
