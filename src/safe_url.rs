@@ -18,6 +18,7 @@ pub fn display(url: &Url) -> String {
     }
     let _ = safe.set_username("");
     let _ = safe.set_password(None);
+    safe.set_fragment(None);
     safe.into()
 }
 
@@ -45,13 +46,14 @@ mod tests {
     #[test]
     fn strips_userinfo_and_sensitive_query_values() {
         let url = Url::parse(
-            "https://user:pass@klms.kaist.ac.kr/view.php?id=7&sesskey=secret&forcedownload=1",
+            "https://user:pass@klms.kaist.ac.kr/view.php?id=7&sesskey=secret&forcedownload=1#access_token=fragment-secret",
         )
         .unwrap();
         let safe = display(&url);
         assert!(!safe.contains("user"));
         assert!(!safe.contains("pass"));
         assert!(!safe.contains("secret"));
+        assert!(!safe.contains('#'));
         assert!(safe.contains("id=7"));
         assert!(safe.contains("forcedownload=1"));
     }

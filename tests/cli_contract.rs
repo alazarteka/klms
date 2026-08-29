@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
+    path::PathBuf,
     process::Command,
     thread,
 };
@@ -11,6 +12,12 @@ use tempfile::TempDir;
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_klms"))
+}
+
+fn storage_state(directory: &TempDir) -> PathBuf {
+    let path = directory.path().join("state.json");
+    fs::write(&path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    path
 }
 
 #[test]
@@ -71,12 +78,7 @@ fn loopback_dashboard_exercises_cookie_transport_and_parser() {
     });
 
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(
-        &state_path,
-        r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#,
-    )
-    .unwrap();
+    let state_path = storage_state(&state_dir);
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
         .args([
@@ -118,8 +120,7 @@ fn course_list_reports_canonical_refs_and_truncation() {
         .unwrap();
     });
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let state_path = storage_state(&state_dir);
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
         .args([
@@ -162,8 +163,7 @@ fn raw_get_is_a_truncated_secret_free_preview() {
         .unwrap();
     });
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let state_path = storage_state(&state_dir);
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
         .args([
@@ -212,8 +212,7 @@ fn transport_errors_do_not_echo_secret_bearing_redirect_urls() {
         .unwrap();
     });
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let state_path = storage_state(&state_dir);
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
         .args([
@@ -251,9 +250,8 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
         .unwrap();
     });
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
+    let state_path = storage_state(&state_dir);
     let out = state_dir.path().join("notes.pdf");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
     let source = format!("http://{address}/pluginfile.php/7/notes.pdf?token=downloadsecret");
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
@@ -329,8 +327,7 @@ fn auth_extend_uses_allowlisted_ajax_and_reports_remaining_time() {
     });
 
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let state_path = storage_state(&state_dir);
     let output = binary()
         .env("KLMS_STORAGE_STATE", &state_path)
         .args([
@@ -370,8 +367,7 @@ fn auth_time_left_uses_cached_sesskey_without_dashboard_touch() {
     });
 
     let state_dir = TempDir::new().unwrap();
-    let state_path = state_dir.path().join("state.json");
-    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let state_path = storage_state(&state_dir);
     let cache_dir = state_dir.path().join("cache/klms");
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(
@@ -403,6 +399,124 @@ fn auth_time_left_uses_cached_sesskey_without_dashboard_touch() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["data"]["remaining_seconds"], 7211);
     assert_eq!(value["data"]["bootstrap_may_have_extended_session"], false);
+}
+
+#[test]
+fn explicit_empty_coursework_is_a_complete_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = match index {
+                0 => {
+                    assert!(request.starts_with("GET /mod/assign/index.php?id=42 HTTP/1.1"));
+                    "<main>There are no assignments in this course.</main>"
+                }
+                _ => {
+                    assert!(request.starts_with("GET /mod/quiz/index.php?id=42 HTTP/1.1"));
+                    "<main>No quizzes found.</main>"
+                }
+            };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    for resource in ["assignments", "quizzes"] {
+        let output = binary()
+            .env("KLMS_STORAGE_STATE", &state_path)
+            .args([
+                "--json",
+                "--base-url",
+                &format!("http://{address}"),
+                resource,
+                "list",
+                "--course",
+                "42",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"], serde_json::json!([]));
+        assert_eq!(value["meta"]["complete"], true);
+        assert_eq!(value["meta"]["total"], 0);
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn schedule_views_accept_an_explicit_empty_calendar() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..length])
+                    .starts_with("GET /calendar/view.php?view=upcoming HTTP/1.1")
+            );
+            let body = "<main class='calendarwrapper'>There are no upcoming events</main>";
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    for command in ["today", "upcoming"] {
+        let output = binary()
+            .env("KLMS_STORAGE_STATE", &state_path)
+            .args([
+                "--json",
+                "--base-url",
+                &format!("http://{address}"),
+                command,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"], serde_json::json!([]));
+        assert_eq!(value["meta"]["complete"], true);
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn typed_show_rejects_a_mismatched_final_resource() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let length = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /my/ HTTP/1.1"));
+        let body = "<main>Dashboard</main>";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "assignments",
+            "show",
+            "/my/",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "UPSTREAM_SHAPE_CHANGED");
 }
 
 #[test]

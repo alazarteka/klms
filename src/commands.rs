@@ -205,7 +205,7 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                 output::collection(
                     "courses.list",
                     &courses,
-                    render_courses(&courses),
+                    render_courses(&courses, available),
                     courses.len(),
                     list.limit,
                     available,
@@ -219,7 +219,7 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                 output::collection(
                     "courses.resolve",
                     &matches,
-                    render_courses(&matches),
+                    render_courses(&matches, available),
                     matches.len(),
                     list.limit,
                     available,
@@ -528,11 +528,14 @@ fn resolve_course(client: &KlmsClient, base_url: &Url, query: &str) -> Result<Co
     }
 }
 
-fn render_courses(courses: &[Course]) -> String {
+fn render_courses(courses: &[Course], available: usize) -> String {
     if courses.is_empty() {
         return "No courses found.".into();
     }
-    let mut output = format!("Courses — showing {}\nREF\tCODE\tTITLE", courses.len());
+    let mut output = format!(
+        "Courses — showing {} of {available}\nREF\tCODE\tTITLE",
+        courses.len()
+    );
     for course in courses {
         output.push_str(&format!(
             "\n{}\t{}\t{}",

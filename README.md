@@ -1,6 +1,6 @@
 # klms
 
-`klms` is a fast, read-only command-line client for KAIST's Learning
+`klms` is a fast, read-oriented command-line client for KAIST's Learning
 Management System. It reads the same authenticated HTML and Moodle endpoints as
 the web interface without launching a browser for ordinary commands.
 
