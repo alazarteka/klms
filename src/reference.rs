@@ -9,7 +9,6 @@ pub enum ResourceRef {
     Course(String),
     Assignment(String),
     Quiz(String),
-    Calendar(String),
     Board(String),
     BoardPost { board: String, post: String },
     File(String),
@@ -24,7 +23,6 @@ impl ResourceRef {
             ["course", id] if valid_id(id) => Ok(Self::Course((*id).into())),
             ["assign", id] if valid_id(id) => Ok(Self::Assignment((*id).into())),
             ["quiz", id] if valid_id(id) => Ok(Self::Quiz((*id).into())),
-            ["event", id] if valid_id(id) => Ok(Self::Calendar((*id).into())),
             ["board", id] if valid_id(id) => Ok(Self::Board((*id).into())),
             ["board-post", board, post] if valid_id(board) && valid_id(post) => {
                 Ok(Self::BoardPost {
@@ -61,12 +59,30 @@ impl ResourceRef {
         }
     }
 
+    pub fn from_url(url: &Url) -> Option<Self> {
+        let parts: Vec<_> = url.path_segments()?.collect();
+        let kind = parts
+            .windows(2)
+            .find_map(|pair| (pair[0] == "mod").then_some(pair[1]))?;
+        Self::from_activity(kind, None, Some(url.as_str()))
+    }
+
+    pub fn activity_kind(&self) -> Option<&str> {
+        match self {
+            Self::Assignment(_) => Some("assign"),
+            Self::Quiz(_) => Some("quiz"),
+            Self::Board(_) => Some("courseboard"),
+            Self::File(_) => Some("resource"),
+            Self::Video { kind, .. } => Some(kind),
+            Self::Course(_) | Self::BoardPost { .. } => None,
+        }
+    }
+
     pub fn path(&self) -> String {
         match self {
             Self::Course(id) => format!("/course/view.php?id={id}"),
             Self::Assignment(id) => format!("/mod/assign/view.php?id={id}"),
             Self::Quiz(id) => format!("/mod/quiz/view.php?id={id}"),
-            Self::Calendar(id) => format!("/calendar/view.php?view=event&event={id}"),
             Self::Board(id) => format!("/mod/courseboard/view.php?id={id}"),
             Self::BoardPost { board, post } => {
                 format!("/mod/courseboard/article.php?id={board}&bwid={post}")
@@ -85,7 +101,7 @@ impl ResourceRef {
                 .iter()
                 .any(|kind| matches!(*kind, "resource" | "coursefile")),
             Self::Video { kind, .. } => kinds.iter().any(|expected| kind == expected),
-            Self::Course(_) | Self::Calendar(_) | Self::BoardPost { .. } => false,
+            Self::Course(_) | Self::BoardPost { .. } => false,
         }
     }
 }
@@ -96,7 +112,6 @@ impl fmt::Display for ResourceRef {
             Self::Course(id) => write!(formatter, "course:{id}"),
             Self::Assignment(id) => write!(formatter, "assign:{id}"),
             Self::Quiz(id) => write!(formatter, "quiz:{id}"),
-            Self::Calendar(id) => write!(formatter, "event:{id}"),
             Self::Board(id) => write!(formatter, "board:{id}"),
             Self::BoardPost { board, post } => write!(formatter, "board-post:{board}:{post}"),
             Self::File(id) => write!(formatter, "file:{id}"),

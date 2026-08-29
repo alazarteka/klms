@@ -14,8 +14,8 @@ selectors.
 | Attendance | `/local/lmsattendance/index.php?id=COURSE` |
 | Calendar | `/calendar/view.php?view=upcoming` |
 | Board posts/details | `/mod/courseboard/view.php?id=CM`, `/mod/courseboard/article.php?...` |
-| Files | course structure, `/mod/resource/index.php?id=COURSE`, `pluginfile.php` |
-| VOD | course structure, `/mod/vod/index.php?id=COURSE`, `/mod/vod/view.php?id=CM` |
+| Files | links discovered from course structure, `pluginfile.php` |
+| VOD | links discovered from course structure, `/mod/vod/view.php?id=CM` |
 | Session duration | Moodle AJAX methods `core_session_time_remaining`, `core_session_touch` |
 
 Moodle AJAX calls use `/lib/ajax/service.php`, the authenticated page's

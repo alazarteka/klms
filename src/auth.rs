@@ -150,7 +150,7 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
         has_expired |= expired;
         let domain = cookie.domain.trim_start_matches('.');
         let domain_matches = host == domain || host.ends_with(&format!(".{domain}"));
-        let path_matches = cookie.path.is_empty() || "/my/".starts_with(&cookie.path);
+        let path_matches = cookie_path_is_origin_wide(&cookie.path);
         let secure_matches = !cookie.secure || base_url.scheme() == "https";
         if !expired
             && domain_matches
@@ -201,6 +201,10 @@ fn valid_cookie_name(name: &str) -> bool {
             .all(|byte| byte > 0x20 && byte < 0x7f && !b"()<>@,;:\\\"/[]?={} \t".contains(&byte))
 }
 
+fn cookie_path_is_origin_wide(path: &str) -> bool {
+    path.is_empty() || path == "/"
+}
+
 fn session_cache_path() -> Option<PathBuf> {
     env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -236,7 +240,7 @@ fn set_private_dir(_path: &std::path::Path) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_cookie_name, valid_sesskey};
+    use super::{cookie_path_is_origin_wide, valid_cookie_name, valid_sesskey};
 
     #[test]
     fn rejects_cookie_header_injection() {
@@ -250,5 +254,12 @@ mod tests {
         assert!(valid_sesskey("abc123"));
         assert!(!valid_sesskey("bad&key"));
         assert!(!valid_sesskey(""));
+    }
+
+    #[test]
+    fn does_not_widen_browser_cookie_paths() {
+        assert!(cookie_path_is_origin_wide("/"));
+        assert!(!cookie_path_is_origin_wide("/my/"));
+        assert!(!cookie_path_is_origin_wide("/course"));
     }
 }

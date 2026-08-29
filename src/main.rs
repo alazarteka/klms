@@ -9,6 +9,7 @@ mod output;
 mod parse;
 mod present;
 mod reference;
+mod safe_url;
 
 use std::process::ExitCode;
 

@@ -31,11 +31,11 @@ klms quizzes show QUIZ
 klms calendar list [--limit N]
 klms boards list --course COURSE [--limit N]
 klms boards posts BOARD [--limit N]
-klms boards show POST
+klms boards show BOARD_POST_REF
 klms notices list --course COURSE [--limit N]
 klms notices show NOTICE
 klms files list --course COURSE [--limit N]
-klms files download URL --out PATH
+klms files download FILE_REF_OR_URL --out PATH
 klms videos list --course COURSE [--limit N]
 klms videos show VIDEO
 klms grades show --course COURSE
@@ -78,11 +78,13 @@ server-authoritative remaining duration after the touch.
 
 Downloads require `--out`, create a new file atomically, and refuse to replace
 an existing path even when another process creates it during the download.
-`request get` is an experimental repair hatch for same-origin text responses.
-It uses GET, enforces the normal redirect policy, emits a true bounded preview,
-removes HTML markup and scripts, redacts common token assignments and query
-parameters, and rejects binary content. Prefer a typed command whenever one
-exists.
+`request get` is an experimental repair hatch for known same-origin HTML and
+JSON read routes. It uses GET, rejects action-like paths and secret-bearing
+queries, enforces the normal redirect policy, and emits a bounded preview.
+HTML is reduced to visible text and common token assignments are redacted.
+Complete JSON is structurally redacted; incomplete bounded JSON is omitted
+rather than risking disclosure. Other content types are rejected. Prefer a
+typed command whenever one exists.
 
 `doctor` validates the live session with a dashboard GET and reports whether a
 failure is missing configuration, expired authentication, network reachability,

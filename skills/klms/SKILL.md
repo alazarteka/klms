@@ -36,7 +36,9 @@ the process exit status, `warnings`, and collection `meta`. If `complete` is
 false, do not claim the list is exhaustive. JSON schema details live in the
 repository's `docs/JSON.md`.
 
-For “what needs attention?”, start with `today`, then `upcoming --through 7d`.
+For scheduled deadlines and calendar events, start with `today`, then
+`upcoming --through 7d`. These commands do not claim to include unscheduled
+notices, unread board posts, or work that KLMS omits from its calendar.
 Use typed lists for exact course records:
 
 ```bash

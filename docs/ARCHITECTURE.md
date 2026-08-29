@@ -20,7 +20,7 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `reference`: canonical resource-reference parsing and endpoint mapping.
 - `date`: narrow KLMS date normalization and Korea-time window arithmetic.
 - `present`: scannable human representations of typed records.
-- `output`: stable JSON envelopes, human rendering, terminal sanitization, and
+- `output`: versioned JSON envelopes, human rendering, terminal sanitization, and
   exit categories.
 
 The CLI does not introduce a provider framework, service container, plugin

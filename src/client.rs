@@ -58,6 +58,9 @@ impl KlmsClient {
             if origin(attempt.url()) != expected_origin {
                 return attempt.error("cross-origin redirect refused");
             }
+            if !attempt.url().username().is_empty() || attempt.url().password().is_some() {
+                return attempt.error("URL userinfo refused");
+            }
             attempt.follow()
         });
         let http = Client::builder()
@@ -101,7 +104,7 @@ impl KlmsClient {
             .and_then(|value| value.parse::<usize>().ok())
             .is_some_and(|length| length > max_bytes)
         {
-            return Err(AppError::network(format!(
+            return Err(AppError::limit(format!(
                 "KLMS response exceeded the {max_bytes} byte limit"
             )));
         }
@@ -149,14 +152,11 @@ impl KlmsClient {
             .and_then(|value| value.parse::<usize>().ok())
             .is_some_and(|length| length > max_bytes)
         {
-            return Err(AppError::network(format!(
+            return Err(AppError::limit(format!(
                 "KLMS download exceeded the {max_bytes} byte limit"
             )));
         }
         let content_type = content_type(&response);
-        let html = content_type
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"));
         let mut sample = Vec::new();
         let mut buffer = [0_u8; 64 * 1024];
         let mut total = 0_usize;
@@ -171,11 +171,11 @@ impl KlmsClient {
                 .checked_add(read)
                 .ok_or_else(|| AppError::network("download size overflow"))?;
             if total > max_bytes {
-                return Err(AppError::network(format!(
+                return Err(AppError::limit(format!(
                     "KLMS download exceeded the {max_bytes} byte limit"
                 )));
             }
-            if html && sample.len() < 64 * 1024 {
+            if sample.len() < 64 * 1024 {
                 let keep = read.min(64 * 1024 - sample.len());
                 sample.extend_from_slice(&buffer[..keep]);
             }
@@ -183,9 +183,7 @@ impl KlmsClient {
                 .write_all(&buffer[..read])
                 .map_err(|error| AppError::config(format!("failed to write download: {error}")))?;
         }
-        if html {
-            check_logged_out(&final_url, content_type.as_deref(), &sample)?;
-        }
+        check_logged_out(&final_url, content_type.as_deref(), &sample)?;
         Ok(DownloadResponse {
             url: final_url,
             content_type,
@@ -201,13 +199,16 @@ impl KlmsClient {
         if origin(&url) != origin(&self.base_url) {
             return Err(AppError::config("cross-origin request path refused"));
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::config("request URL must not contain userinfo"));
+        }
         let mut request = self.http.get(url);
         if !self.cookie.is_empty() {
             request = request.header(COOKIE, self.cookie.clone());
         }
-        let response = request
-            .send()
-            .map_err(|error| AppError::network(format!("KLMS request failed: {error}")))?;
+        let response = request.send().map_err(|error| {
+            AppError::network(format!("KLMS request failed: {}", error.without_url()))
+        })?;
         let status = response.status();
         let final_url = response.url().clone();
         if !status.is_success() {
@@ -242,12 +243,14 @@ impl KlmsClient {
             .header(CONTENT_TYPE, "application/json")
             .body(body)
             .send()
-            .map_err(|error| AppError::network(format!("KLMS AJAX request failed: {error}")))?;
+            .map_err(|error| {
+                AppError::network(format!("KLMS AJAX request failed: {}", error.without_url()))
+            })?;
         if !response.status().is_success() {
-            return Err(AppError::network(format!(
-                "KLMS AJAX returned HTTP {}",
-                response.status()
-            )));
+            return Err(AppError::http(
+                response.status().as_u16(),
+                "/lib/ajax/service.php",
+            ));
         }
         if response
             .headers()
@@ -256,7 +259,7 @@ impl KlmsClient {
             .and_then(|value| value.parse::<usize>().ok())
             .is_some_and(|length| length > MAX_BODY_BYTES)
         {
-            return Err(AppError::network(
+            return Err(AppError::limit(
                 "KLMS AJAX response exceeded the 8 MiB limit",
             ));
         }
@@ -269,7 +272,7 @@ impl KlmsClient {
                 AppError::network(format!("failed to read KLMS AJAX response: {error}"))
             })?;
         if response_body.len() > MAX_BODY_BYTES {
-            return Err(AppError::network(
+            return Err(AppError::limit(
                 "KLMS AJAX response exceeded the 8 MiB limit",
             ));
         }
@@ -285,7 +288,11 @@ impl KlmsClient {
                 .or_else(|| first.get("message"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("KLMS AJAX returned an error");
-            return Err(AppError::network(message));
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("session") || lower.contains("sesskey") || lower.contains("login") {
+                return Err(expired_session());
+            }
+            return Err(AppError::upstream(message));
         }
         Ok(first
             .get("data")
@@ -314,7 +321,7 @@ fn read_bounded(
         .read_to_end(&mut body)
         .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
     if body.len() > max_bytes && !allow_truncation {
-        return Err(AppError::network(format!(
+        return Err(AppError::limit(format!(
             "KLMS response exceeded the {max_bytes} byte limit"
         )));
     }
@@ -322,7 +329,14 @@ fn read_bounded(
 }
 
 fn check_logged_out(url: &Url, content_type: Option<&str>, bytes: &[u8]) -> Result<(), AppError> {
-    if content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html")) {
+    if url.path().to_ascii_lowercase().contains("/login/") {
+        return Err(expired_session());
+    }
+    let leading = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
+    let looks_html = content_type.is_some_and(|value| value.to_ascii_lowercase().contains("html"))
+        || leading.contains("<!doctype html")
+        || leading.contains("<html");
+    if looks_html {
         let text = String::from_utf8_lossy(bytes);
         if looks_logged_out(url, &text) {
             return Err(expired_session());

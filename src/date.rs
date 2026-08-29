@@ -39,16 +39,70 @@ pub fn moodle_datetime(value: &str) -> Option<String> {
 
 pub fn normalize_datetime(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.len() >= 10
-        && value.as_bytes().get(4) == Some(&b'-')
-        && value.as_bytes().get(7) == Some(&b'-')
-    {
-        if value.contains('T') {
-            return Some(value.to_owned());
+    if value.contains('T') {
+        return iso_datetime_to_seoul(value);
+    }
+    if value.len() >= 10 {
+        let (year, month, day) = parse_date(value)?;
+        if month > 12 || day == 0 || day > days_in_month(year, month) {
+            return None;
         }
-        return Some(format!("{}T00:00:00{SEOUL_OFFSET}", &value[..10]));
+        return Some(format!(
+            "{year:04}-{month:02}-{day:02}T00:00:00{SEOUL_OFFSET}"
+        ));
     }
     moodle_datetime(value)
+}
+
+fn iso_datetime_to_seoul(value: &str) -> Option<String> {
+    let (date, time_and_zone) = value.split_once('T')?;
+    let (year, month, day) = parse_date(date)?;
+    if month > 12 || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let (clock, offset_seconds) = if let Some(clock) = time_and_zone.strip_suffix('Z') {
+        (clock, 0)
+    } else if let Some(index) = time_and_zone
+        .char_indices()
+        .skip(1)
+        .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))
+    {
+        let (clock, offset) = time_and_zone.split_at(index);
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
+        let (hours, minutes) = offset.get(1..)?.split_once(':')?;
+        let hours = hours.parse::<i64>().ok()?;
+        let minutes = minutes.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (clock, sign * (hours * 3600 + minutes * 60))
+    } else {
+        (time_and_zone, 9 * 3600)
+    };
+
+    let mut parts = clock.split(':');
+    let hour = parts.next()?.parse::<i64>().ok()?;
+    let minute = parts.next()?.parse::<i64>().ok()?;
+    let second = parts
+        .next()
+        .unwrap_or("0")
+        .split('.')
+        .next()?
+        .parse::<i64>()
+        .ok()?;
+    if parts.next().is_some()
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+    {
+        return None;
+    }
+    let unix = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add(hour * 3600 + minute * 60 + second)?
+        .checked_sub(offset_seconds)?;
+    epoch_to_seoul(unix)
 }
 
 pub fn seoul_today() -> String {
@@ -144,7 +198,7 @@ fn civil_from_days(days: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_days, epoch_to_seoul, moodle_datetime};
+    use super::{add_days, epoch_to_seoul, moodle_datetime, normalize_datetime};
 
     #[test]
     fn normalizes_moodle_deadlines_to_seoul_iso() {
@@ -170,5 +224,18 @@ mod tests {
             epoch_to_seoul(1_767_225_600).as_deref(),
             Some("2026-01-01T09:00:00+09:00")
         );
+    }
+
+    #[test]
+    fn converts_iso_offsets_to_seoul_across_date_boundaries() {
+        assert_eq!(
+            normalize_datetime("2026-09-01T16:00:00Z").as_deref(),
+            Some("2026-09-02T01:00:00+09:00")
+        );
+        assert_eq!(
+            normalize_datetime("2026-09-01T23:30:00-05:00").as_deref(),
+            Some("2026-09-02T13:30:00+09:00")
+        );
+        assert!(normalize_datetime("2026-02-30T12:00:00+09:00").is_none());
     }
 }
