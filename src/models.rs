@@ -91,4 +91,5 @@ pub struct RawGet {
     pub bytes: usize,
     pub body: String,
     pub truncated: bool,
+    pub redacted: bool,
 }

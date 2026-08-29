@@ -65,7 +65,7 @@ pub enum Command {
     Grades(CourseShowArgs),
     /// Show the attendance report for a course.
     Attendance(CourseShowArgs),
-    /// Make a bounded, same-origin read request.
+    /// Preview a same-origin text response (experimental repair hatch).
     Request(RequestArgs),
 }
 
@@ -267,7 +267,7 @@ pub struct RequestArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RequestCommand {
-    /// GET a same-origin path or URL and return a bounded text preview.
+    /// GET a same-origin path or URL and return a redacted, bounded text preview.
     #[command(
         after_help = "Example:\n  klms --json request get '/mod/assign/view.php?id=1210516' --max-bytes 65536"
     )]

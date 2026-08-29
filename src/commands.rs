@@ -61,8 +61,17 @@ struct Doctor {
     version: &'static str,
     base_url: String,
     auth: auth::AuthStatus,
-    live_session: bool,
+    session_status: &'static str,
+    session_error: Option<DoctorError>,
     dashboard_url: Option<String>,
+    check_may_have_extended_session: bool,
+}
+
+#[derive(Serialize)]
+struct DoctorError {
+    code: &'static str,
+    message: String,
+    retryable: bool,
 }
 
 fn doctor(
@@ -70,26 +79,45 @@ fn doctor(
     session: auth::AuthSession,
     timeout: u64,
 ) -> Result<CommandResult, AppError> {
-    let mut live_session = false;
+    let mut session_status = "not_configured";
+    let mut session_error = None;
     let mut dashboard_url = None;
+    let mut check_may_have_extended_session = false;
     if let Some(cookie) = session.cookie_header.as_deref() {
-        if let Ok(response) = KlmsClient::new(base_url.as_str(), Some(cookie), timeout)
+        check_may_have_extended_session = true;
+        match KlmsClient::new(base_url.as_str(), Some(cookie), timeout)
             .and_then(|client| client.get("/my/"))
         {
-            cache_page_sesskey(base_url, &response.text);
-            live_session = true;
-            dashboard_url = Some(response.url.into());
+            Ok(response) => {
+                cache_page_sesskey(base_url, &response.text);
+                session_status = "valid";
+                dashboard_url = Some(response.url.into());
+            }
+            Err(error) => {
+                session_status = match error.code {
+                    "AUTH_REQUIRED" => "expired",
+                    "NETWORK_ERROR" => "unreachable",
+                    _ => "error",
+                };
+                session_error = Some(DoctorError {
+                    code: error.code,
+                    message: error.message,
+                    retryable: error.retryable,
+                });
+            }
         }
     }
     let model = Doctor {
         version: env!("CARGO_PKG_VERSION"),
         base_url: base_url.to_string(),
         auth: session.status,
-        live_session,
+        session_status,
+        session_error,
         dashboard_url,
+        check_may_have_extended_session,
     };
-    let human = format!(
-        "klms {}\nOrigin: {}\nStorage state: {}\nLive session: {}",
+    let mut human = format!(
+        "klms {}\nOrigin: {}\nStorage state: {}\nSession: {}",
         model.version,
         model.base_url,
         if model.auth.configured {
@@ -97,9 +125,19 @@ fn doctor(
         } else {
             "missing"
         },
-        yes_no(model.live_session)
+        model.session_status
     );
-    output::result("doctor", &model, human)
+    if let Some(error) = &model.session_error {
+        human.push_str(&format!("\nCheck: {} — {}", error.code, error.message));
+    }
+    let mut result = output::result("doctor", &model, human)?;
+    if model.check_may_have_extended_session {
+        result.warnings.push(
+            "The dashboard request used to validate the session may refresh KLMS activity time."
+                .into(),
+        );
+    }
+    Ok(result)
 }
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
@@ -272,7 +310,7 @@ fn session_time_result(
         bootstrap_may_have_extended_session: bootstrap,
         extended: extend,
     };
-    output::result(
+    let mut result = output::result(
         if extend {
             "auth.extend"
         } else {
@@ -284,7 +322,14 @@ fn session_time_result(
             model.remaining,
             if extend { " (extended)" } else { "" }
         ),
-    )
+    )?;
+    if bootstrap {
+        result.warnings.push(
+            "A dashboard request was needed to discover the session key and may have refreshed KLMS activity time."
+                .into(),
+        );
+    }
+    Ok(result)
 }
 
 fn module_command(
@@ -440,9 +485,18 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
             "failed to write download: {error}"
         )));
     }
-    std::fs::rename(&temp, out).map_err(|error| {
+    std::fs::hard_link(&temp, out).map_err(|error| {
         let _ = std::fs::remove_file(&temp);
-        AppError::config(format!("failed to finalize download: {error}"))
+        if out.exists() {
+            AppError::config(format!("destination already exists: {}", out.display()))
+        } else {
+            AppError::config(format!("failed to finalize download: {error}"))
+        }
+    })?;
+    std::fs::remove_file(&temp).map_err(|error| {
+        AppError::config(format!(
+            "download completed but temporary link cleanup failed: {error}"
+        ))
     })?;
     let model = DownloadResult {
         path: out.display().to_string(),
@@ -458,16 +512,120 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
 }
 
 fn raw_get(client: &KlmsClient, path: &str, max_bytes: usize) -> Result<CommandResult, AppError> {
-    let response = client.get_bytes(path, max_bytes)?;
-    let body = String::from_utf8_lossy(&response.bytes).into_owned();
+    let response = client.get_preview(path, max_bytes)?;
+    let is_text = response.content_type.as_deref().is_none_or(|value| {
+        let value = value.to_ascii_lowercase();
+        value.starts_with("text/") || value.contains("json") || value.contains("xml")
+    });
+    if !is_text {
+        return Err(AppError::usage(
+            "request get previews text responses only; use `files download` for binary content",
+        ));
+    }
+    let source = String::from_utf8_lossy(&response.bytes);
+    let body = if response
+        .content_type
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+    {
+        redact_secrets(&parse::safe_html_preview(&source))
+    } else {
+        redact_secrets(&source)
+    };
+    let safe_url = redact_url(&response.url);
     let model = RawGet {
-        url: response.url.into(),
+        url: safe_url,
         content_type: response.content_type,
         bytes: response.bytes.len(),
         body,
-        truncated: false,
+        truncated: response.truncated,
+        redacted: true,
     };
     output::result("request.get", &model, model.body.clone())
+}
+
+fn redact_url(url: &Url) -> String {
+    let mut safe = url.clone();
+    if safe.query().is_some() {
+        let pairs: Vec<(String, String)> = safe
+            .query_pairs()
+            .map(|(key, value)| {
+                let value = if is_secret_key(&key) {
+                    "[REDACTED]".to_owned()
+                } else {
+                    value.into_owned()
+                };
+                (key.into_owned(), value)
+            })
+            .collect();
+        safe.query_pairs_mut().clear().extend_pairs(pairs);
+    }
+    safe.into()
+}
+
+fn redact_secrets(value: &str) -> String {
+    let mut output = value.to_owned();
+    for key in ["sesskey", "logintoken", "moodlesession", "token"] {
+        output = redact_key_values(&output, key);
+    }
+    output
+}
+
+fn redact_key_values(value: &str, key: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut result = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative) = lower[cursor..].find(key) {
+        let start = cursor + relative;
+        result.push_str(&value[cursor..start + key.len()]);
+        let bytes = value.as_bytes();
+        let mut position = start + key.len();
+        while position < bytes.len()
+            && matches!(bytes[position], b' ' | b'\t' | b'\r' | b'\n' | b'"' | b'\'')
+        {
+            result.push(bytes[position] as char);
+            position += 1;
+        }
+        if position >= bytes.len() || !matches!(bytes[position], b':' | b'=') {
+            cursor = start + key.len();
+            continue;
+        }
+        result.push(bytes[position] as char);
+        position += 1;
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            result.push(bytes[position] as char);
+            position += 1;
+        }
+        let quote = bytes
+            .get(position)
+            .copied()
+            .filter(|byte| matches!(byte, b'"' | b'\''));
+        if let Some(quote) = quote {
+            result.push(quote as char);
+            position += 1;
+        }
+        result.push_str("[REDACTED]");
+        while position < bytes.len() {
+            let byte = bytes[position];
+            if quote.is_some_and(|quote| byte == quote)
+                || quote.is_none()
+                    && (byte.is_ascii_whitespace() || matches!(byte, b'&' | b',' | b'}' | b']'))
+            {
+                break;
+            }
+            position += 1;
+        }
+        cursor = position;
+    }
+    result.push_str(&value[cursor..]);
+    result
+}
+
+fn is_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "sesskey" | "logintoken" | "moodlesession" | "token"
+    )
 }
 
 fn course_activities(
@@ -658,4 +816,30 @@ fn command_name(resource: &str, verb: &str) -> &'static str {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{redact_secrets, redact_url};
+    use url::Url;
+
+    #[test]
+    fn raw_preview_redacts_common_secret_assignments() {
+        let source = r#"{"sesskey":"abc123","name":"safe"}&token=xyz789"#;
+        let redacted = redact_secrets(source);
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("xyz789"));
+        assert!(redacted.contains(r#""name":"safe""#));
+        assert_eq!(redacted.matches("[REDACTED]").count(), 2);
+    }
+
+    #[test]
+    fn raw_preview_redacts_secrets_from_reported_url() {
+        let url =
+            Url::parse("https://klms.kaist.ac.kr/lib/ajax/service.php?sesskey=abc123&info=visible")
+                .unwrap();
+        let redacted = redact_url(&url);
+        assert!(!redacted.contains("abc123"));
+        assert!(redacted.contains("info=visible"));
+    }
 }

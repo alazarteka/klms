@@ -16,5 +16,8 @@ Errors use:
 {"schema_version":"1","ok":false,"error":{"code":"AUTH_REQUIRED","message":"...","hint":"...","retryable":false}}
 ```
 
-Fields may be added within schema version `1`; existing fields will not change
-meaning. A breaking shape change requires a new `schema_version`.
+The machine contract is experimental during the `0.x` series. Consumers must
+check both `schema_version` and the installed binary version. We prefer one
+documented schema correction over preserving misleading semantics; once the
+typed resource model settles, incompatible changes will require a new
+`schema_version`.

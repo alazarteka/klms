@@ -25,6 +25,36 @@ impl AppError {
         Self::new("NETWORK_ERROR", message, None, true, 20)
     }
 
+    pub fn http(status: u16, path: &str) -> Self {
+        match status {
+            401 => Self::auth(
+                format!("KLMS rejected authentication for {path}"),
+                "Refresh the storage-state session and retry.",
+            ),
+            403 => Self::new(
+                "PERMISSION_DENIED",
+                format!("KLMS denied access to {path}"),
+                Some(
+                    "Confirm that this resource belongs to your account and is still available."
+                        .into(),
+                ),
+                false,
+                13,
+            ),
+            404 => Self::not_found(format!("KLMS resource was not found: {path}")),
+            408 | 425 | 429 | 500..=599 => {
+                Self::network(format!("KLMS returned HTTP {status} for {path}"))
+            }
+            _ => Self::new(
+                "HTTP_ERROR",
+                format!("KLMS returned HTTP {status} for {path}"),
+                None,
+                false,
+                21,
+            ),
+        }
+    }
+
     pub fn shape(message: impl Into<String>) -> Self {
         Self::new(
             "UPSTREAM_SHAPE_CHANGED",
