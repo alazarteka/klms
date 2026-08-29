@@ -2,10 +2,13 @@ mod auth;
 mod cli;
 mod client;
 mod commands;
+mod date;
 mod error;
 mod models;
 mod output;
 mod parse;
+mod present;
+mod reference;
 
 use std::process::ExitCode;
 

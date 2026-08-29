@@ -45,6 +45,14 @@ pub enum Command {
     /// Show dashboard courses and upcoming work.
     #[command(after_help = "Examples:\n  klms dashboard\n  klms --json dashboard --limit 20")]
     Dashboard(ListArgs),
+    /// Show items scheduled for today in Korea time.
+    #[command(after_help = "Examples:\n  klms today\n  klms --json today --course CS.30200")]
+    Today(AgendaArgs),
+    /// Show scheduled items through a bounded future window.
+    #[command(
+        after_help = "Examples:\n  klms upcoming\n  klms --json upcoming --through 7d --course CS.30200"
+    )]
+    Upcoming(UpcomingArgs),
     /// Discover, resolve, or inspect courses.
     Courses(CoursesArgs),
     /// List the typed weekly structure of a course.
@@ -57,6 +65,8 @@ pub enum Command {
     Calendar(CalendarArgs),
     /// List boards and inspect their posts.
     Boards(BoardsArgs),
+    /// List course notices and inspect their content.
+    Notices(NoticesArgs),
     /// List or download course files.
     Files(FilesArgs),
     /// List or inspect video metadata.
@@ -74,6 +84,27 @@ pub struct ListArgs {
     /// Maximum number of rows to return.
     #[arg(long, default_value_t = 100, value_parser = parse_list_limit)]
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AgendaArgs {
+    /// Restrict results to one course id, code, or title.
+    #[arg(long)]
+    pub course: Option<String>,
+    #[command(flatten)]
+    pub list: ListArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct UpcomingArgs {
+    /// Include today through this many days ahead (for example, 7d).
+    #[arg(long, default_value = "7d", value_parser = parse_days)]
+    pub through: u32,
+    /// Restrict results to one course id, code, or title.
+    #[arg(long)]
+    pub course: Option<String>,
+    #[command(flatten)]
+    pub list: ListArgs,
 }
 
 #[derive(Debug, Args)]
@@ -190,6 +221,27 @@ pub struct BoardsArgs {
     pub command: BoardsCommand,
 }
 
+#[derive(Debug, Args)]
+pub struct NoticesArgs {
+    #[command(subcommand)]
+    pub command: NoticesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NoticesCommand {
+    /// List posts from the course notice board.
+    #[command(after_help = "Example:\n  klms notices list --course CS.30200 --limit 20")]
+    List {
+        #[arg(long)]
+        course: String,
+        #[command(flatten)]
+        list: ListArgs,
+    },
+    /// Show a notice by the reference returned from `notices list`.
+    #[command(after_help = "Example:\n  klms notices show board-post:1189554:420856")]
+    Show { notice: String },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum BoardsCommand {
     /// List course boards.
@@ -284,6 +336,18 @@ fn parse_list_limit(value: &str) -> Result<usize, String> {
 
 fn parse_preview_limit(value: &str) -> Result<usize, String> {
     parse_bounded(value, 1, 1_048_576, "max-bytes")
+}
+
+fn parse_days(value: &str) -> Result<u32, String> {
+    let value = value.strip_suffix('d').unwrap_or(value);
+    let days = value
+        .parse::<u32>()
+        .map_err(|_| "through must be a day count such as 7d".to_owned())?;
+    if (1..=90).contains(&days) {
+        Ok(days)
+    } else {
+        Err("through must be between 1d and 90d".into())
+    }
 }
 
 fn parse_bounded(value: &str, minimum: usize, maximum: usize, name: &str) -> Result<usize, String> {

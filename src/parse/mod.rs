@@ -1,13 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
 
 use crate::{
+    date,
     error::AppError,
     models::{
-        Activity, BoardPost, Course, CourseDetail, Dashboard, LinkItem, Report, ResourceDetail,
+        Activity, Assignment, BoardPost, CalendarEvent, Course, CourseDetail, Dashboard, LinkItem,
+        Quiz, Report, ResourceDetail,
     },
+    reference::ResourceRef,
 };
 
 pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
@@ -25,13 +28,16 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
         &document,
         base_url,
         ".block_timeline a[href], [data-region=event-list-content] a[href]",
-        20,
+        usize::MAX,
     )?;
     Ok(Dashboard {
         term,
         course_count: courses.len(),
         courses,
+        courses_complete: true,
+        upcoming_count: upcoming.len(),
         upcoming,
+        upcoming_complete: true,
     })
 }
 
@@ -138,17 +144,32 @@ pub fn resource_detail(
                 .and_then(|selector| document.select(&selector).next())
         });
     let text_value = content.map(visible_text).unwrap_or_default();
-    let links = match content {
-        Some(root) => link_items_in(root, base_url, 100)?,
+    let text_truncated = text_value.chars().count() > 100_000;
+    let mut links = match content {
+        Some(root) => link_items_in(root, base_url, 101)?,
         None => Vec::new(),
     };
+    let links_truncated = links.len() > 100;
+    links.truncate(100);
+    let id = query_id(url, &["id", "bwid"]);
+    let reference = if kind == "courseboard-post" {
+        query_id(url, &["id"])
+            .zip(query_id(url, &["bwid"]))
+            .map(|(board, post)| ResourceRef::BoardPost { board, post }.to_string())
+    } else {
+        ResourceRef::from_activity(kind, id.as_deref(), Some(url.as_str()))
+            .map(|reference| reference.to_string())
+    };
     Ok(ResourceDetail {
-        id: query_id(url, &["id", "bwid"]),
+        id,
+        reference,
         kind: kind.into(),
         title,
         url: url.to_string(),
         text: text_value.chars().take(100_000).collect(),
+        text_truncated,
         links,
+        links_truncated,
     })
 }
 
@@ -185,11 +206,19 @@ pub fn board_posts(
             .and_then(|row| {
                 row.select(&cells)
                     .map(text)
-                    .find(|value| looks_like_date(value))
+                    .find(|value| date::normalize_datetime(value).is_some())
             });
+        let reference = board_id.as_ref().zip(id.as_ref()).map(|(board, post)| {
+            ResourceRef::BoardPost {
+                board: board.clone(),
+                post: post.clone(),
+            }
+            .to_string()
+        });
         posts.push(BoardPost {
             board_id: board_id.clone(),
             id,
+            reference,
             title,
             posted,
             url: url.into(),
@@ -208,14 +237,130 @@ pub fn board_posts(
     Ok(posts)
 }
 
-pub fn calendar(html: &str, base_url: &Url, limit: usize) -> Result<Vec<LinkItem>, AppError> {
+pub fn assignments(
+    html: &str,
+    page_url: &Url,
+    course: &Course,
+) -> Result<Vec<Assignment>, AppError> {
     let document = Html::parse_document(html);
-    let rows = link_items(
-        &document,
-        base_url,
-        ".event a[href], [data-region=event-list-content] a[href], .calendarwrapper a[href]",
-        limit,
-    )?;
+    let table = semantic_table(&document, &["week", "name", "due date"])?;
+    let Some(table) = table else {
+        return Err(AppError::shape(
+            "assignment index contained no recognizable assignment table",
+        ));
+    };
+    let parsed = indexed_rows(table)?;
+    let mut assignments = Vec::new();
+    for row in parsed.rows {
+        let Some(url) = row.link_for("name", page_url) else {
+            continue;
+        };
+        let Some(id) = query_id(&url, &["id"]) else {
+            continue;
+        };
+        let due_text = row.value("due date");
+        assignments.push(Assignment {
+            id: id.clone(),
+            reference: ResourceRef::Assignment(id).to_string(),
+            course_id: course.id.clone(),
+            course_ref: course.reference.clone(),
+            week: row.value("week").as_deref().and_then(week_number),
+            title: row
+                .value("name")
+                .unwrap_or_else(|| "Untitled assignment".into()),
+            due_at: due_text.as_deref().and_then(date::moodle_datetime),
+            due_text,
+            submission_status: row.value("submit"),
+            url: url.into(),
+        });
+    }
+    Ok(assignments)
+}
+
+pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>, AppError> {
+    let document = Html::parse_document(html);
+    let table = semantic_table(&document, &["week", "name", "quiz closes"])?;
+    let Some(table) = table else {
+        return Err(AppError::shape(
+            "quiz index contained no recognizable quiz table",
+        ));
+    };
+    let parsed = indexed_rows(table)?;
+    let mut quizzes = Vec::new();
+    for row in parsed.rows {
+        let Some(url) = row.link_for("name", page_url) else {
+            continue;
+        };
+        let Some(id) = query_id(&url, &["id"]) else {
+            continue;
+        };
+        let closes_text = row.value("quiz closes");
+        quizzes.push(Quiz {
+            id: id.clone(),
+            reference: ResourceRef::Quiz(id).to_string(),
+            course_id: course.id.clone(),
+            course_ref: course.reference.clone(),
+            week: row.value("week").as_deref().and_then(week_number),
+            title: row.value("name").unwrap_or_else(|| "Untitled quiz".into()),
+            closes_at: closes_text.as_deref().and_then(date::moodle_datetime),
+            closes_text,
+            grade: row.value("grade"),
+            url: url.into(),
+        });
+    }
+    Ok(quizzes)
+}
+
+pub fn calendar(html: &str, base_url: &Url) -> Result<Vec<CalendarEvent>, AppError> {
+    let document = Html::parse_document(html);
+    let events = selector(".event, [data-region=event-list-item]")?;
+    let links = selector("a[href]")?;
+    let times = selector("time")?;
+    let course_links = selector("a[href*='course/view.php']")?;
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    for event in document.select(&events) {
+        let event_link = event.select(&links).find_map(|anchor| {
+            let href = anchor.value().attr("href")?;
+            let url = base_url.join(href).ok()?;
+            let path = url.path();
+            (path.contains("/mod/") || path.contains("/calendar/event.php"))
+                .then_some((anchor, url))
+        });
+        let Some((anchor, url)) = event_link else {
+            continue;
+        };
+        if !seen.insert(url.to_string()) {
+            continue;
+        }
+        let kind = module_kind(&url).unwrap_or_else(|| "event".into());
+        let reference = if kind == "event" {
+            query_id(&url, &["id", "event"]).map(|id| ResourceRef::Calendar(id).to_string())
+        } else {
+            ResourceRef::from_activity(&kind, None, Some(url.as_str()))
+                .map(|reference| reference.to_string())
+        };
+        let time = event.select(&times).next();
+        let when_text = time.map(text).filter(|value| !value.is_empty());
+        let starts_at = time
+            .and_then(|node| node.value().attr("datetime"))
+            .and_then(date::normalize_datetime)
+            .or_else(|| when_text.as_deref().and_then(date::moodle_datetime));
+        let course_link = event.select(&course_links).next();
+        let course_url = course_link
+            .and_then(|link| link.value().attr("href"))
+            .and_then(|href| base_url.join(href).ok());
+        rows.push(CalendarEvent {
+            reference,
+            kind,
+            title: text(anchor),
+            course_id: course_url.as_ref().and_then(|url| query_id(url, &["id"])),
+            course: course_link.map(text).filter(|value| !value.is_empty()),
+            starts_at,
+            when_text,
+            url: url.into(),
+        });
+    }
     if rows.is_empty()
         && !has_any(
             &document,
@@ -231,6 +376,18 @@ pub fn calendar(html: &str, base_url: &Url, limit: usize) -> Result<Vec<LinkItem
         ));
     }
     Ok(rows)
+}
+
+pub fn has_next_page(html: &str) -> Result<bool, AppError> {
+    let document = Html::parse_document(html);
+    has_any(
+        &document,
+        &[
+            "a[rel=next]",
+            ".pagination .next a",
+            "a[data-page-number][aria-label*=Next]",
+        ],
+    )
 }
 
 pub fn safe_html_preview(html: &str) -> String {
@@ -287,6 +444,7 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>,
                 .find_map(|value| course_code(&value))
         });
         courses.push(Course {
+            reference: ResourceRef::Course(id.clone()).to_string(),
             id,
             term: code.as_deref().and_then(term_from_code),
             code,
@@ -354,8 +512,12 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
         if !seen.insert(key) {
             continue;
         }
+        let reference =
+            ResourceRef::from_activity(&kind, id.as_deref(), url.as_ref().map(Url::as_str))
+                .map(|reference| reference.to_string());
         rows.push(Activity {
             id,
+            reference,
             kind,
             title,
             week,
@@ -365,6 +527,99 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
         });
     }
     Ok(rows)
+}
+
+struct IndexedRows {
+    rows: Vec<IndexedRow>,
+}
+
+struct IndexedRow {
+    values: HashMap<String, String>,
+    links: HashMap<String, String>,
+}
+
+impl IndexedRow {
+    fn value(&self, header: &str) -> Option<String> {
+        self.values
+            .iter()
+            .find_map(|(key, value)| key.contains(header).then(|| value.clone()))
+            .filter(|value| !value.is_empty() && value != "-")
+    }
+
+    fn link_for(&self, header: &str, base_url: &Url) -> Option<Url> {
+        self.links
+            .iter()
+            .find_map(|(key, value)| key.contains(header).then_some(value))
+            .and_then(|value| base_url.join(value).ok())
+    }
+}
+
+fn semantic_table<'a>(
+    document: &'a Html,
+    expected: &[&str],
+) -> Result<Option<ElementRef<'a>>, AppError> {
+    let tables = selector("table")?;
+    let rows = selector("tr")?;
+    let cells = selector("th, td")?;
+    Ok(document.select(&tables).find(|table| {
+        let headers: Vec<_> = table
+            .select(&rows)
+            .next()
+            .map(|row| {
+                row.select(&cells)
+                    .map(|cell| text(cell).to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        expected
+            .iter()
+            .all(|needle| headers.iter().any(|header| header.contains(needle)))
+    }))
+}
+
+fn indexed_rows(table: ElementRef<'_>) -> Result<IndexedRows, AppError> {
+    let rows = selector("tr")?;
+    let cells = selector("th, td")?;
+    let links = selector("a[href]")?;
+    let mut table_rows = table.select(&rows);
+    let headers: Vec<_> = table_rows
+        .next()
+        .map(|row| {
+            row.select(&cells)
+                .map(|cell| text(cell).to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut parsed = Vec::new();
+    for row in table_rows {
+        let row_cells: Vec<_> = row.select(&cells).collect();
+        if row_cells.is_empty() {
+            continue;
+        }
+        let mut values = HashMap::new();
+        let mut row_links = HashMap::new();
+        for (header, cell) in headers.iter().zip(row_cells) {
+            values.insert(header.clone(), text(cell));
+            if let Some(href) = cell
+                .select(&links)
+                .find_map(|anchor| anchor.value().attr("href"))
+            {
+                row_links.insert(header.clone(), href.to_owned());
+            }
+        }
+        parsed.push(IndexedRow {
+            values,
+            links: row_links,
+        });
+    }
+    Ok(IndexedRows { rows: parsed })
+}
+
+fn module_kind(url: &Url) -> Option<String> {
+    let parts: Vec<_> = url.path_segments()?.collect();
+    parts
+        .windows(2)
+        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
 }
 
 fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Report, AppError> {
@@ -612,11 +867,6 @@ fn query_id(url: &Url, names: &[&str]) -> Option<String> {
         .find_map(|(key, value)| names.contains(&key.as_ref()).then(|| value.into_owned()))
 }
 
-fn looks_like_date(value: &str) -> bool {
-    let digits = value.chars().filter(|c| c.is_ascii_digit()).count();
-    digits >= 6 && (value.contains('-') || value.contains('.') || value.contains('/'))
-}
-
 fn download_url(script: &str) -> Option<String> {
     for marker in ["downloadFile('", "downloadFile(\""] {
         let Some(rest) = script.split(marker).nth(1) else {
@@ -634,7 +884,8 @@ fn download_url(script: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        activities, attendance, board_posts, calendar, course_detail, dashboard, grades, sesskey,
+        activities, assignments, attendance, board_posts, calendar, course_detail, dashboard,
+        grades, quizzes, sesskey,
     };
     use crate::models::Course;
     use url::Url;
@@ -720,6 +971,7 @@ mod tests {
           <div><a class="dropdown-toggle text-primary">Ryu Seokyoung</a></div></div></div>"#;
         let course = Course {
             id: "42".into(),
+            reference: "course:42".into(),
             title: "Course 42".into(),
             code: None,
             term: None,
@@ -736,7 +988,54 @@ mod tests {
         let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
         assert!(activities("<html><body>maintenance</body></html>", &base, None).is_err());
         assert!(activities("<main class='course-content'></main>", &base, None).is_ok());
-        assert!(calendar("<html><body>maintenance</body></html>", &base, 10).is_err());
-        assert!(calendar("<main id='region-main'></main>", &base, 10).is_ok());
+        assert!(calendar("<html><body>maintenance</body></html>", &base).is_err());
+        assert!(calendar("<main id='region-main'></main>", &base).is_ok());
+    }
+
+    #[test]
+    fn parses_typed_assignment_and_quiz_indexes() {
+        let base = Url::parse(BASE).unwrap();
+        let course = Course {
+            id: "42".into(),
+            reference: "course:42".into(),
+            title: "Compilers".into(),
+            code: Some("CS.420".into()),
+            term: None,
+            url: format!("{BASE}/course/view.php?id=42"),
+        };
+        let assignment_html = r#"<table><tr><th>No</th><th>Week</th><th>Name</th><th>Due date</th><th>Submit</th></tr>
+          <tr><td>1</td><td>week 2</td><td><a href='/mod/assign/view.php?id=7'>Written work</a></td><td>Tuesday, 17 March 2026, 11:59 PM</td><td>Submitted for grading</td></tr></table>"#;
+        let rows = assignments(assignment_html, &base, &course).unwrap();
+        assert_eq!(rows[0].reference, "assign:7");
+        assert_eq!(rows[0].week, Some(2));
+        assert_eq!(rows[0].due_at.as_deref(), Some("2026-03-17T23:59:00+09:00"));
+
+        let quiz_html = r#"<table><tr><th>No</th><th>Week</th><th>Name</th><th>Quiz closes</th><th>Grade</th></tr>
+          <tr><td>1</td><td>week 3</td><td><a href='view.php?id=8'>Attendance quiz</a></td><td>Saturday, 21 March 2026, 11:59 PM</td><td>-</td></tr></table>"#;
+        let quiz_page = base.join("/mod/quiz/index.php?id=42").unwrap();
+        let rows = quizzes(quiz_html, &quiz_page, &course).unwrap();
+        assert_eq!(rows[0].reference, "quiz:8");
+        assert_eq!(rows[0].url, format!("{BASE}/mod/quiz/view.php?id=8"));
+        assert_eq!(
+            rows[0].closes_at.as_deref(),
+            Some("2026-03-21T23:59:00+09:00")
+        );
+    }
+
+    #[test]
+    fn parses_typed_calendar_event_with_course_and_time() {
+        let html = r#"<main id='region-main'><div class='event'>
+          <a href='/mod/assign/view.php?id=7'>Written work is due</a>
+          <a href='/course/view.php?id=42'>Compilers</a>
+          <time datetime='2026-09-01T23:59:00+09:00'>Tuesday, 1 September 2026, 11:59 PM</time>
+          </div></main>"#;
+        let rows = calendar(html, &Url::parse(BASE).unwrap()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reference.as_deref(), Some("assign:7"));
+        assert_eq!(rows[0].course_id.as_deref(), Some("42"));
+        assert_eq!(
+            rows[0].starts_at.as_deref(),
+            Some("2026-09-01T23:59:00+09:00")
+        );
     }
 }
