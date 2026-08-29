@@ -60,6 +60,19 @@ pub fn seoul_today() -> String {
     civil_from_days(seconds.div_euclid(86_400))
 }
 
+pub fn epoch_to_seoul(timestamp: i64) -> Option<String> {
+    let seconds = timestamp.checked_add(9 * 60 * 60)?;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let hour = day_seconds / 3600;
+    let minute = day_seconds % 3600 / 60;
+    let second = day_seconds % 60;
+    Some(format!(
+        "{}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}",
+        civil_from_days(days)
+    ))
+}
+
 pub fn add_days(date: &str, days: i64) -> Option<String> {
     let (year, month, day) = parse_date(date)?;
     Some(civil_from_days(days_from_civil(year, month, day) + days))
@@ -131,7 +144,7 @@ fn civil_from_days(days: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_days, moodle_datetime};
+    use super::{add_days, epoch_to_seoul, moodle_datetime};
 
     #[test]
     fn normalizes_moodle_deadlines_to_seoul_iso() {
@@ -149,5 +162,13 @@ mod tests {
     fn adds_days_across_month_and_year_boundaries() {
         assert_eq!(add_days("2026-12-31", 1).as_deref(), Some("2027-01-01"));
         assert_eq!(add_days("2028-02-28", 1).as_deref(), Some("2028-02-29"));
+    }
+
+    #[test]
+    fn converts_unix_event_time_to_seoul() {
+        assert_eq!(
+            epoch_to_seoul(1_767_225_600).as_deref(),
+            Some("2026-01-01T09:00:00+09:00")
+        );
     }
 }

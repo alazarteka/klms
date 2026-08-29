@@ -1,4 +1,7 @@
-use std::{io::Read, time::Duration};
+use std::{
+    io::{Read, Write},
+    time::Duration,
+};
 
 use reqwest::{
     blocking::Client,
@@ -24,7 +27,6 @@ pub struct HtmlResponse {
 
 pub struct ByteResponse {
     pub url: Url,
-    pub content_type: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -33,6 +35,12 @@ pub struct PreviewResponse {
     pub content_type: Option<String>,
     pub bytes: Vec<u8>,
     pub truncated: bool,
+}
+
+pub struct DownloadResponse {
+    pub url: Url,
+    pub content_type: Option<String>,
+    pub bytes: usize,
 }
 
 impl KlmsClient {
@@ -102,7 +110,6 @@ impl KlmsClient {
         check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
         Ok(ByteResponse {
             url: final_url,
-            content_type,
             bytes,
         })
     }
@@ -124,6 +131,65 @@ impl KlmsClient {
             content_type,
             bytes,
             truncated,
+        })
+    }
+
+    pub fn download_to(
+        &self,
+        path: &str,
+        max_bytes: usize,
+        writer: &mut impl Write,
+    ) -> Result<DownloadResponse, AppError> {
+        let mut response = self.send_get(path)?;
+        let final_url = response.url().clone();
+        if response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > max_bytes)
+        {
+            return Err(AppError::network(format!(
+                "KLMS download exceeded the {max_bytes} byte limit"
+            )));
+        }
+        let content_type = content_type(&response);
+        let html = content_type
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"));
+        let mut sample = Vec::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut total = 0_usize;
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .map_err(|error| AppError::network(format!("failed to read download: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            total = total
+                .checked_add(read)
+                .ok_or_else(|| AppError::network("download size overflow"))?;
+            if total > max_bytes {
+                return Err(AppError::network(format!(
+                    "KLMS download exceeded the {max_bytes} byte limit"
+                )));
+            }
+            if html && sample.len() < 64 * 1024 {
+                let keep = read.min(64 * 1024 - sample.len());
+                sample.extend_from_slice(&buffer[..keep]);
+            }
+            writer
+                .write_all(&buffer[..read])
+                .map_err(|error| AppError::config(format!("failed to write download: {error}")))?;
+        }
+        if html {
+            check_logged_out(&final_url, content_type.as_deref(), &sample)?;
+        }
+        Ok(DownloadResponse {
+            url: final_url,
+            content_type,
+            bytes: total,
         })
     }
 

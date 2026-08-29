@@ -1,4 +1,7 @@
-use std::{fs::OpenOptions, io::Write, path::Path};
+use std::{
+    fs::{File, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use url::Url;
@@ -787,22 +790,21 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
             parent.display()
         )));
     }
-    let response = client.get_bytes(source, MAX_DOWNLOAD_BYTES)?;
-    let temp = parent.join(format!(".klms-download-{}.part", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|error| AppError::config(format!("cannot create temporary download: {error}")))?;
-    if let Err(error) = file
-        .write_all(&response.bytes)
-        .and_then(|_| file.sync_all())
-    {
+    let (temp, mut file) = create_download_temp(parent)?;
+    let response = match client.download_to(source, MAX_DOWNLOAD_BYTES, &mut file) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
+    if let Err(error) = file.sync_all() {
         let _ = std::fs::remove_file(&temp);
-        return Err(AppError::network(format!(
+        return Err(AppError::config(format!(
             "failed to write download: {error}"
         )));
     }
+    drop(file);
     std::fs::hard_link(&temp, out).map_err(|error| {
         let _ = std::fs::remove_file(&temp);
         if out.exists() {
@@ -816,9 +818,10 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
             "download completed but temporary link cleanup failed: {error}"
         ))
     })?;
+    let final_path = out.canonicalize().unwrap_or_else(|_| out.to_path_buf());
     let model = DownloadResult {
-        path: out.display().to_string(),
-        bytes: response.bytes.len(),
+        path: final_path.display().to_string(),
+        bytes: response.bytes,
         source_url: response.url.into(),
         content_type: response.content_type,
     };
@@ -827,6 +830,27 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
         &model,
         format!("Downloaded {} bytes to {}", model.bytes, model.path),
     )
+}
+
+fn create_download_temp(parent: &Path) -> Result<(PathBuf, File), AppError> {
+    for attempt in 0..100 {
+        let path = parent.join(format!(
+            ".klms-download-{}-{attempt}.part",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(AppError::config(format!(
+                    "cannot create temporary download: {error}"
+                )));
+            }
+        }
+    }
+    Err(AppError::config(
+        "cannot create a unique temporary download file",
+    ))
 }
 
 fn raw_get(client: &KlmsClient, path: &str, max_bytes: usize) -> Result<CommandResult, AppError> {

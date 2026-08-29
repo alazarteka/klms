@@ -29,6 +29,10 @@ such as `course:180871`, `assign:1210516`, `quiz:1210482`,
 `board-post:1189554:439261`, or `file:1205160`. URLs remain available as source
 evidence, but agents should pass `ref` to follow-up commands.
 
+`files.download` streams into a protected temporary file, atomically publishes
+it without replacement, and returns an absolute path, byte count, final
+same-origin source URL, and content type. Large file bytes never enter JSON.
+
 The machine contract is experimental during the `0.x` series. Consumers must
 check both `schema_version` and the installed binary version. We prefer one
 documented schema correction over preserving misleading semantics; once the

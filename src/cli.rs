@@ -185,9 +185,9 @@ pub struct ModuleArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ModuleCommand {
-    /// List modules in a course.
+    /// List this resource type in a course.
     #[command(
-        after_help = "Examples:\n  klms assignments list --course CS.30200\n  klms quizzes list --course 189705\n  klms videos list --course 189705"
+        after_help = "The parent command selects assignments, quizzes, or videos.\n\nExamples:\n  klms assignments list --course CS.30200\n  klms quizzes list --course 189705\n  klms videos list --course 189705"
     )]
     List {
         #[arg(long)]
@@ -195,9 +195,9 @@ pub enum ModuleCommand {
         #[command(flatten)]
         list: ListArgs,
     },
-    /// Show a module by numeric id or same-origin KLMS URL.
+    /// Show one resource by canonical ref, numeric id where unambiguous, or URL.
     #[command(
-        after_help = "Examples:\n  klms assignments show 1210516\n  klms quizzes show 1210517\n  klms videos show 'https://klms.kaist.ac.kr/mod/lti/view.php?id=1265520'"
+        after_help = "Examples:\n  klms assignments show assign:1210516\n  klms quizzes show quiz:1210517\n  klms videos show lti:1265520"
     )]
     Show { target: String },
 }
@@ -259,10 +259,8 @@ pub enum BoardsCommand {
         #[command(flatten)]
         list: ListArgs,
     },
-    /// Show a post by same-origin article URL.
-    #[command(
-        after_help = "Example:\n  klms --json boards show 'https://klms.kaist.ac.kr/mod/courseboard/article.php?id=1265521&bwid=42'"
-    )]
+    /// Show a post by canonical ref or same-origin article URL.
+    #[command(after_help = "Example:\n  klms --json boards show board-post:1265521:42")]
     Show { post: String },
 }
 
@@ -282,9 +280,9 @@ pub enum FilesCommand {
         #[command(flatten)]
         list: ListArgs,
     },
-    /// Download a same-origin KLMS file without overwriting.
+    /// Download a file ref or same-origin KLMS URL without overwriting.
     #[command(
-        after_help = "Example:\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf"
+        after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf"
     )]
     Download {
         url: String,
