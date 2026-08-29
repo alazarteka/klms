@@ -78,18 +78,25 @@ pub(super) fn videos(
         ModuleCommand::Show { target } => {
             let path = module_path(target, KINDS)?;
             let response = client.get(&path)?;
-            let reference = ResourceRef::parse(target)
-                .ok()
-                .or_else(|| ResourceRef::from_url(&response.url))
-                .ok_or_else(|| {
-                    AppError::shape("module detail URL had no supported resource kind")
-                })?;
+            let requested = ResourceRef::parse(target).ok();
+            let reference = ResourceRef::from_url(&response.url).ok_or_else(|| {
+                AppError::shape("module detail URL had no supported resource kind")
+            })?;
             let detail_kind = reference.activity_kind().ok_or_else(|| {
                 AppError::shape("module detail URL had no supported activity kind")
             })?;
             if !KINDS.contains(&detail_kind) {
                 return Err(AppError::shape(
                     "module detail redirected to an unexpected resource kind",
+                ));
+            }
+            if requested
+                .as_ref()
+                .and_then(ResourceRef::activity_kind)
+                .is_some_and(|kind| kind != detail_kind)
+            {
+                return Err(AppError::shape(
+                    "module detail redirected to a different resource kind",
                 ));
             }
             let detail =
@@ -341,11 +348,11 @@ pub(super) fn files(
                 true,
             )
         }
-        FilesCommand::Download { url, out } => {
-            let source = if url.starts_with("file:") {
-                ResourceRef::parse(url)?.path()
+        FilesCommand::Download { source, out } => {
+            let source = if source.starts_with("file:") {
+                ResourceRef::parse(source)?.path()
             } else {
-                url.clone()
+                source.clone()
             };
             super::download::download(client, &source, out)
         }
@@ -362,6 +369,13 @@ fn show_module(
 ) -> Result<CommandResult, AppError> {
     let path = module_path(target, kinds)?;
     let response = client.get(&path)?;
+    let final_reference = ResourceRef::from_url(&response.url)
+        .ok_or_else(|| AppError::shape("module detail URL had no supported resource kind"))?;
+    if !final_reference.matches_module(kinds) {
+        return Err(AppError::shape(
+            "module detail redirected to an unexpected resource kind",
+        ));
+    }
     let detail = parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
     output::result(command, &detail, present::detail(&detail))
 }
@@ -382,6 +396,20 @@ fn show_board_post(
         post.into()
     };
     let response = client.get(&target)?;
+    let board_id = query_value(&response.url, "id");
+    let post_id = query_value(&response.url, "bwid");
+    if response.url.path() != "/mod/courseboard/article.php"
+        || !board_id.as_deref().is_some_and(|id| {
+            !id.is_empty() && id.chars().all(|character| character.is_ascii_digit())
+        })
+        || !post_id.as_deref().is_some_and(|id| {
+            !id.is_empty() && id.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return Err(AppError::shape(
+            "board post detail redirected to an unexpected resource kind",
+        ));
+    }
     let detail =
         parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")?;
     output::result(command, &detail, present::detail(&detail))

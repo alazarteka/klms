@@ -74,7 +74,14 @@ fn create_temp(parent: &Path) -> Result<(PathBuf, File), AppError> {
             ".klms-download-{}-{attempt}.part",
             std::process::id()
         ));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -112,7 +119,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::publish_new;
+    use super::{create_temp, publish_new};
 
     #[test]
     fn publish_new_never_replaces_an_existing_destination() {
@@ -127,5 +134,18 @@ mod tests {
         assert_eq!(error.code, "CONFIG_ERROR");
         assert_eq!(fs::read(&out).unwrap(), b"existing bytes");
         assert!(!temp.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_download_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let (path, _) = create_temp(directory.path()).unwrap();
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

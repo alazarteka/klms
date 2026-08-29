@@ -45,7 +45,10 @@ pub fn resource_detail(
                 .ok()
                 .and_then(|selector| document.select(&selector).next())
         });
-    let text_value = content.map(visible_text).unwrap_or_default();
+    let text_value = content
+        .map(visible_text)
+        .map(strip_embedded_active_markup)
+        .unwrap_or_default();
     let text_truncated = text_value.chars().count() > 100_000;
     let mut links = match content {
         Some(root) => link_items_in(root, base_url, 101)?,
@@ -97,12 +100,33 @@ pub fn safe_html_preview(html: &str) -> String {
                 .and_then(|selector| document.select(&selector).next())
         })
         .map(visible_text)
+        .map(strip_embedded_active_markup)
         .unwrap_or_default()
+}
+
+fn strip_embedded_active_markup(mut text: String) -> String {
+    for tag in ["form", "script"] {
+        let opening = format!("<{tag}");
+        let closing = format!("</{tag}>");
+        loop {
+            let lower = text.to_ascii_lowercase();
+            let Some(start) = lower.find(&opening) else {
+                break;
+            };
+            let end = lower[start..]
+                .find(&closing)
+                .map(|offset| start + offset + closing.len())
+                .unwrap_or(text.len());
+            text.replace_range(start..end, " [embedded launch data omitted] ");
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sesskey;
+    use super::{resource_detail, sesskey};
+    use url::Url;
 
     #[test]
     fn extracts_session_key_without_exposing_it_elsewhere() {
@@ -110,5 +134,17 @@ mod tests {
             sesskey(r#"<script>var cfg={"sesskey":"abc123"}</script>"#).unwrap(),
             "abc123"
         );
+    }
+
+    #[test]
+    fn omits_escaped_lti_launch_forms_from_detail_text() {
+        let html = r#"<main>Course tool &lt;form method=&quot;post&quot;&gt;&lt;input name=&quot;login_hint&quot; value=&quot;private-user-id&quot;/&gt;&lt;/form&gt; Ready</main>"#;
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        let url = base.join("/mod/lti/view.php?id=7").unwrap();
+        let detail = resource_detail(html, &base, &url, "lti").unwrap();
+        assert!(!detail.text.contains("private-user-id"));
+        assert!(!detail.text.contains("login_hint"));
+        assert!(detail.text.contains("Course tool"));
+        assert!(detail.text.contains("Ready"));
     }
 }

@@ -17,6 +17,9 @@ pub fn assignments(
     let document = Html::parse_document(html);
     let table = semantic_table(&document, &["week", "name", "due date"])?;
     let Some(table) = table else {
+        if explicit_empty(&document, "assignment") {
+            return Ok(Vec::new());
+        }
         return Err(AppError::shape(
             "assignment index contained no recognizable assignment table",
         ));
@@ -59,6 +62,9 @@ pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>,
     let document = Html::parse_document(html);
     let table = semantic_table(&document, &["week", "name", "quiz closes"])?;
     let Some(table) = table else {
+        if explicit_empty(&document, "quiz") {
+            return Ok(Vec::new());
+        }
         return Err(AppError::shape(
             "quiz index contained no recognizable quiz table",
         ));
@@ -97,6 +103,27 @@ pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>,
         });
     }
     Ok(quizzes)
+}
+
+fn explicit_empty(document: &Html, kind: &str) -> bool {
+    let page_text = document
+        .root_element()
+        .text()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match kind {
+        "assignment" => {
+            page_text.contains("there are no assignments")
+                || page_text.contains("no assignments found")
+                || page_text.contains("과제가 없습니다")
+        }
+        "quiz" => {
+            page_text.contains("there are no quizzes")
+                || page_text.contains("no quizzes found")
+                || page_text.contains("퀴즈가 없습니다")
+        }
+        _ => false,
+    }
 }
 
 pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
@@ -208,5 +235,32 @@ mod tests {
 
         let missing_id = "<table><tr><th>Week</th><th>Name</th><th>Quiz closes</th></tr><tr><td>1</td><td><a href='/mod/quiz/view.php'>Quiz</a></td><td>soon</td></tr></table>";
         assert!(quizzes(missing_id, &base, &course).is_err());
+    }
+
+    #[test]
+    fn accepts_explicit_empty_coursework_pages() {
+        let base = Url::parse(BASE).unwrap();
+        let course = Course {
+            id: "42".into(),
+            reference: "course:42".into(),
+            title: "Compilers".into(),
+            code: None,
+            term: None,
+            url: format!("{BASE}/course/view.php?id=42"),
+        };
+        assert!(
+            assignments(
+                "<main>There are no assignments in this course.</main>",
+                &base,
+                &course
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            quizzes("<main>No quizzes found.</main>", &base, &course)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

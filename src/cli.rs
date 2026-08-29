@@ -252,8 +252,8 @@ pub enum BoardsCommand {
         #[command(flatten)]
         list: ListArgs,
     },
-    /// List posts in a board by module id or URL.
-    #[command(after_help = "Example:\n  klms --json boards posts 1265521 --limit 50")]
+    /// List posts by canonical board ref, module id, or URL.
+    #[command(after_help = "Example:\n  klms --json boards posts board:1265521 --limit 50")]
     Posts {
         board: String,
         #[command(flatten)]
@@ -285,7 +285,7 @@ pub enum FilesCommand {
         after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf"
     )]
     Download {
-        url: String,
+        source: String,
         #[arg(long)]
         out: PathBuf,
     },

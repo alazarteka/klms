@@ -34,9 +34,6 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
             skipped += 1;
             continue;
         };
-        if !seen.insert(url.to_string()) {
-            continue;
-        }
         let kind = event
             .value()
             .attr("data-event-component")
@@ -68,10 +65,20 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
         let course_url = course_link
             .and_then(|link| link.value().attr("href"))
             .and_then(|href| base_url.join(href).ok());
+        let title = text(anchor);
+        let identity = event
+            .value()
+            .attr("data-event-id")
+            .or_else(|| event.value().attr("data-eventid"))
+            .map(|id| format!("event:{id}"))
+            .unwrap_or_else(|| format!("{}|{}|{}", url, starts_at.as_deref().unwrap_or(""), title));
+        if !seen.insert(identity) {
+            continue;
+        }
         rows.push(CalendarEvent {
             reference,
             kind,
-            title: text(anchor),
+            title,
             course_id: course_url
                 .as_ref()
                 .and_then(|url| query_id(url, &["id"]))
@@ -180,5 +187,16 @@ mod tests {
         .unwrap();
         assert_eq!(unparsed.unparsed_times, 1);
         assert_eq!(unparsed.missing_course_ids, 1);
+    }
+
+    #[test]
+    fn preserves_distinct_events_that_share_a_module_url() {
+        let html = r#"<main class='calendarwrapper'>
+          <div class='event'><a href='/mod/quiz/view.php?id=8'>Quiz opens</a><time datetime='2026-09-01T09:00:00+09:00'>open</time></div>
+          <div class='event'><a href='/mod/quiz/view.php?id=8'>Quiz closes</a><time datetime='2026-09-02T18:00:00+09:00'>close</time></div>
+          </main>"#;
+        let page = calendar_page(html, &Url::parse(BASE).unwrap()).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert!(page.complete);
     }
 }
