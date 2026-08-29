@@ -18,6 +18,8 @@ klms auth status
 klms auth time-left
 klms auth extend
 klms dashboard [--limit N]
+klms today [--course COURSE] [--limit N]
+klms upcoming [--through Nd] [--course COURSE] [--limit N]
 klms courses list [--limit N]
 klms courses resolve QUERY [--limit N]
 klms courses show COURSE
@@ -30,6 +32,8 @@ klms calendar list [--limit N]
 klms boards list --course COURSE [--limit N]
 klms boards posts BOARD [--limit N]
 klms boards show POST
+klms notices list --course COURSE [--limit N]
+klms notices show NOTICE
 klms files list --course COURSE [--limit N]
 klms files download URL --out PATH
 klms videos list --course COURSE [--limit N]
@@ -39,10 +43,13 @@ klms attendance show --course COURSE
 klms request get PATH [--max-bytes N]
 ```
 
-`COURSE` accepts a numeric course id, an exact course code or title, or an
-unambiguous title/code fragment. Other resource operands accept a numeric
-course-module id or a same-origin KLMS URL where applicable. List commands
-have finite defaults and hard maxima.
+`COURSE` accepts a `course:ID` reference, numeric course id, exact course code
+or title, or an unambiguous title/code fragment. List commands return canonical
+references for follow-up commands. Assignments, quizzes, notices, files, and
+video kinds accept those references; same-origin KLMS URLs remain a repair
+path. Bare numeric video ids are rejected because they do not identify whether
+the module is VOD, Panopto, or LTI. List commands have finite defaults and hard
+maxima.
 
 ## Output
 
@@ -51,9 +58,17 @@ document on stdout or one error document on stderr. Diagnostics and progress
 never share stdout with structured data. The envelope is versioned separately
 from the binary.
 
-Successful resource reads include stable ids and URLs whenever KLMS exposes
-them. Empty lists are successful results. Ambiguous resolution is a usage
-error and names the candidates; it never guesses.
+Successful resource reads include stable ids, canonical `ref` values, and URLs
+whenever KLMS exposes them. Typed assignment and quiz lists include normalized
+ISO 8601 deadlines with the Korea-time offset while preserving KLMS's display
+text. Empty recognized lists are successful results. Unrecognized upstream
+markup is an explicit shape error. Ambiguous course resolution names the
+candidates; it never guesses.
+
+`today` and `upcoming` are human-oriented calendar views. They use Asia/Seoul
+calendar dates, preserve exact timestamps, and compose the same typed calendar
+records returned to agents. `--through 7d` includes today through seven days
+ahead and is bounded to 90 days.
 
 ## Safety
 

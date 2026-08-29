@@ -3,13 +3,23 @@ use serde_json::Value;
 
 use crate::error::AppError;
 
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListMeta {
+    pub returned: usize,
+    pub limit: usize,
+    pub complete: bool,
+    pub total: Option<usize>,
+    pub next_cursor: Option<String>,
+}
 
 pub struct CommandResult {
     pub command: &'static str,
     pub data: Value,
     pub human: String,
     pub warnings: Vec<String>,
+    pub meta: Option<ListMeta>,
 }
 
 #[derive(Serialize)]
@@ -19,6 +29,7 @@ struct SuccessEnvelope<'a> {
     command: &'a str,
     data: &'a Value,
     warnings: &'a [String],
+    meta: &'a Option<ListMeta>,
 }
 
 #[derive(Serialize)]
@@ -39,7 +50,28 @@ pub fn result<T: Serialize>(
             .map_err(|error| AppError::internal(format!("failed to encode output: {error}")))?,
         human,
         warnings: Vec::new(),
+        meta: None,
     })
+}
+
+pub fn collection<T: Serialize>(
+    command: &'static str,
+    data: &T,
+    human: String,
+    returned: usize,
+    limit: usize,
+    available: usize,
+    source_complete: bool,
+) -> Result<CommandResult, AppError> {
+    let mut result = result(command, data, human)?;
+    result.meta = Some(ListMeta {
+        returned,
+        limit,
+        complete: source_complete && returned == available,
+        total: source_complete.then_some(available),
+        next_cursor: None,
+    });
+    Ok(result)
 }
 
 pub fn print_success(result: &CommandResult, json: bool) {
@@ -50,6 +82,7 @@ pub fn print_success(result: &CommandResult, json: bool) {
             command: result.command,
             data: &result.data,
             warnings: &result.warnings,
+            meta: &result.meta,
         };
         println!(
             "{}",

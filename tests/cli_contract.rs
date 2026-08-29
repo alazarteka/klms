@@ -26,7 +26,7 @@ fn json_auth_status_is_one_document_without_secrets() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["schema_version"], "2");
     assert_eq!(value["ok"], true);
     assert_eq!(value["data"]["configured"], false);
 }
@@ -96,6 +96,50 @@ fn loopback_dashboard_exercises_cookie_transport_and_parser() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["data"]["course_count"], 1);
     assert_eq!(value["data"]["courses"][0]["id"], "42");
+    assert_eq!(value["data"]["courses"][0]["ref"], "course:42");
+}
+
+#[test]
+fn course_list_reports_canonical_refs_and_truncation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        let body = r#"<a href="/course/view.php?id=42">Compilers(CS.420_2026_2)</a>
+          <a href="/course/view.php?id=43">Databases(CS.430_2026_2)</a>"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "courses",
+            "list",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"][0]["ref"], "course:42");
+    assert_eq!(value["meta"]["returned"], 1);
+    assert_eq!(value["meta"]["total"], 2);
+    assert_eq!(value["meta"]["complete"], false);
 }
 
 #[test]
@@ -211,12 +255,15 @@ fn top_level_help_exposes_the_agent_resource_surface() {
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
         "auth",
+        "today",
+        "upcoming",
         "courses",
         "activities",
         "assignments",
         "quizzes",
         "calendar",
         "boards",
+        "notices",
         "files",
         "videos",
         "grades",

@@ -6,14 +6,20 @@ use url::Url;
 use crate::{
     auth,
     cli::{
-        ActivitiesCommand, AuthCommand, BoardsCommand, CalendarCommand, Cli, Command,
-        CourseShowCommand, CoursesCommand, FilesCommand, ModuleCommand, RequestCommand,
+        ActivitiesCommand, AgendaArgs, AuthCommand, BoardsCommand, CalendarCommand, Cli, Command,
+        CourseShowCommand, CoursesCommand, FilesCommand, ModuleCommand, NoticesCommand,
+        RequestCommand, UpcomingArgs,
     },
     client::{KlmsClient, validate_base_url},
+    date,
     error::AppError,
-    models::{Activity, Course, DownloadResult, RawGet, Report, SessionTime},
+    models::{
+        Activity, Assignment, Course, DownloadResult, FileResource, Notice, Quiz, RawGet, Report,
+        SessionTime,
+    },
     output::{self, CommandResult},
-    parse,
+    parse, present,
+    reference::ResourceRef,
 };
 
 const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -153,31 +159,77 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
             let mut model = parse::dashboard(&response.text, base_url)?;
             model.courses.truncate(args.limit);
             model.upcoming.truncate(args.limit);
+            model.courses_complete = model.courses.len() == model.course_count;
+            model.upcoming_complete = model.upcoming.len() == model.upcoming_count;
             let mut human = format!(
-                "{} — {} courses",
+                "{} — {} courses, {} upcoming",
                 model.term.as_deref().unwrap_or("Current dashboard"),
-                model.course_count
+                model.course_count,
+                model.upcoming_count,
             );
+            human.push_str("\n\nCourses:\nREF\tCODE\tTITLE");
             for course in &model.courses {
                 human.push_str(&format!(
                     "\n{}\t{}\t{}",
-                    course.id,
+                    course.reference,
                     course.code.as_deref().unwrap_or("-"),
                     course.title
                 ));
             }
+            if !model.courses_complete {
+                human.push_str(&format!(
+                    "\n[Showing {} of {} courses]",
+                    model.courses.len(),
+                    model.course_count
+                ));
+            }
+            human.push_str("\n\nUpcoming:");
+            if model.upcoming.is_empty() {
+                human.push_str("\nNone shown on the dashboard.");
+            } else {
+                for item in &model.upcoming {
+                    human.push_str(&format!("\n{}\t{}", item.title, item.url));
+                }
+                if !model.upcoming_complete {
+                    human.push_str(&format!(
+                        "\n[Showing {} of {} upcoming items]",
+                        model.upcoming.len(),
+                        model.upcoming_count
+                    ));
+                }
+            }
             output::result("dashboard", &model, human)
         }
+        Command::Today(args) => agenda(client, base_url, args, 0, "today"),
+        Command::Upcoming(args) => upcoming(client, base_url, args),
         Command::Courses(args) => match &args.command {
             CoursesCommand::List(list) => {
                 let mut courses = dashboard_courses(client, base_url)?;
+                let available = courses.len();
                 courses.truncate(list.limit);
-                output::result("courses.list", &courses, render_courses(&courses))
+                output::collection(
+                    "courses.list",
+                    &courses,
+                    render_courses(&courses),
+                    courses.len(),
+                    list.limit,
+                    available,
+                    true,
+                )
             }
             CoursesCommand::Resolve { query, list } => {
                 let mut matches = matching_courses(dashboard_courses(client, base_url)?, query);
+                let available = matches.len();
                 matches.truncate(list.limit);
-                output::result("courses.resolve", &matches, render_courses(&matches))
+                output::collection(
+                    "courses.resolve",
+                    &matches,
+                    render_courses(&matches),
+                    matches.len(),
+                    list.limit,
+                    available,
+                    true,
+                )
             }
             CoursesCommand::Show { course } => {
                 let resolved = resolve_course(client, base_url, course)?;
@@ -211,16 +263,13 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                 if let Some(kind) = kind {
                     rows.retain(|row| row.kind.eq_ignore_ascii_case(kind));
                 }
+                let available = rows.len();
                 rows.truncate(list.limit);
-                activity_result("activities.list", &resolved, rows)
+                activity_result("activities.list", &resolved, rows, list.limit, available)
             }
         },
-        Command::Assignments(args) => {
-            module_command(client, base_url, &args.command, "assign", "assignments")
-        }
-        Command::Quizzes(args) => {
-            module_command(client, base_url, &args.command, "quiz", "quizzes")
-        }
+        Command::Assignments(args) => assignments(client, base_url, &args.command),
+        Command::Quizzes(args) => quizzes(client, base_url, &args.command),
         Command::Videos(args) => module_command_multi(
             client,
             base_url,
@@ -231,12 +280,23 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
         Command::Calendar(args) => match &args.command {
             CalendarCommand::List(list) => {
                 let response = client.get("/calendar/view.php?view=upcoming")?;
-                let rows = parse::calendar(&response.text, base_url, list.limit)?;
-                let human = render_links(&rows);
-                output::result("calendar.list", &rows, human)
+                let mut rows = parse::calendar(&response.text, base_url)?;
+                let available = rows.len();
+                rows.truncate(list.limit);
+                let human = present::calendar(&rows);
+                output::collection(
+                    "calendar.list",
+                    &rows,
+                    human,
+                    rows.len(),
+                    list.limit,
+                    available,
+                    true,
+                )
             }
         },
         Command::Boards(args) => boards(client, base_url, &args.command),
+        Command::Notices(args) => notices(client, base_url, &args.command),
         Command::Files(args) => files(client, base_url, &args.command),
         Command::Grades(args) => match &args.command {
             CourseShowCommand::Show { course } => {
@@ -332,14 +392,160 @@ fn session_time_result(
     Ok(result)
 }
 
-fn module_command(
+fn assignments(
     client: &KlmsClient,
     base_url: &Url,
     command: &ModuleCommand,
-    kind: &str,
+) -> Result<CommandResult, AppError> {
+    match command {
+        ModuleCommand::List { course, list } => {
+            let resolved = resolve_course(client, base_url, course)?;
+            let response = client.get(&format!("/mod/assign/index.php?id={}", resolved.id))?;
+            let mut rows = parse::assignments(&response.text, &response.url, &resolved)?;
+            let available = rows.len();
+            rows.truncate(list.limit);
+            typed_assignment_result(rows, list.limit, available)
+        }
+        ModuleCommand::Show { target } => show_module(
+            client,
+            base_url,
+            target,
+            &["assign"],
+            "assign",
+            "assignments.show",
+        ),
+    }
+}
+
+fn quizzes(
+    client: &KlmsClient,
+    base_url: &Url,
+    command: &ModuleCommand,
+) -> Result<CommandResult, AppError> {
+    match command {
+        ModuleCommand::List { course, list } => {
+            let resolved = resolve_course(client, base_url, course)?;
+            let response = client.get(&format!("/mod/quiz/index.php?id={}", resolved.id))?;
+            let mut rows = parse::quizzes(&response.text, &response.url, &resolved)?;
+            let available = rows.len();
+            rows.truncate(list.limit);
+            typed_quiz_result(rows, list.limit, available)
+        }
+        ModuleCommand::Show { target } => {
+            show_module(client, base_url, target, &["quiz"], "quiz", "quizzes.show")
+        }
+    }
+}
+
+fn show_module(
+    client: &KlmsClient,
+    base_url: &Url,
+    target: &str,
+    kinds: &[&str],
+    detail_kind: &str,
+    command: &'static str,
+) -> Result<CommandResult, AppError> {
+    let path = module_path(target, kinds)?;
+    let response = client.get(&path)?;
+    let detail = parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
+    let human = present::detail(&detail);
+    output::result(command, &detail, human)
+}
+
+fn typed_assignment_result(
+    rows: Vec<Assignment>,
+    limit: usize,
+    available: usize,
+) -> Result<CommandResult, AppError> {
+    let human = present::assignments(&rows);
+    output::collection(
+        "assignments.list",
+        &rows,
+        human,
+        rows.len(),
+        limit,
+        available,
+        true,
+    )
+}
+
+fn typed_quiz_result(
+    rows: Vec<Quiz>,
+    limit: usize,
+    available: usize,
+) -> Result<CommandResult, AppError> {
+    let human = present::quizzes(&rows);
+    output::collection(
+        "quizzes.list",
+        &rows,
+        human,
+        rows.len(),
+        limit,
+        available,
+        true,
+    )
+}
+
+fn upcoming(
+    client: &KlmsClient,
+    base_url: &Url,
+    args: &UpcomingArgs,
+) -> Result<CommandResult, AppError> {
+    agenda(
+        client,
+        base_url,
+        &args.clone().into(),
+        args.through,
+        "upcoming",
+    )
+}
+
+impl From<UpcomingArgs> for AgendaArgs {
+    fn from(args: UpcomingArgs) -> Self {
+        Self {
+            course: args.course,
+            list: args.list,
+        }
+    }
+}
+
+fn agenda(
+    client: &KlmsClient,
+    base_url: &Url,
+    args: &AgendaArgs,
+    days: u32,
     label: &'static str,
 ) -> Result<CommandResult, AppError> {
-    module_command_multi(client, base_url, command, &[kind], label)
+    let course_id = match &args.course {
+        Some(course) => Some(resolve_course(client, base_url, course)?.id),
+        None => None,
+    };
+    let response = client.get("/calendar/view.php?view=upcoming")?;
+    let today = date::seoul_today();
+    let through = date::add_days(&today, days as i64).expect("valid current date");
+    let mut rows: Vec<_> = parse::calendar(&response.text, base_url)?
+        .into_iter()
+        .filter(|event| {
+            let date = event.starts_at.as_deref().and_then(|value| value.get(..10));
+            date.is_some_and(|date| date >= today.as_str() && date <= through.as_str())
+                && course_id
+                    .as_ref()
+                    .is_none_or(|course_id| event.course_id.as_ref() == Some(course_id))
+        })
+        .collect();
+    rows.sort_by(|left, right| left.starts_at.cmp(&right.starts_at));
+    let available = rows.len();
+    rows.truncate(args.list.limit);
+    let human = present::agenda(&rows, &today, &through);
+    output::collection(
+        label,
+        &rows,
+        human,
+        rows.len(),
+        args.list.limit,
+        available,
+        true,
+    )
 }
 
 fn module_command_multi(
@@ -359,18 +565,22 @@ fn module_command_multi(
                         && (row.title.to_ascii_lowercase().contains("panopto")
                             || row.title.to_ascii_lowercase().contains("vod")))
             });
+            let available = rows.len();
             rows.truncate(list.limit);
-            activity_result(command_name(label, "list"), &resolved, rows)
+            activity_result(
+                command_name(label, "list"),
+                &resolved,
+                rows,
+                list.limit,
+                available,
+            )
         }
         ModuleCommand::Show { target } => {
-            let path = module_path(target, kinds[0])?;
+            let path = module_path(target, kinds)?;
             let response = client.get(&path)?;
             let detail = parse::resource_detail(&response.text, base_url, &response.url, kinds[0])?;
-            output::result(
-                command_name(label, "show"),
-                &detail,
-                format!("{}\n{}", detail.title, detail.text),
-            )
+            let human = present::detail(&detail);
+            output::result(command_name(label, "show"), &detail, human)
         }
     }
 }
@@ -385,47 +595,122 @@ fn boards(
             let resolved = resolve_course(client, base_url, course)?;
             let mut rows = course_activities(client, base_url, &resolved, None)?;
             rows.retain(|row| row.kind.eq_ignore_ascii_case("courseboard"));
+            let available = rows.len();
             rows.truncate(list.limit);
-            activity_result("boards.list", &resolved, rows)
+            activity_result("boards.list", &resolved, rows, list.limit, available)
         }
         BoardsCommand::Posts { board, list } => {
-            let path = module_path(board, "courseboard")?;
+            let path = module_path(board, &["courseboard"])?;
             let response = client.get(&path)?;
             let board_id = query_value(&response.url, "id");
             let mut posts = parse::board_posts(&response.text, base_url, board_id)?;
+            let available = posts.len();
             posts.truncate(list.limit);
             let human = posts
                 .iter()
                 .map(|post| {
                     format!(
                         "{}\t{}\t{}",
-                        post.id.as_deref().unwrap_or("-"),
+                        post.reference.as_deref().unwrap_or("-"),
                         post.posted.as_deref().unwrap_or("-"),
                         post.title
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            output::result("boards.posts", &posts, human)
-        }
-        BoardsCommand::Show { post } => {
-            if post.chars().all(|c| c.is_ascii_digit()) {
-                return Err(AppError::usage(
-                    "board post show requires the article URL returned by `boards posts`",
-                ));
-            }
-            let response = client.get(post)?;
-            let detail = parse::resource_detail(
-                &response.text,
-                base_url,
-                &response.url,
-                "courseboard-post",
-            )?;
-            output::result(
-                "boards.show",
-                &detail,
-                format!("{}\n{}", detail.title, detail.text),
+            output::collection(
+                "boards.posts",
+                &posts,
+                human,
+                posts.len(),
+                list.limit,
+                available,
+                !parse::has_next_page(&response.text)?,
             )
+        }
+        BoardsCommand::Show { post } => show_board_post(client, base_url, post, "boards.show"),
+    }
+}
+
+fn show_board_post(
+    client: &KlmsClient,
+    base_url: &Url,
+    post: &str,
+    command: &'static str,
+) -> Result<CommandResult, AppError> {
+    let target = if post.starts_with("board-post:") {
+        ResourceRef::parse(post)?.path()
+    } else if post.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::usage(
+            "board post show requires a board-post:BOARD:POST reference or article URL",
+        ));
+    } else {
+        post.into()
+    };
+    let response = client.get(&target)?;
+    let detail =
+        parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")?;
+    let human = present::detail(&detail);
+    output::result(command, &detail, human)
+}
+
+fn notices(
+    client: &KlmsClient,
+    base_url: &Url,
+    command: &NoticesCommand,
+) -> Result<CommandResult, AppError> {
+    match command {
+        NoticesCommand::List { course, list } => {
+            let resolved = resolve_course(client, base_url, course)?;
+            let boards: Vec<_> = course_activities(client, base_url, &resolved, None)?
+                .into_iter()
+                .filter(|activity| {
+                    activity.kind.eq_ignore_ascii_case("courseboard")
+                        && (activity.title.to_ascii_lowercase().contains("notice")
+                            || activity.title.contains("공지"))
+                })
+                .collect();
+            let mut rows = Vec::new();
+            let mut source_complete = true;
+            for board in boards {
+                let Some(board_ref) = board.reference else {
+                    continue;
+                };
+                let path = ResourceRef::parse(&board_ref)?.path();
+                let response = client.get(&path)?;
+                source_complete &= !parse::has_next_page(&response.text)?;
+                let board_id = query_value(&response.url, "id");
+                for post in parse::board_posts(&response.text, base_url, board_id)? {
+                    let Some(reference) = post.reference else {
+                        continue;
+                    };
+                    rows.push(Notice {
+                        reference,
+                        board_ref: board_ref.clone(),
+                        course_id: resolved.id.clone(),
+                        course_ref: resolved.reference.clone(),
+                        title: post.title,
+                        posted_at: post.posted.as_deref().and_then(date::normalize_datetime),
+                        posted_text: post.posted,
+                        url: post.url,
+                    });
+                }
+            }
+            let available = rows.len();
+            rows.truncate(list.limit);
+            let human = present::notices(&rows);
+            output::collection(
+                "notices.list",
+                &rows,
+                human,
+                rows.len(),
+                list.limit,
+                available,
+                source_complete,
+            )
+        }
+        NoticesCommand::Show { notice } => {
+            show_board_post(client, base_url, notice, "notices.show")
         }
     }
 }
@@ -445,10 +730,43 @@ fn files(
                     "resource" | "folder" | "page" | "coursefile" | "url"
                 )
             });
-            rows.truncate(list.limit);
-            activity_result("files.list", &resolved, rows)
+            let mut files: Vec<_> = rows
+                .into_iter()
+                .map(|activity| FileResource {
+                    reference: activity.reference,
+                    id: activity.id,
+                    downloadable: matches!(activity.kind.as_str(), "resource" | "coursefile")
+                        && activity.url.is_some(),
+                    kind: activity.kind,
+                    title: activity.title,
+                    course_id: resolved.id.clone(),
+                    course_ref: resolved.reference.clone(),
+                    week: activity.week,
+                    section: activity.section,
+                    url: activity.url,
+                })
+                .collect();
+            let available = files.len();
+            files.truncate(list.limit);
+            let human = present::files(&files);
+            output::collection(
+                "files.list",
+                &files,
+                human,
+                files.len(),
+                list.limit,
+                available,
+                true,
+            )
         }
-        FilesCommand::Download { url, out } => download(client, url, out),
+        FilesCommand::Download { url, out } => {
+            let source = if url.starts_with("file:") {
+                ResourceRef::parse(url)?.path()
+            } else {
+                url.clone()
+            };
+            download(client, &source, out)
+        }
     }
 }
 
@@ -642,31 +960,58 @@ fn activity_result(
     command: &'static str,
     course: &Course,
     rows: Vec<Activity>,
+    limit: usize,
+    available: usize,
 ) -> Result<CommandResult, AppError> {
-    let mut human = format!("{} — {} items", course.title, rows.len());
+    let mut human = format!(
+        "{} — showing {} of {} items\nREF\tTYPE\tWEEK\tTITLE",
+        course.title,
+        rows.len(),
+        available
+    );
     for row in &rows {
         human.push_str(&format!(
-            "\n{}\t{}\t{}",
-            row.id.as_deref().unwrap_or("-"),
+            "\n{}\t{}\t{}\t{}",
+            row.reference.as_deref().unwrap_or("-"),
             row.kind,
+            row.week
+                .map(|week| week.to_string())
+                .as_deref()
+                .unwrap_or("-"),
             row.title
         ));
     }
-    output::result(command, &rows, human)
+    output::collection(command, &rows, human, rows.len(), limit, available, true)
 }
 
-fn module_path(target: &str, kind: &str) -> Result<String, AppError> {
+fn module_path(target: &str, kinds: &[&str]) -> Result<String, AppError> {
+    if target.contains(':') && !target.starts_with("https://") && !target.starts_with("http://") {
+        let reference = ResourceRef::parse(target)?;
+        if !reference.matches_module(kinds) {
+            return Err(AppError::usage(format!(
+                "resource reference {target:?} does not identify one of: {}",
+                kinds.join(", ")
+            )));
+        }
+        return Ok(reference.path());
+    }
     if !target.is_empty() && target.chars().all(|c| c.is_ascii_digit()) {
-        Ok(format!("/mod/{kind}/view.php?id={target}"))
+        if kinds.len() == 1 {
+            Ok(format!("/mod/{}/view.php?id={target}", kinds[0]))
+        } else {
+            Err(AppError::usage(format!(
+                "numeric id {target} is ambiguous; use the typed reference returned by the list command"
+            )))
+        }
     } else if target.starts_with('/')
         || target.starts_with("https://")
         || target.starts_with("http://")
     {
         Ok(target.into())
     } else {
-        Err(AppError::usage(format!(
-            "expected a numeric {kind} module id or same-origin KLMS URL"
-        )))
+        Err(AppError::usage(
+            "expected a canonical resource reference, numeric module id, or same-origin KLMS URL",
+        ))
     }
 }
 
@@ -707,9 +1052,16 @@ fn matching_courses(courses: Vec<Course>, query: &str) -> Vec<Course> {
 }
 
 fn resolve_course(client: &KlmsClient, base_url: &Url, query: &str) -> Result<Course, AppError> {
+    if query.starts_with("course:") {
+        let ResourceRef::Course(id) = ResourceRef::parse(query)? else {
+            unreachable!("course prefix parses only as a course")
+        };
+        return resolve_course(client, base_url, &id);
+    }
     if !query.is_empty() && query.chars().all(|c| c.is_ascii_digit()) {
         return Ok(Course {
             id: query.into(),
+            reference: format!("course:{query}"),
             title: format!("Course {query}"),
             code: None,
             term: None,
@@ -738,9 +1090,23 @@ fn resolve_course(client: &KlmsClient, base_url: &Url, query: &str) -> Result<Co
         [] => Err(AppError::not_found(format!(
             "no dashboard course matches {query:?}"
         ))),
-        _ => Err(AppError::usage(format!(
-            "course query {query:?} is ambiguous; run `klms courses resolve {query}`"
-        ))),
+        _ => {
+            let candidates = matches
+                .iter()
+                .take(5)
+                .map(|course| {
+                    format!(
+                        "{} ({})",
+                        course.code.as_deref().unwrap_or(&course.reference),
+                        course.title
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(AppError::usage(format!(
+                "course query {query:?} is ambiguous: {candidates}; use an exact code or course reference"
+            )))
+        }
     }
 }
 
@@ -748,29 +1114,16 @@ fn render_courses(courses: &[Course]) -> String {
     if courses.is_empty() {
         return "No courses found.".into();
     }
-    courses
-        .iter()
-        .map(|course| {
-            format!(
-                "{}\t{}\t{}",
-                course.id,
-                course.code.as_deref().unwrap_or("-"),
-                course.title
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_links(rows: &[crate::models::LinkItem]) -> String {
-    if rows.is_empty() {
-        "No events found.".into()
-    } else {
-        rows.iter()
-            .map(|row| format!("{}\t{}", row.title, row.url))
-            .collect::<Vec<_>>()
-            .join("\n")
+    let mut output = format!("Courses — showing {}\nREF\tCODE\tTITLE", courses.len());
+    for course in courses {
+        output.push_str(&format!(
+            "\n{}\t{}\t{}",
+            course.reference,
+            course.code.as_deref().unwrap_or("-"),
+            course.title
+        ));
     }
+    output
 }
 
 fn report_result(

@@ -17,6 +17,9 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `parse`: upstream HTML knowledge. Selectors and Moodle-specific markup stay
   here.
 - `models`: typed records returned by commands.
+- `reference`: canonical resource-reference parsing and endpoint mapping.
+- `date`: narrow KLMS date normalization and Korea-time window arithmetic.
+- `present`: scannable human representations of typed records.
 - `output`: stable JSON envelopes, human rendering, terminal sanitization, and
   exit categories.
 

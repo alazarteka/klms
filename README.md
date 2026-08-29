@@ -17,6 +17,8 @@ klms auth status
 klms auth time-left
 klms auth extend
 klms dashboard
+klms today [--course COURSE]
+klms upcoming [--through 7d] [--course COURSE]
 klms courses list
 klms courses resolve QUERY
 klms courses show COURSE
@@ -29,6 +31,8 @@ klms calendar list
 klms boards list --course COURSE
 klms boards posts BOARD
 klms boards show POST
+klms notices list --course COURSE
+klms notices show NOTICE
 klms files list --course COURSE
 klms files download URL --out PATH
 klms videos list --course COURSE
@@ -37,6 +41,11 @@ klms grades show --course COURSE
 klms attendance show --course COURSE
 klms request get PATH [--max-bytes N]
 ```
+
+Lists return canonical references that can be passed directly to detail and
+download commands, such as `assign:1210516`, `board-post:1189554:439261`, and
+`file:1205160`. Assignment and quiz lists expose typed Korea-time deadlines;
+`today` and `upcoming` provide the corresponding human workflow.
 
 Pass `--json` before the command for deterministic machine-readable output.
 See [docs/COMMAND_CONTRACT.md](docs/COMMAND_CONTRACT.md) for resolution,
