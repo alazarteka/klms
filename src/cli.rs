@@ -9,11 +9,11 @@ const LIST_HELP: &str = "Examples:\n  klms courses list\n  klms --json courses l
     name = "klms",
     version,
     about = "Fast, agent-friendly access to KAIST KLMS",
-    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one stable document for agents and scripts.",
+    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one versioned document for agents and scripts.",
     arg_required_else_help = true
 )]
 pub struct Cli {
-    /// Emit one stable JSON document.
+    /// Emit one versioned JSON document.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -75,7 +75,7 @@ pub enum Command {
     Grades(CourseShowArgs),
     /// Show the attendance report for a course.
     Attendance(CourseShowArgs),
-    /// Preview a same-origin text response (experimental repair hatch).
+    /// Preview a known same-origin HTML or JSON read (experimental repair hatch).
     Request(RequestArgs),
 }
 

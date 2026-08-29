@@ -30,11 +30,11 @@ klms quizzes show QUIZ
 klms calendar list
 klms boards list --course COURSE
 klms boards posts BOARD
-klms boards show POST
+klms boards show BOARD_POST_REF
 klms notices list --course COURSE
 klms notices show NOTICE
 klms files list --course COURSE
-klms files download URL --out PATH
+klms files download FILE_REF_OR_URL --out PATH
 klms videos list --course COURSE
 klms videos show VIDEO
 klms grades show --course COURSE

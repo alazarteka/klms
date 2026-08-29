@@ -143,6 +143,163 @@ fn course_list_reports_canonical_refs_and_truncation() {
 }
 
 #[test]
+fn raw_get_is_a_truncated_secret_free_preview() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let length = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..length]);
+        assert!(request.starts_with("GET /mod/assign/view.php?id=7 HTTP/1.1"));
+        let body = r#"{"sesskey":"bodysecret","payload":"abcdefghijklmnopqrstuvwxyz"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "request",
+            "get",
+            "/mod/assign/view.php?id=7",
+            "--max-bytes",
+            "48",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success());
+    assert!(
+        !output
+            .stdout
+            .windows(10)
+            .any(|bytes| bytes == b"bodysecret")
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["truncated"], true);
+    assert_eq!(value["data"]["redacted"], true);
+    assert!(
+        value["data"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("bounded response is incomplete")
+    );
+}
+
+#[test]
+fn transport_errors_do_not_echo_secret_bearing_redirect_urls() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 302 Found\r\nLocation: https://example.invalid/continue?sesskey=transportsecret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "request",
+            "get",
+            "/mod/assign/view.php?id=7",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("transportsecret"));
+}
+
+#[test]
+fn download_redacts_source_secrets_and_refuses_replacement() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let length = stream.read(&mut request).unwrap();
+        assert!(
+            String::from_utf8_lossy(&request[..length])
+                .starts_with("GET /pluginfile.php/7/notes.pdf?token=downloadsecret HTTP/1.1")
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 5\r\nConnection: close\r\n\r\nnotes"
+        )
+        .unwrap();
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().join("state.json");
+    let out = state_dir.path().join("notes.pdf");
+    fs::write(&state_path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
+    let source = format!("http://{address}/pluginfile.php/7/notes.pdf?token=downloadsecret");
+    let output = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "files",
+            "download",
+            &source,
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(fs::read(&out).unwrap(), b"notes");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["bytes"], 5);
+    assert!(
+        !value["data"]["source_url"]
+            .as_str()
+            .unwrap()
+            .contains("downloadsecret")
+    );
+
+    let replacement = binary()
+        .env("KLMS_STORAGE_STATE", &state_path)
+        .args([
+            "--json",
+            "--base-url",
+            &format!("http://{address}"),
+            "files",
+            "download",
+            &source,
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!replacement.status.success());
+    assert_eq!(fs::read(&out).unwrap(), b"notes");
+}
+
+#[test]
 fn auth_extend_uses_allowlisted_ajax_and_reports_remaining_time() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

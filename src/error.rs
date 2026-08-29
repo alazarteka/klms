@@ -69,6 +69,14 @@ impl AppError {
         Self::new("CONFIG_ERROR", message, None, false, 40)
     }
 
+    pub fn limit(message: impl Into<String>) -> Self {
+        Self::new("LIMIT_EXCEEDED", message, None, false, 41)
+    }
+
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self::new("UPSTREAM_ERROR", message, None, false, 31)
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new("NOT_FOUND", message, None, false, 44)
     }
