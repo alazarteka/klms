@@ -33,6 +33,9 @@ for wrapper in scripts/cargo-deny.sh scripts/cargo-vet.sh; do
   grep -q 'safe_tool_archive.py' "$wrapper" || fail "$wrapper bypasses the safe archive copier"
 done
 
+[[ -x scripts/install.sh ]] || fail "scripts/install.sh is not executable"
+bash -n scripts/install.sh
+
 grep -q '^\[policy\.klms\]$' supply-chain/config.toml || fail "cargo-vet root policy is absent"
 [[ "$(grep -c '^\[\[exemptions\.' supply-chain/config.toml)" -gt 0 ]] || \
   fail "cargo-vet baseline exemptions are not explicit"
@@ -69,4 +72,3 @@ print("locked graph malicious-package check passed")
 PY
 
 echo "supply-chain contract passed"
-

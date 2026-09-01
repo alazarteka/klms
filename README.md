@@ -1,129 +1,146 @@
 # klms
 
-`klms` is a fast, read-oriented command-line client for KAIST's Learning
-Management System. It reads the same authenticated HTML and Moodle endpoints as
-the web interface without launching a browser for ordinary commands.
+`klms` puts KAIST's Learning Management System in your terminal. It can show
+what is due today, look through a course, read notices, inspect grades and
+attendance, and download course files. Normal use does not open a browser.
 
-The project is under active development. Its agent-facing surface covers the
-authenticated session, course discovery, weekly activities, assignments,
-quizzes, calendar events, course boards, files, video metadata, grades, and
-attendance.
+The client is deliberately read-oriented. It will not submit an assignment,
+start a quiz, post to a board, or check you into class.
 
-## Command surface
+## Install
 
-```text
-klms doctor
-klms auth login [--method easy|password] [--second-factor email|sms]
-klms auth logout
-klms auth status
-klms auth time-left
-klms auth extend
-klms dashboard
-klms today [--course COURSE]
-klms upcoming [--through 7d] [--course COURSE]
-klms courses list
-klms courses resolve QUERY
-klms courses show COURSE
-klms activities list --course COURSE [--week N] [--kind KIND] [--limit N]
-klms assignments list --course COURSE
-klms assignments show ASSIGNMENT
-klms quizzes list --course COURSE
-klms quizzes show QUIZ
-klms calendar list
-klms boards list --course COURSE
-klms boards posts BOARD
-klms boards show BOARD_POST_REF
-klms notices list --course COURSE
-klms notices show NOTICE
-klms files list --course COURSE
-klms files download FILE_REF_OR_URL --out PATH
-klms videos list --course COURSE
-klms videos show VIDEO
-klms grades show --course COURSE
-klms attendance show --course COURSE
-klms request get PATH [--max-bytes N]
-```
-
-Lists return canonical references that can be passed directly to detail and
-download commands, such as `assign:1210516`, `board-post:1189554:439261`, and
-`file:1205160`. Assignment and quiz lists expose typed Korea-time deadlines;
-`today` and `upcoming` provide the corresponding human workflow.
-
-Pass `--json` before the command for deterministic machine-readable output.
-See [docs/COMMAND_CONTRACT.md](docs/COMMAND_CONTRACT.md) for resolution,
-output, retry, and safety semantics.
-
-## Authentication
-
-`klms` owns its authentication. Run `klms auth login` for KAIST Easy Login, or
-choose password login with email or SMS verification:
+The release page has binaries for Apple Silicon macOS and x86-64 Linux. Download
+the installer, have a look if you like, and run it:
 
 ```bash
-klms auth login --method easy
+curl --proto '=https' --tlsv1.2 -fsSLo install-klms.sh \
+  https://raw.githubusercontent.com/alazarteka/klms/main/scripts/install.sh
+less install-klms.sh
+bash install-klms.sh
+```
+
+The script finds the latest release, downloads the archive and its published
+SHA-256 file, verifies the checksum, and installs `klms` under `~/.local/bin`.
+Set `KLMS_INSTALL_DIR` to choose another directory. From a cloned checkout, run
+`bash scripts/install.sh` instead.
+
+If `~/.local/bin` is not already on your `PATH`, add it in your shell setup:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The archives and their checksums are also available on the
+[GitHub releases page](https://github.com/alazarteka/klms/releases).
+
+## Sign in
+
+Easy Login is the default:
+
+```bash
+klms auth login
+```
+
+Enter your KAIST email address or phone number, then approve the comparison
+number in the KAIST app. Password login works with either email or SMS
+verification:
+
+```bash
 klms auth login --method password --second-factor email
 klms auth login --method password --second-factor sms
 ```
 
-Passwords and verification codes are read from the terminal with echo disabled;
-they are never accepted as command arguments or environment variables. The
-resulting KLMS-only cookie set is stored at
-`$XDG_STATE_HOME/klms/session.json`, falling back to
-`~/.local/state/klms/session.json`, with private permissions and atomic writes.
-General KAIST SSO cookies, passwords, verification codes, encryption keys, raw
-HTML, and Moodle session keys are not persisted.
+Passwords and six-digit verification codes are read with terminal echo turned
+off. They are not accepted as flags or environment variables. If KAIST treats
+the client as a new device, `klms` registers it during login; there is no
+separate browser step.
 
-Use `klms auth status` to inspect non-secret metadata, `klms auth logout` to
-remove the local session, and `klms doctor` to validate it. `auth time-left`
-reads the server timer; `auth extend` refreshes an already-valid session but
-cannot log in.
+The saved session contains only the KLMS cookies and trusted-device identifiers
+needed for later logins. It lives at `$XDG_STATE_HOME/klms/session.json`, or
+`~/.local/state/klms/session.json` when `XDG_STATE_HOME` is unset. Passwords,
+verification codes, general KAIST SSO cookies, raw HTML, and Moodle session
+keys are never written there.
 
-If KAIST classifies the native client as a new device, `klms` registers it
-automatically during the same login transaction and saves the returned trusted
-device identifier for subsequent policy checks. No browser visit is required.
-
-## Development
-
-Dependency review precedes compilation. See [SECURITY.md](SECURITY.md) and
-[docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) before changing
-`Cargo.toml` or `Cargo.lock`.
-
-After the dependency policy passes:
+Useful checks:
 
 ```bash
-cargo fmt --all -- --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
+klms auth status       # describe the saved session without printing secrets
+klms doctor            # make a small live request and check that it still works
+klms auth time-left    # ask KLMS how much time remains
+klms auth logout       # remove the local session
 ```
 
-Install locally with:
+`klms auth extend` refreshes an existing session timer. It cannot revive an
+expired session.
+
+## Use it
+
+Start with the day in front of you:
 
 ```bash
+klms today
+klms upcoming --through 7d
+klms dashboard
+```
+
+Then narrow things down by course:
+
+```bash
+klms courses list
+klms courses resolve "machine learning"
+klms assignments list --course course:12345
+klms notices list --course course:12345
+klms grades show --course course:12345
+klms attendance show --course course:12345
+```
+
+List commands return references such as `assign:1210516`,
+`board-post:1189554:439261`, and `file:1205160`. Pass a reference directly to a
+matching detail or download command:
+
+```bash
+klms assignments show assign:1210516
+klms notices show board-post:1189554:439261
+klms files download file:1205160 --out lecture-notes.pdf
+```
+
+Run `klms --help` or `klms <command> --help` for the rest of the command
+surface, including activities, quizzes, calendar events, boards, videos, and
+course files.
+
+## JSON and agent use
+
+Put `--json` before the command for stable machine-readable output:
+
+```bash
+klms --json today
+klms --json assignments list --course course:12345
+```
+
+The [command contract](docs/COMMAND_CONTRACT.md) documents reference
+resolution, output schemas, retries, and safety boundaries.
+
+`klms skill install` installs the companion Agent Skill embedded in the binary
+under `~/.local/share/klms/skills/klms` and links it from
+`~/.agents/skills/klms`. Set `XDG_DATA_HOME` to use another data root. Run
+`klms skill status` to inspect the installation.
+
+## Build from source
+
+This project uses Rust 1.86 or newer. Dependency changes have an additional
+review gate; read [SECURITY.md](SECURITY.md) and
+[docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) before editing
+`Cargo.toml` or `Cargo.lock`.
+
+For an unchanged lockfile:
+
+```bash
+make check
 make install-local
 ```
 
-This installs `klms` under `~/.local/bin` by default. The binary contains the
-matching companion Agent Skill and installs it with the binary:
-
-```text
-~/.local/share/klms/skills/klms/SKILL.md
-~/.agents/skills/klms -> ~/.local/share/klms/skills/klms
-```
-
-`XDG_DATA_HOME` replaces `~/.local/share` when set. Run `klms skill install`
-to reinstall the embedded skill or `klms skill status` to inspect it. The
-compatibility target `make install-skill` invokes the installed binary rather
-than copying from the checkout.
-
-The companion skill teaches compatible agents to prefer this interface for
-supported KLMS resources and to use its owned authentication commands.
-
-## Scope
-
-The current product performs remote reads, direct KAIST SSO login, explicit
-local downloads, local Agent Skill installation, and explicit session
-extension. It does not
-submit assignments, begin quiz attempts, post messages, check into attendance,
-or mutate third-party tools.
+`make install-local` builds the release binary, installs it under
+`~/.local/bin` by default, and installs the matching companion skill.
 
 ## License
 
