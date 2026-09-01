@@ -21,8 +21,9 @@ bash install-klms.sh
 
 The script finds the latest release, downloads the archive and its published
 SHA-256 file, verifies the checksum, and installs `klms` under `~/.local/bin`.
-Set `KLMS_INSTALL_DIR` to choose another directory. From a cloned checkout, run
-`bash scripts/install.sh` instead.
+It also installs the matching companion Agent Skill embedded in that release.
+Set `KLMS_INSTALL_DIR` to choose another binary directory. From a cloned
+checkout, run `bash scripts/install.sh` instead.
 
 If `~/.local/bin` is not already on your `PATH`, add it in your shell setup:
 

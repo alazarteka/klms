@@ -50,5 +50,6 @@ tar -xzf "$work_dir/$archive" -C "$work_dir"
 readonly install_dir="${KLMS_INSTALL_DIR:-$HOME/.local/bin}"
 install -d "$install_dir"
 install -m 0755 "$work_dir/klms-${version}-${target}/klms" "$install_dir/klms"
+"$install_dir/klms" skill install
 
 echo "Installed $("$install_dir/klms" --version) at $install_dir/klms"
