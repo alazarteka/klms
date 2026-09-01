@@ -1,6 +1,6 @@
 ---
 name: klms
-description: Use the installed `klms` CLI for fast, structured access to KAIST KLMS sessions, courses, today/upcoming work, assignments, quizzes, notices, calendar, boards, files, videos, grades, and attendance. Prefer it over browser scraping; use kaist-cli only to create or refresh authentication.
+description: Use the installed `klms` CLI for fast, structured access to KAIST KLMS authentication, sessions, courses, today/upcoming work, assignments, quizzes, notices, calendar, boards, files, videos, grades, and attendance. Prefer it over browser scraping and use its owned login flow.
 ---
 
 # KLMS CLI
@@ -10,6 +10,10 @@ command:
 
 ```bash
 klms --json doctor
+klms auth login --method easy
+klms auth login --method password --second-factor email
+klms auth login --method password --second-factor sms
+klms --json auth logout
 klms --json auth time-left
 klms --json dashboard
 klms --json today
@@ -67,8 +71,9 @@ Do not reinterpret access as authorization to submit work, start quizzes,
 check into attendance, or post messages. Downloads require an explicit `--out`
 path and refuse overwrites.
 
-Authentication comes from a Playwright storage-state file. Inspect it without
-printing secrets using `klms --json auth status`. If the result is
-`AUTH_REQUIRED`, run `kaist klms auth refresh`; `klms auth extend` cannot log in
-or revive an expired session. `klms` does not own interactive login yet. Never
-display cookie values or ask the user to paste a password into chat.
+Authentication is owned by `klms`. Inspect it without printing secrets using
+`klms --json auth status`. If the result is `AUTH_REQUIRED`, ask the user to run
+an interactive `klms auth login`; Easy Login and password login with email or
+SMS verification are supported. `klms auth extend` cannot log in or revive an
+expired session. Never display cookie values or ask the user to paste a
+password or verification code into chat.

@@ -15,7 +15,7 @@ install-local:
 	cargo build --release --locked
 	install -d "$(BINDIR)"
 	install -m 0755 target/release/klms "$(BINDIR)/klms"
+	"$(BINDIR)/klms" skill install
 
 install-skill:
-	install -d "$(HOME)/.codex/skills/klms"
-	install -m 0644 skills/klms/SKILL.md "$(HOME)/.codex/skills/klms/SKILL.md"
+	"$(BINDIR)/klms" skill install

@@ -1,4 +1,57 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.block-padding]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.3.3"
+
+[[audits.cbc]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.1.2"
+
+[[audits.cipher]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.4.4"
+
+[[audits.crypto-common]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.1.7"
+
+[[audits.generic-array]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.14.7"
+
+[[audits.inout]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.1.4"
+
+[[audits.kisaseed]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.1.3"
+
+[[audits.rpassword]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "7.5.4"
+
+[[audits.rtoolbox]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.0.6"
+
+[[audits.typenum]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "1.20.1"
+
+[[audits.version_check]]
+who = "@alazarteka (review recorded by Codex)"
+criteria = "safe-to-run"
+version = "0.9.5"

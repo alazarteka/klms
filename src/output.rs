@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::error::AppError;
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListMeta {

@@ -13,6 +13,8 @@ attendance.
 
 ```text
 klms doctor
+klms auth login [--method easy|password] [--second-factor email|sms]
+klms auth logout
 klms auth status
 klms auth time-left
 klms auth extend
@@ -53,19 +55,31 @@ output, retry, and safety semantics.
 
 ## Authentication
 
-The initial client reads a Playwright-compatible storage-state file containing
-an existing authenticated KLMS session. Resolution order is:
+`klms` owns its authentication. Run `klms auth login` for KAIST Easy Login, or
+choose password login with email or SMS verification:
 
-1. `KLMS_STORAGE_STATE`;
-2. `~/.config/klms/storage-state.json`;
-3. `~/.kaist-cli/private/klms/storage_state.json` as a migration bridge.
+```bash
+klms auth login --method easy
+klms auth login --method password --second-factor email
+klms auth login --method password --second-factor sms
+```
 
-Cookie values and Moodle session keys are never printed. Use `klms doctor` or
-`klms auth status` to see which source was selected and whether its metadata is
-usable. `auth time-left` reads the server timer; `auth extend` is the sole
-explicit remote mutation and refreshes that timer.
-If KLMS rejects the saved session, run `kaist klms auth refresh`; `auth extend`
-only extends an already-valid session and does not log in.
+Passwords and verification codes are read from the terminal with echo disabled;
+they are never accepted as command arguments or environment variables. The
+resulting KLMS-only cookie set is stored at
+`$XDG_STATE_HOME/klms/session.json`, falling back to
+`~/.local/state/klms/session.json`, with private permissions and atomic writes.
+General KAIST SSO cookies, passwords, verification codes, encryption keys, raw
+HTML, and Moodle session keys are not persisted.
+
+Use `klms auth status` to inspect non-secret metadata, `klms auth logout` to
+remove the local session, and `klms doctor` to validate it. `auth time-left`
+reads the server timer; `auth extend` refreshes an already-valid session but
+cannot log in.
+
+If KAIST classifies the native client as a new device, `klms` registers it
+automatically during the same login transaction and saves the returned trusted
+device identifier for subsequent policy checks. No browser visit is required.
 
 ## Development
 
@@ -85,18 +99,31 @@ Install locally with:
 
 ```bash
 make install-local
-make install-skill
 ```
 
-The companion skill teaches Codex to prefer this read-only interface for the
-supported KLMS resources and to delegate interactive authentication back to
-the established `kaist` CLI.
+This installs `klms` under `~/.local/bin` by default. The binary contains the
+matching companion Agent Skill and installs it with the binary:
+
+```text
+~/.local/share/klms/skills/klms/SKILL.md
+~/.agents/skills/klms -> ~/.local/share/klms/skills/klms
+```
+
+`XDG_DATA_HOME` replaces `~/.local/share` when set. Run `klms skill install`
+to reinstall the embedded skill or `klms skill status` to inspect it. The
+compatibility target `make install-skill` invokes the installed binary rather
+than copying from the checkout.
+
+The companion skill teaches compatible agents to prefer this interface for
+supported KLMS resources and to use its owned authentication commands.
 
 ## Scope
 
-The current product performs remote reads, explicit local downloads, and
-explicit session extension only. It does not submit assignments, begin quiz
-attempts, post messages, check into attendance, or mutate third-party tools.
+The current product performs remote reads, direct KAIST SSO login, explicit
+local downloads, local Agent Skill installation, and explicit session
+extension. It does not
+submit assignments, begin quiz attempts, post messages, check into attendance,
+or mutate third-party tools.
 
 ## License
 

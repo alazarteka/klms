@@ -7,16 +7,18 @@ must inspect both the process exit status and `ok`.
 Successful commands use:
 
 ```json
-{"schema_version":"2","ok":true,"command":"courses.list","data":[],"warnings":[],"meta":{"returned":0,"limit":100,"complete":true,"total":0,"next_cursor":null}}
+{"schema_version":"3","ok":true,"command":"courses.list","data":[],"warnings":[],"meta":{"returned":0,"limit":100,"complete":true,"total":0,"next_cursor":null}}
 ```
 
 Errors use:
 
 ```json
-{"schema_version":"2","ok":false,"error":{"code":"AUTH_REQUIRED","message":"...","hint":"...","retryable":false}}
+{"schema_version":"3","ok":false,"error":{"code":"AUTH_REQUIRED","message":"...","hint":"...","retryable":false}}
 ```
 
 Errors may include a `details` object when structured diagnostics help recovery.
+Authentication protocol drift uses `AUTH_PROTOCOL_CHANGED`; secrets and raw SSO
+responses are never included in either success or error envelopes.
 In particular, an unhealthy `doctor` result is an error with a nonzero exit
 status and retains the diagnostic model under `error.details`; a healthy
 `doctor` result remains a normal success document.

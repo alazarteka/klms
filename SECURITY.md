@@ -2,17 +2,27 @@
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing a session cookie, storage-state file,
+Do not open a public issue containing a session cookie, owned session file,
 student record, grade, attendance record, or reproducible credential leak.
 Contact the repository owner privately with a redacted reproduction and the
 affected version.
 
 ## Credential boundary
 
-`klms` treats the configured storage-state file as a secret. Diagnostics report
-only the source category, path, cookie count, expiry health, and whether a live
-read succeeded. Human errors and JSON never include cookie values, `Cookie` or
-`Set-Cookie` headers, URL userinfo, or complete authenticated HTML.
+`klms` treats its owned session file as a secret. Diagnostics report only its
+path, cookie/device counts, creation time, and whether a live read succeeded.
+Human errors and JSON never include cookie values, `Cookie` or `Set-Cookie`
+headers, URL userinfo, passwords, verification codes, encryption keys, Moodle
+session keys, or complete authenticated HTML.
+
+Authentication accepts secrets only through hidden terminal prompts. A
+short-lived transport permits only the exact KLMS and KAIST SSO origins,
+follows bounded redirects itself, and discards general SSO cookies at
+completion. Only cookies issued by the KLMS host plus trusted-device
+identifiers are written to `$XDG_STATE_HOME/klms/session.json` (or
+`~/.local/state/klms/session.json`). The directory is mode 0700 and the file is
+atomically installed at mode 0600 on Unix. Existing Playwright and kaist-cli
+state files are ignored and are never deleted automatically.
 
 Non-loopback service URLs must use HTTPS. Cleartext HTTP exists only for
 fixture-backed loopback integration tests.

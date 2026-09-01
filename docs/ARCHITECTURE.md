@@ -4,6 +4,7 @@
 
 ```text
 CLI -> commands -> authenticated client + parsers -> models -> output
+              \-> local skill installer
 ```
 
 ## Boundaries
@@ -12,8 +13,9 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `commands`: validates a job and coordinates transport and parsing.
 - `client`: URL policy, cookie selection, timeouts, redirects, response bounds,
   and authentication checks.
-- `auth`: secret-file discovery and storage-state parsing without transport or
-  rendering concerns.
+- `auth`: the typed KAIST SSO state machine, exact-origin login transport,
+  transient cookies, SEED-CBC request encoding, terminal prompts, and private
+  owned-session persistence. It exposes only non-secret status models.
 - `parse`: upstream HTML knowledge. Selectors and Moodle-specific markup stay
   here.
 - `models`: typed records returned by commands.
@@ -22,15 +24,18 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `present`: scannable human representations of typed records.
 - `output`: versioned JSON envelopes, human rendering, terminal sanitization, and
   exit categories.
+- `skill`: embedded companion-skill payload, XDG data placement, and the
+  cross-client discovery symlink. It has no network or KLMS authentication
+  dependency.
 
 The CLI does not introduce a provider framework, service container, plugin
 registry, or persistent database before multiple real implementations require
 one.
 
-The only provider-state cache is a mode-0600 session-key record under the
-platform cache directory. It exists so `auth time-left` can observe the server
-timer without first touching the dashboard. A stale key is safe: the command
-falls back to authenticated bootstrap and replaces it.
+The only persistent provider state is a mode-0600 JSON record containing KLMS
+cookie pairs and trusted-device identifiers. Moodle session keys are kept only
+in memory. Consequently, `auth time-left` bootstraps from the dashboard and
+discloses that this read may refresh activity time.
 
 ## Trust boundaries
 
@@ -45,9 +50,9 @@ credentials into them.
 
 ## Network behavior
 
-Ordinary reads use a direct HTTPS client with cookies selected from a protected
-Playwright-compatible storage-state file. A dashboard request establishes that
-the session is authenticated. Commands then fetch the narrowest required page.
+Ordinary reads use a strict same-origin HTTPS client with cookies from the owned
+session file. A dashboard request establishes that the session is
+authenticated. Commands then fetch the narrowest required page.
 Redirects that leave the configured origin are rejected. These operations are
 content-read-only: they do not submit coursework or change course data, though
 KLMS itself may refresh its session activity timer when serving an authenticated
@@ -57,3 +62,18 @@ All requests are bounded while streaming and have configurable, capped
 timeouts. Moodle AJAX methods are fixed in a client-side allowlist; arbitrary
 POST is not exposed. Future fan-out is bounded and deterministic. No command
 performs an update check or analytics request during startup.
+
+Login uses a separate, short-lived blocking transport. In production it permits
+only `sso.kaist.ac.kr` and `klms.kaist.ac.kr`; HTTP loopback origins exist only
+for integration tests. It implements bounded redirects and cookie selection
+itself so central SSO state can be discarded after the final KLMS cookie is
+issued. Protocol result codes are mapped to typed transitions and unknown
+codes fail closed.
+
+## Companion skill
+
+The release binary embeds the repository's `skills/klms/SKILL.md`. `skill
+install` writes that exact payload under `$XDG_DATA_HOME/klms/skills/klms` (or
+`~/.local/share/klms/skills/klms`) and links it from `~/.agents/skills/klms`.
+It never downloads mutable skill content at runtime and refuses to replace an
+unexpected discovery path.
