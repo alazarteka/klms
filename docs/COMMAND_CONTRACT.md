@@ -13,7 +13,11 @@ schema corrections deliberately and document them rather than preserving a
 misleading field forever.
 
 ```text
+klms skill install
+klms skill status
 klms doctor
+klms auth login [--method easy|password] [--second-factor email|sms]
+klms auth logout
 klms auth status
 klms auth time-left
 klms auth extend
@@ -72,9 +76,22 @@ ahead and is bounded to 90 days.
 
 ## Safety
 
-All remote operations are reads except `auth extend`, which explicitly asks
-KLMS to refresh the current session timer. It is safe to retry and reports the
-server-authoritative remaining duration after the touch.
+`skill install` performs only local writes. It atomically installs the skill
+payload embedded in the running binary under the user's XDG data directory and
+creates `~/.agents/skills/klms` as its discovery link. It refuses to replace an
+unexpected file, directory, or symlink at the discovery path. It does not
+download skill content or inspect client-specific legacy skill directories.
+
+Course operations are reads except `auth extend`, which explicitly asks KLMS to
+refresh the current session timer. `auth login` performs the documented KAIST
+SSO exchange and creates a local private session; `auth logout` removes only
+that local file and does not terminate other KAIST sessions.
+
+Login identifiers are prompted interactively. Passwords and six-digit codes
+are hidden terminal inputs and are never supported as flags or environment
+variables. Password login supports either email or SMS verification. Easy
+Login polls for at most three minutes. Unknown SSO result codes fail closed as
+`AUTH_PROTOCOL_CHANGED`.
 
 Downloads require `--out`, create a new file atomically, and refuse to replace
 an existing path even when another process creates it during the download.
@@ -90,7 +107,7 @@ typed command whenever one exists.
 failure is missing configuration, expired authentication, network reachability,
 or another error. An unusable session is a nonzero command failure; JSON keeps
 the diagnostic model in `error.details`. Authentication errors point to
-`kaist klms auth refresh` and distinguish login recovery from `auth extend`,
+`klms auth login` and distinguish login recovery from `auth extend`,
 which cannot revive an expired session. Because KLMS may count authenticated page reads as activity,
 `doctor` and a cold `auth time-left` disclose that their bootstrap request may
 refresh the session timer.

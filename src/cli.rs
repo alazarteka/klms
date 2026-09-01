@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const LIST_HELP: &str = "Examples:\n  klms courses list\n  klms --json courses list";
 
@@ -37,6 +37,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Install or inspect the companion Agent Skill.
+    Skill(SkillArgs),
     /// Check configuration and the live session.
     #[command(after_help = "Example:\n  klms --json doctor")]
     Doctor,
@@ -79,6 +81,20 @@ pub enum Command {
     Request(RequestArgs),
 }
 
+#[derive(Debug, Args)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub command: SkillCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    /// Install the embedded skill and its cross-client discovery link.
+    Install,
+    /// Report the managed skill and discovery-link state.
+    Status,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct ListArgs {
     /// Maximum number of rows to return.
@@ -115,7 +131,11 @@ pub struct AuthArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
-    /// Report the selected storage-state source and cookie metadata.
+    /// Sign in directly through KAIST SSO and save a private KLMS session.
+    Login(AuthLoginArgs),
+    /// Remove the locally saved KLMS session.
+    Logout,
+    /// Report owned-session metadata without exposing secrets.
     #[command(after_help = "Example:\n  klms --json auth status")]
     Status,
     /// Ask KLMS for the server-authoritative time remaining.
@@ -124,6 +144,29 @@ pub enum AuthCommand {
     /// Refresh the current KLMS session timer.
     #[command(after_help = "Example:\n  klms --json auth extend")]
     Extend,
+}
+
+#[derive(Debug, Args)]
+pub struct AuthLoginArgs {
+    /// KAIST sign-in method.
+    #[arg(long, value_enum)]
+    pub method: Option<AuthMethodArg>,
+
+    /// Password-login verification channel.
+    #[arg(long, value_enum, requires = "method")]
+    pub second_factor: Option<AuthSecondFactorArg>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AuthMethodArg {
+    Easy,
+    Password,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AuthSecondFactorArg {
+    Email,
+    Sms,
 }
 
 #[derive(Debug, Args)]

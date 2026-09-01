@@ -34,3 +34,16 @@ The initial `klms` lockfile resolved 20 patch releases newer than the inherited
 the gate records, rather than hides, this trust decision. This is not a source
 audit. Before the first public release, replace these exemptions with delta or
 full audits, or document why a release must retain each one.
+
+## 2026-09-01 native-auth dependency review
+
+Reviewer: `@alazarteka` (review recorded by Codex).
+
+Native KAIST SSO adds the small RustCrypto SEED/CBC stack and `rpassword` for
+hidden terminal input. The exact source archives for the eleven newly reachable
+crates were reviewed for the `safe-to-run` criterion and recorded as audits,
+not exemptions. The cryptographic libraries have no external side effects;
+`generic-array` has a build script limited to a rustc version probe and cfg
+output; and `rpassword`/`rtoolbox` perform their documented local TTY access.
+This review establishes build/runtime side-effect safety only, not a claim that
+the SEED implementation is independently cryptographically certified.

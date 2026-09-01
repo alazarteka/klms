@@ -15,9 +15,10 @@ fn binary() -> Command {
 }
 
 fn storage_state(directory: &TempDir) -> PathBuf {
-    let path = directory.path().join("state.json");
-    fs::write(&path, r#"{"cookies":[{"name":"MoodleSession","value":"test-session","domain":"127.0.0.1","path":"/","secure":false}]}"#).unwrap();
-    path
+    let root = directory.path().join("state");
+    fs::create_dir_all(root.join("klms")).unwrap();
+    fs::write(root.join("klms/session.json"), r#"{"version":1,"origin":"http://127.0.0.1:0","created_at":1,"cookies":[{"name":"MoodleSession","value":"test-session"}],"devices":[]}"#).unwrap();
+    root
 }
 
 #[test]
@@ -25,7 +26,6 @@ fn json_auth_status_is_one_document_without_secrets() {
     let home = TempDir::new().unwrap();
     let output = binary()
         .env("HOME", home.path())
-        .env_remove("KLMS_STORAGE_STATE")
         .env_remove("XDG_CONFIG_HOME")
         .args(["--json", "auth", "status"])
         .output()
@@ -33,9 +33,51 @@ fn json_auth_status_is_one_document_without_secrets() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], "2");
+    assert_eq!(value["schema_version"], "3");
     assert_eq!(value["ok"], true);
     assert_eq!(value["data"]["configured"], false);
+}
+
+#[test]
+fn owned_auth_status_and_logout_never_emit_cookie_values() {
+    let state_dir = TempDir::new().unwrap();
+    let state_root = storage_state(&state_dir);
+    let status = binary()
+        .env("XDG_STATE_HOME", &state_root)
+        .args([
+            "--json",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "auth",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(!String::from_utf8_lossy(&status.stdout).contains("test-session"));
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["data"]["cookie_count"], 1);
+
+    let logout = binary()
+        .env("XDG_STATE_HOME", &state_root)
+        .args(["--json", "auth", "logout"])
+        .output()
+        .unwrap();
+    assert!(logout.status.success());
+    let value: Value = serde_json::from_slice(&logout.stdout).unwrap();
+    assert_eq!(value["data"]["removed"], true);
+    assert!(!state_root.join("klms/session.json").exists());
+}
+
+#[test]
+fn login_help_has_choices_but_no_secret_bearing_options() {
+    let output = binary().args(["auth", "login", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--method"));
+    assert!(help.contains("--second-factor"));
+    assert!(!help.contains("--password"));
+    assert!(!help.contains("--otp"));
 }
 
 #[test]
@@ -60,7 +102,6 @@ fn empty_course_queries_fail_before_authentication() {
         let home = TempDir::new().unwrap();
         let output = binary()
             .env("HOME", home.path())
-            .env_remove("KLMS_STORAGE_STATE")
             .env_remove("XDG_CONFIG_HOME")
             .args(args)
             .output()
@@ -83,7 +124,6 @@ fn doctor_fails_with_diagnostics_and_recovery_when_auth_is_missing() {
     let home = TempDir::new().unwrap();
     let output = binary()
         .env("HOME", home.path())
-        .env_remove("KLMS_STORAGE_STATE")
         .env_remove("XDG_CONFIG_HOME")
         .args(["--json", "doctor"])
         .output()
@@ -98,7 +138,7 @@ fn doctor_fails_with_diagnostics_and_recovery_when_auth_is_missing() {
         "not_configured"
     );
     let hint = value["error"]["hint"].as_str().unwrap();
-    assert!(hint.contains("kaist klms auth refresh"));
+    assert!(hint.contains("klms auth login"));
     assert!(hint.contains("auth extend"));
 }
 
@@ -117,7 +157,7 @@ fn doctor_fails_when_server_rejects_the_saved_session() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -168,7 +208,7 @@ fn loopback_dashboard_exercises_cookie_transport_and_parser() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -210,7 +250,7 @@ fn course_list_reports_canonical_refs_and_truncation() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -253,7 +293,7 @@ fn raw_get_is_a_truncated_secret_free_preview() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -302,7 +342,7 @@ fn transport_errors_do_not_echo_secret_bearing_redirect_urls() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -342,7 +382,7 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
     let out = state_dir.path().join("notes.pdf");
     let source = format!("http://{address}/pluginfile.php/7/notes.pdf?token=downloadsecret");
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -368,7 +408,7 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
     );
 
     let replacement = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -417,7 +457,7 @@ fn auth_extend_uses_allowlisted_ajax_and_reports_remaining_time() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -440,35 +480,37 @@ fn auth_extend_uses_allowlisted_ajax_and_reports_remaining_time() {
 }
 
 #[test]
-fn auth_time_left_uses_cached_sesskey_without_dashboard_touch() {
+fn auth_time_left_discovers_sesskey_without_persisting_it() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8192];
-        let length = stream.read(&mut request).unwrap();
-        let request = String::from_utf8_lossy(&request[..length]);
-        assert!(request.starts_with("POST /lib/ajax/service.php?"));
-        assert!(request.contains("info=core_session_time_remaining"));
-        let body = r#"[{"error":false,"data":{"timeremaining":7211}}]"#;
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8192];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let (content_type, body) = if index == 0 {
+                assert!(request.starts_with("GET /my/ HTTP/1.1"));
+                (
+                    "text/html",
+                    r#"<script>var cfg={"sesskey":"abc123"}</script>"#,
+                )
+            } else {
+                assert!(request.starts_with("POST /lib/ajax/service.php?"));
+                assert!(request.contains("info=core_session_time_remaining"));
+                (
+                    "application/json",
+                    r#"[{"error":false,"data":{"timeremaining":7211}}]"#,
+                )
+            };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
     });
 
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
-    let cache_dir = state_dir.path().join("cache/klms");
-    fs::create_dir_all(&cache_dir).unwrap();
-    fs::write(
-        cache_dir.join("session.json"),
-        format!(
-            r#"{{"origin":"http://127.0.0.1:{}","sesskey":"abc123","stored_at":1}}"#,
-            address.port()
-        ),
-    )
-    .unwrap();
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
-        .env("XDG_CACHE_HOME", state_dir.path().join("cache"))
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -486,7 +528,9 @@ fn auth_time_left_uses_cached_sesskey_without_dashboard_touch() {
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["data"]["remaining_seconds"], 7211);
-    assert_eq!(value["data"]["bootstrap_may_have_extended_session"], false);
+    assert_eq!(value["data"]["bootstrap_may_have_extended_session"], true);
+    let stored = fs::read_to_string(state_path.join("klms/session.json")).unwrap();
+    assert!(!stored.contains("abc123"));
 }
 
 #[test]
@@ -516,7 +560,7 @@ fn explicit_empty_coursework_is_a_complete_success() {
     let state_path = storage_state(&state_dir);
     for resource in ["assignments", "quizzes"] {
         let output = binary()
-            .env("KLMS_STORAGE_STATE", &state_path)
+            .env("XDG_STATE_HOME", &state_path)
             .args([
                 "--json",
                 "--base-url",
@@ -558,7 +602,7 @@ fn schedule_views_accept_an_explicit_empty_calendar() {
     let state_path = storage_state(&state_dir);
     for command in ["today", "upcoming"] {
         let output = binary()
-            .env("KLMS_STORAGE_STATE", &state_path)
+            .env("XDG_STATE_HOME", &state_path)
             .args([
                 "--json",
                 "--base-url",
@@ -590,7 +634,7 @@ fn typed_show_rejects_a_mismatched_final_resource() {
     let state_dir = TempDir::new().unwrap();
     let state_path = storage_state(&state_dir);
     let output = binary()
-        .env("KLMS_STORAGE_STATE", &state_path)
+        .env("XDG_STATE_HOME", &state_path)
         .args([
             "--json",
             "--base-url",
@@ -638,7 +682,7 @@ fn board_post_identity_is_consistent_across_list_and_detail() {
         vec!["notices", "show", "board-post:10:11"],
     ] {
         let output = binary()
-            .env("KLMS_STORAGE_STATE", &state_path)
+            .env("XDG_STATE_HOME", &state_path)
             .args(["--json", "--base-url", &format!("http://{address}")])
             .args(args)
             .output()
@@ -661,6 +705,7 @@ fn top_level_help_exposes_the_agent_resource_surface() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
+        "skill",
         "auth",
         "today",
         "upcoming",
@@ -679,4 +724,71 @@ fn top_level_help_exposes_the_agent_resource_surface() {
     ] {
         assert!(help.contains(command), "missing {command} in help");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_install_materializes_embedded_payload_and_discovery_link() {
+    let home = TempDir::new().unwrap();
+    let data_home = home.path().join("data");
+    for _ in 0..2 {
+        let output = binary()
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", &data_home)
+            .args(["--json", "skill", "install"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["command"], "skill.install");
+        assert_eq!(value["data"]["payload_current"], true);
+        assert_eq!(value["data"]["link_current"], true);
+    }
+
+    let payload_dir = data_home.join("klms/skills/klms");
+    let payload = fs::read_to_string(payload_dir.join("SKILL.md")).unwrap();
+    let source =
+        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/klms/SKILL.md")).unwrap();
+    assert_eq!(payload, source);
+    assert_eq!(
+        fs::read_link(home.path().join(".agents/skills/klms")).unwrap(),
+        payload_dir
+    );
+
+    let status = binary()
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", &data_home)
+        .args(["--json", "skill", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["command"], "skill.status");
+    assert_eq!(value["data"]["payload_current"], true);
+    assert_eq!(value["data"]["link_current"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_install_refuses_an_unexpected_discovery_path() {
+    let home = TempDir::new().unwrap();
+    let link = home.path().join(".agents/skills/klms");
+    fs::create_dir_all(&link).unwrap();
+    let output = binary()
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .args(["--json", "skill", "install"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(40));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "CONFIG_ERROR");
+    assert!(link.is_dir());
+    assert!(!home.path().join("data/klms").exists());
 }

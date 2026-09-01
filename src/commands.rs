@@ -8,8 +8,8 @@ use url::Url;
 use crate::{
     auth,
     cli::{
-        ActivitiesCommand, AuthCommand, Cli, Command, CourseShowCommand, CoursesCommand,
-        RequestCommand,
+        ActivitiesCommand, AuthCommand, AuthMethodArg, AuthSecondFactorArg, Cli, Command,
+        CourseShowCommand, CoursesCommand, RequestCommand, SkillCommand,
     },
     client::{KlmsClient, validate_base_url},
     error::AppError,
@@ -20,7 +20,43 @@ use crate::{
 };
 
 pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
+    if let Command::Skill(args) = &cli.command {
+        return match args.command {
+            SkillCommand::Install => crate::skill::install(),
+            SkillCommand::Status => crate::skill::status(),
+        };
+    }
     let base_url = validate_base_url(&cli.base_url)?;
+    match &cli.command {
+        Command::Auth(args) if matches!(args.command, AuthCommand::Login(_)) => {
+            let AuthCommand::Login(login) = &args.command else {
+                unreachable!()
+            };
+            let method = match login.method.unwrap_or(AuthMethodArg::Easy) {
+                AuthMethodArg::Easy => auth::LoginMethod::Easy,
+                AuthMethodArg::Password => auth::LoginMethod::Password,
+            };
+            if login.second_factor.is_some() && method != auth::LoginMethod::Password {
+                return Err(AppError::usage(
+                    "--second-factor applies only to password login",
+                ));
+            }
+            let factor = login.second_factor.map(|factor| match factor {
+                AuthSecondFactorArg::Email => auth::SecondFactor::Email,
+                AuthSecondFactorArg::Sms => auth::SecondFactor::Sms,
+            });
+            let sso_url = if base_url.host_str() == Some("klms.kaist.ac.kr") {
+                Url::parse("https://sso.kaist.ac.kr/").expect("valid built-in SSO URL")
+            } else {
+                base_url.clone()
+            };
+            return auth::login(&base_url, &sso_url, cli.timeout, method, factor);
+        }
+        Command::Auth(args) if matches!(args.command, AuthCommand::Logout) => {
+            return auth::logout();
+        }
+        _ => {}
+    }
     let session = auth::load(&base_url)?;
     match &cli.command {
         Command::Auth(args) if matches!(args.command, AuthCommand::Status) => {
@@ -41,16 +77,14 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
 fn auth_status(status: &auth::AuthStatus) -> Result<CommandResult, AppError> {
     let human = if status.configured {
         format!(
-            "Storage state: {}\nSource: {}\nCookies: {} total, {} applicable\nExpired cookies present: {}",
-            status.path.as_deref().unwrap_or("unknown"),
-            status.source,
-            status.cookie_count,
-            status.matching_cookie_count,
-            yes_no(status.has_expired_cookies)
+            "Owned session: {}\nSource: {}\nCookies: {}\nTrusted devices: {}",
+            status.path, status.source, status.cookie_count, status.device_count,
         )
     } else {
-        "Storage state: not configured\nUse KLMS_STORAGE_STATE or ~/.config/klms/storage-state.json"
-            .into()
+        format!(
+            "Owned session: not configured\nRun `klms auth login`.\nExpected path: {}",
+            status.path
+        )
     };
     output::result("auth.status", status, human)
 }
@@ -82,7 +116,6 @@ fn doctor(
             .and_then(|client| client.get("/my/"))
         {
             Ok(response) => {
-                cache_page_sesskey(base_url, &response.text);
                 session_status = "valid";
                 dashboard_url = Some(crate::safe_url::display(&response.url));
             }
@@ -119,7 +152,7 @@ fn doctor(
         return Err(error.with_details(details));
     }
     let mut human = format!(
-        "klms {}\nOrigin: {}\nStorage state: {}\nSession: {}",
+        "klms {}\nOrigin: {}\nOwned session: {}\nSession: {}",
         model.version,
         model.base_url,
         if model.auth.configured {
@@ -144,14 +177,17 @@ fn doctor(
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
     match command {
+        Command::Skill(_) => unreachable!("handled before authenticated dispatch"),
         Command::Auth(args) => match args.command {
+            AuthCommand::Login(_) | AuthCommand::Logout => {
+                unreachable!("handled before live dispatch")
+            }
             AuthCommand::Status => unreachable!("handled before live dispatch"),
             AuthCommand::TimeLeft => session_time(client, base_url, false),
             AuthCommand::Extend => session_time(client, base_url, true),
         },
         Command::Dashboard(args) => {
             let response = client.get("/my/")?;
-            cache_page_sesskey(base_url, &response.text);
             let mut model = parse::dashboard(&response.text, base_url)?;
             model.courses.truncate(args.limit);
             model.upcoming.truncate(args.limit);
@@ -306,17 +342,11 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
 
 fn session_time(
     client: &KlmsClient,
-    base_url: &Url,
+    _base_url: &Url,
     extend: bool,
 ) -> Result<CommandResult, AppError> {
-    if let Some(key) = auth::cached_sesskey(base_url) {
-        if let Ok(seconds) = query_session_time(client, &key, extend) {
-            return session_time_result(seconds, extend, false);
-        }
-    }
     let dashboard = client.get("/my/")?;
     let key = parse::sesskey(&dashboard.text)?;
-    auth::cache_sesskey(base_url, &key);
     let seconds = query_session_time(client, &key, extend)?;
     session_time_result(seconds, extend, true)
 }
@@ -436,14 +466,7 @@ fn module_path(target: &str, kinds: &[&str]) -> Result<String, AppError> {
 
 fn dashboard_courses(client: &KlmsClient, base_url: &Url) -> Result<Vec<Course>, AppError> {
     let response = client.get("/my/")?;
-    cache_page_sesskey(base_url, &response.text);
     Ok(parse::dashboard(&response.text, base_url)?.courses)
-}
-
-fn cache_page_sesskey(base_url: &Url, html: &str) {
-    if let Ok(key) = parse::sesskey(html) {
-        auth::cache_sesskey(base_url, &key);
-    }
 }
 
 fn matching_courses(courses: Vec<Course>, query: &str) -> Vec<Course> {
@@ -575,8 +598,4 @@ fn duration(seconds: u64) -> String {
         (seconds % 3600) / 60,
         seconds % 60
     )
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }

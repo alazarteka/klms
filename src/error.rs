@@ -3,7 +3,7 @@ use std::fmt;
 use serde::Serialize;
 use serde_json::Value;
 
-pub const AUTH_RECOVERY_HINT: &str = "Run `kaist klms auth refresh` to sign in again, then retry. `klms auth extend` only extends a session that is still valid; it does not log in. Alternatively, set KLMS_STORAGE_STATE to a fresh Playwright storage-state file.";
+pub const AUTH_RECOVERY_HINT: &str = "Run `klms auth login` to sign in again. `klms auth extend` only extends a session that is still valid.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError {
@@ -32,6 +32,16 @@ impl AppError {
 
     pub fn network(message: impl Into<String>) -> Self {
         Self::new("NETWORK_ERROR", message, None, true, 20)
+    }
+
+    pub fn auth_protocol(message: impl Into<String>) -> Self {
+        Self::new(
+            "AUTH_PROTOCOL_CHANGED",
+            message,
+            Some("KAIST SSO may have changed; update klms and retry.".into()),
+            false,
+            11,
+        )
     }
 
     pub fn http(status: u16, path: &str) -> Self {
