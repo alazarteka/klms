@@ -81,6 +81,17 @@ pub enum Command {
     Request(RequestArgs),
     /// Inspect and synchronize the private versioned local library.
     Library(LibraryArgs),
+    /// Print the executable command grammar; --json emits the full argument tree.
+    #[command(after_help = "Examples:\n  klms spec\n  klms --json spec")]
+    Spec,
+    /// Print a shell completion script generated from the executable grammar.
+    #[command(
+        after_help = "Example:\n  klms completions bash > ~/.local/share/bash-completion/completions/klms"
+    )]
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Args)]

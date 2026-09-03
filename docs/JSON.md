@@ -54,6 +54,23 @@ library.retract  {ref, target_ref, actor}
 library.relations.add {ref}
 ```
 
+Interface discovery shapes are:
+
+```text
+spec         {name, version, global_args: [ARG], commands: [{path: [String],
+              usage, about, args: [ARG], groups: [GROUP]}]}
+             ARG = {name, kind: positional|flag|option, required, value,
+                    choices: [String], default, help}
+             GROUP = {name, args: [String], required, multiple}
+completions  {shell, script}
+```
+
+`spec` mirrors the executable Clap declaration; `usage` is the same line that
+`klms spec` prints without `--json`. Hidden arguments, `--help`, `--version`,
+and the `help` subcommand are omitted. A group with `required` true needs at
+least one member; `multiple` false allows at most one, and such a group renders
+in `usage` as `(a|b)` or `[a|b]`.
+
 `library.sync.truncated` counts resources whose detail page hit a parser cap
 (100,000 text characters or 100 links). Those observations are stored as
 incomplete and their representations are never marked missing, but the run

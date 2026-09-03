@@ -137,7 +137,17 @@ klms --json assignments list --course course:12345
 ```
 
 The [command contract](docs/COMMAND_CONTRACT.md) documents reference
-resolution, output schemas, retries, and safety boundaries.
+resolution, output schemas, retries, and safety boundaries. `klms spec` prints
+the executable command grammar, and `klms --json spec` emits the full argument
+tree for agents that want to discover the interface without parsing `--help`.
+
+Shell completions are generated from the same declaration:
+
+```bash
+klms completions bash > ~/.local/share/bash-completion/completions/klms
+klms completions zsh > ~/.zfunc/_klms
+klms completions fish > ~/.config/fish/completions/klms.fish
+```
 
 `klms skill install` installs the companion Agent Skill embedded in the binary
 under `~/.local/share/klms/skills/klms` and links it from

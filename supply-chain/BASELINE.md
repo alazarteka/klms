@@ -89,3 +89,18 @@ versions (`sha2`, `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, and
 build scripts, are pure Rust/no-std computation and type-support crates, and
 perform no filesystem, process, or network operations. This is a side-effect
 safety review, not independent cryptographic validation of SHA-256.
+
+## 2026-09-02 shell-completion dependency review
+
+Reviewer: Claude Fable 5.1 (review recorded for `@alazarteka`).
+
+`klms completions SHELL` adds exact `clap_complete` 4.6.9, the static
+completion generator maintained in the clap workspace. It is the only new
+crate in the lockfile: its `clap_lex`, `shlex`, `is_executable`, and
+`completest` dependencies are optional and disabled because the
+`unstable-dynamic` and `unstable-shell-tests` features are off. The crate has
+no build script. The modules that read `SHELL`, the current directory, or the
+filesystem are behind `unstable-dynamic`; the static path writes only to the
+writer or caller-supplied path it is given. Recorded as a `safe-to-run` audit,
+not an exemption. This is a side-effect review, not a review of the generated
+scripts' behavior in every shell.
