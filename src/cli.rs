@@ -79,6 +79,159 @@ pub enum Command {
     Attendance(CourseShowArgs),
     /// Preview a known same-origin HTML or JSON read (experimental repair hatch).
     Request(RequestArgs),
+    /// Inspect and synchronize the private versioned local library.
+    Library(LibraryArgs),
+    /// Print the executable command grammar; --json emits the full argument tree.
+    #[command(after_help = "Examples:\n  klms spec\n  klms --json spec")]
+    Spec,
+    /// Print a shell completion script generated from the executable grammar.
+    #[command(
+        after_help = "Example:\n  klms completions bash > ~/.local/share/bash-completion/completions/klms"
+    )]
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct LibraryArgs {
+    #[command(subcommand)]
+    pub command: LibraryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryCommand {
+    /// Initialize if needed and report local corpus state without contacting KLMS.
+    #[command(after_help = "Example:\n  klms --json library status")]
+    Status,
+    /// Synchronize finite typed KLMS surfaces into the local library.
+    Sync(LibrarySyncArgs),
+    /// Search source text and effective local curation.
+    Search {
+        #[arg(value_name = "QUERY", value_parser = nonempty_operand)]
+        query: String,
+        #[command(flatten)]
+        list: ListArgs,
+    },
+    /// List remote-source changes independently of local curation.
+    Changes(ListArgs),
+    /// List local curation activity independently of remote changes.
+    Activity(LibraryActivityArgs),
+    /// Show bounded source/effective state for a stable reference.
+    Show {
+        #[arg(value_name = "REF")]
+        reference: String,
+    },
+    /// Show bounded immutable history for a stable reference.
+    History {
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[command(flatten)]
+        list: ListArgs,
+    },
+    /// Print bounded locally stored text or bytes.
+    Content {
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[arg(long, value_name = "N", default_value_t = 1_048_576, value_parser = parse_preview_limit)]
+        max_bytes: usize,
+    },
+    /// Export locally stored content without overwriting.
+    Export {
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
+    /// Append a revisioned local curation assertion.
+    Edit(LibraryEditArgs),
+    /// Retract a curation assertion or relation without deleting history.
+    Retract(LibraryRetractArgs),
+    /// Add typed relationships.
+    Relations(LibraryRelationsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LibrarySyncArgs {
+    #[arg(long, value_name = "COURSE")]
+    pub course: Option<String>,
+    #[arg(long)]
+    pub notices: bool,
+    #[arg(long)]
+    pub files: bool,
+    #[arg(long, value_enum)]
+    pub download: Option<LibraryDownloadArg>,
+}
+
+#[derive(Debug, Args)]
+pub struct LibraryActivityArgs {
+    #[arg(long, value_name = "REF")]
+    pub subject: Option<String>,
+    #[command(flatten)]
+    pub list: ListArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LibraryDownloadArg {
+    Changed,
+}
+
+#[derive(Debug, Args)]
+#[command(group = clap::ArgGroup::new("value_source").required(true).multiple(false))]
+pub struct LibraryEditArgs {
+    #[arg(value_name = "REF")]
+    pub reference: String,
+    #[arg(long, value_enum)]
+    pub field: LibraryFieldArg,
+    /// Inline text; exactly one of --value and --value-file is required.
+    #[arg(long, value_name = "TEXT", group = "value_source")]
+    pub value: Option<String>,
+    /// Read the text from a file, or from stdin with `-`.
+    #[arg(long, value_name = "PATH", group = "value_source")]
+    pub value_file: Option<PathBuf>,
+    #[arg(long, value_name = "ACTOR", default_value = "human")]
+    pub actor: String,
+    #[arg(long, value_name = "N")]
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LibraryFieldArg {
+    Title,
+    Filename,
+    Summary,
+    Note,
+    Tag,
+}
+
+#[derive(Debug, Args)]
+pub struct LibraryRetractArgs {
+    #[arg(value_name = "REF")]
+    pub reference: String,
+    #[arg(long, value_name = "ACTOR", default_value = "human")]
+    pub actor: String,
+}
+
+#[derive(Debug, Args)]
+pub struct LibraryRelationsArgs {
+    #[command(subcommand)]
+    pub command: LibraryRelationsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryRelationsCommand {
+    /// Record a typed relation between two library subjects.
+    Add {
+        #[arg(value_name = "LEFT")]
+        left: String,
+        #[arg(value_name = "RIGHT")]
+        right: String,
+        #[arg(long, value_name = "KIND")]
+        kind: String,
+        #[arg(long, value_name = "ACTOR", default_value = "human")]
+        actor: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -98,14 +251,14 @@ pub enum SkillCommand {
 #[derive(Debug, Clone, Args)]
 pub struct ListArgs {
     /// Maximum number of rows to return.
-    #[arg(long, default_value_t = 100, value_parser = parse_list_limit)]
+    #[arg(long, value_name = "N", default_value_t = 100, value_parser = parse_list_limit)]
     pub limit: usize,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct AgendaArgs {
     /// Restrict results to one course id, code, or title.
-    #[arg(long)]
+    #[arg(long, value_name = "COURSE")]
     pub course: Option<String>,
     #[command(flatten)]
     pub list: ListArgs,
@@ -114,10 +267,10 @@ pub struct AgendaArgs {
 #[derive(Debug, Clone, Args)]
 pub struct UpcomingArgs {
     /// Include today through this many days ahead (for example, 7d).
-    #[arg(long, default_value = "7d", value_parser = parse_days)]
+    #[arg(long, value_name = "Nd", default_value = "7d", value_parser = parse_days)]
     pub through: u32,
     /// Restrict results to one course id, code, or title.
-    #[arg(long)]
+    #[arg(long, value_name = "COURSE")]
     pub course: Option<String>,
     #[command(flatten)]
     pub list: ListArgs,
@@ -185,7 +338,7 @@ pub enum CoursesCommand {
         after_help = "Examples:\n  klms courses resolve CS.30200\n  klms --json courses resolve 'machine learning' --limit 5"
     )]
     Resolve {
-        #[arg(value_parser = nonempty_operand)]
+        #[arg(value_name = "QUERY", value_parser = nonempty_operand)]
         query: String,
         #[command(flatten)]
         list: ListArgs,
@@ -195,7 +348,7 @@ pub enum CoursesCommand {
         after_help = "Examples:\n  klms courses show 189705\n  klms --json courses show CS.30200"
     )]
     Show {
-        #[arg(value_parser = nonempty_operand)]
+        #[arg(value_name = "COURSE", value_parser = nonempty_operand)]
         course: String,
     },
 }
@@ -213,11 +366,11 @@ pub enum ActivitiesCommand {
         after_help = "Examples:\n  klms activities list --course CS.30200\n  klms --json activities list --course 189705 --week 3 --kind quiz"
     )]
     List {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
-        #[arg(long)]
+        #[arg(long, value_name = "N")]
         week: Option<u32>,
-        #[arg(long)]
+        #[arg(long, value_name = "KIND")]
         kind: Option<String>,
         #[command(flatten)]
         list: ListArgs,
@@ -237,7 +390,7 @@ pub enum ModuleCommand {
         after_help = "The parent command selects assignments, quizzes, or videos.\n\nExamples:\n  klms assignments list --course CS.30200\n  klms quizzes list --course 189705\n  klms videos list --course 189705"
     )]
     List {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
         #[command(flatten)]
         list: ListArgs,
@@ -246,7 +399,10 @@ pub enum ModuleCommand {
     #[command(
         after_help = "Examples:\n  klms assignments show assign:1210516\n  klms quizzes show quiz:1210517\n  klms videos show lti:1265520"
     )]
-    Show { target: String },
+    Show {
+        #[arg(value_name = "REF")]
+        target: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -279,14 +435,17 @@ pub enum NoticesCommand {
     /// List posts from the course notice board.
     #[command(after_help = "Example:\n  klms notices list --course CS.30200 --limit 20")]
     List {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
         #[command(flatten)]
         list: ListArgs,
     },
     /// Show a notice by the reference returned from `notices list`.
     #[command(after_help = "Example:\n  klms notices show board-post:1189554:420856")]
-    Show { notice: String },
+    Show {
+        #[arg(value_name = "NOTICE")]
+        notice: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -294,7 +453,7 @@ pub enum BoardsCommand {
     /// List course boards.
     #[command(after_help = "Example:\n  klms --json boards list --course CS.30200")]
     List {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
         #[command(flatten)]
         list: ListArgs,
@@ -302,13 +461,17 @@ pub enum BoardsCommand {
     /// List posts by canonical board ref, module id, or URL.
     #[command(after_help = "Example:\n  klms --json boards posts board:1265521 --limit 50")]
     Posts {
+        #[arg(value_name = "BOARD")]
         board: String,
         #[command(flatten)]
         list: ListArgs,
     },
     /// Show a post by canonical ref or same-origin article URL.
     #[command(after_help = "Example:\n  klms --json boards show board-post:1265521:42")]
-    Show { post: String },
+    Show {
+        #[arg(value_name = "BOARD_POST")]
+        post: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -322,7 +485,7 @@ pub enum FilesCommand {
     /// List file-like activities in a course.
     #[command(after_help = "Example:\n  klms --json files list --course CS.30200")]
     List {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
         #[command(flatten)]
         list: ListArgs,
@@ -332,8 +495,9 @@ pub enum FilesCommand {
         after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf"
     )]
     Download {
+        #[arg(value_name = "FILE_REF_OR_URL")]
         source: String,
-        #[arg(long)]
+        #[arg(long, value_name = "PATH")]
         out: PathBuf,
     },
 }
@@ -351,7 +515,7 @@ pub enum CourseShowCommand {
         after_help = "Examples:\n  klms --json grades show --course CS.30200\n  klms --json attendance show --course 189705"
     )]
     Show {
-        #[arg(long)]
+        #[arg(long, value_name = "COURSE")]
         course: String,
     },
 }
@@ -369,8 +533,9 @@ pub enum RequestCommand {
         after_help = "Example:\n  klms --json request get '/mod/assign/view.php?id=1210516' --max-bytes 65536"
     )]
     Get {
+        #[arg(value_name = "PATH")]
         path: String,
-        #[arg(long, default_value_t = 65_536, value_parser = parse_preview_limit)]
+        #[arg(long, value_name = "N", default_value_t = 65_536, value_parser = parse_preview_limit)]
         max_bytes: usize,
     },
 }

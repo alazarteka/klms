@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod client;
 mod commands;
+mod corpus;
 mod date;
 mod error;
 mod models;
@@ -11,6 +12,7 @@ mod present;
 mod reference;
 mod safe_url;
 mod skill;
+mod spec;
 
 use std::process::ExitCode;
 

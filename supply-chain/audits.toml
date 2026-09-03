@@ -1,6 +1,11 @@
 
 # cargo-vet audits file
 
+[[audits.block-buffer]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.12.1"
+
 [[audits.block-padding]]
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
@@ -16,15 +21,51 @@ who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.4.4"
 
+[[audits.clap_complete]]
+who = "Claude Fable 5.1 (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "4.6.9"
+notes = "Static completion generator. No build script. Only clap is a non-optional dependency; the unstable-dynamic modules that read the environment are feature-gated off. generate_to writes only to a caller-supplied path."
+
+[[audits.const-oid]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.10.2"
+
 [[audits.crypto-common]]
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.1.7"
 
+[[audits.crypto-common]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.2.2"
+
+[[audits.digest]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.11.3"
+
+[[audits.fallible-iterator]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.3.0"
+
+[[audits.fallible-streaming-iterator]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.1.9"
+
 [[audits.generic-array]]
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.14.7"
+
+[[audits.hybrid-array]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.4.14"
 
 [[audits.inout]]
 who = "@alazarteka (review recorded by Codex)"
@@ -36,6 +77,16 @@ who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.1.3"
 
+[[audits.libsqlite3-sys]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.38.2"
+
+[[audits.pkg-config]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.3.34"
+
 [[audits.rpassword]]
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
@@ -46,10 +97,25 @@ who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.0.6"
 
+[[audits.rusqlite]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.40.2"
+
+[[audits.sha2]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.11.0"
+
 [[audits.typenum]]
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "1.20.1"
+
+[[audits.vcpkg]]
+who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
+criteria = "safe-to-run"
+version = "0.2.15"
 
 [[audits.version_check]]
 who = "@alazarteka (review recorded by Codex)"

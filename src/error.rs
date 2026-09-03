@@ -101,6 +101,48 @@ impl AppError {
         Self::new("INTERNAL_ERROR", message, None, false, 50)
     }
 
+    pub fn migration_required(message: impl Into<String>) -> Self {
+        Self::new(
+            "MIGRATION_REQUIRED",
+            message,
+            Some("Update klms before opening this library.".into()),
+            false,
+            45,
+        )
+    }
+
+    pub fn corpus_corrupt(message: impl Into<String>) -> Self {
+        Self::new(
+            "CORPUS_CORRUPT",
+            message,
+            Some("Preserve the library files for recovery before retrying.".into()),
+            false,
+            51,
+        )
+    }
+
+    pub fn corpus_busy(message: impl Into<String>) -> Self {
+        Self::new(
+            "CORPUS_BUSY",
+            message,
+            Some("Retry after the other library operation finishes.".into()),
+            true,
+            52,
+        )
+    }
+
+    pub fn library_io(message: impl Into<String>) -> Self {
+        Self::new("LIBRARY_IO", message, None, false, 53)
+    }
+
+    pub fn curation_conflict(message: impl Into<String>) -> Self {
+        Self::new("CURATION_CONFLICT", message, None, false, 54)
+    }
+
+    pub fn content_unavailable(message: impl Into<String>) -> Self {
+        Self::new("CONTENT_UNAVAILABLE", message, None, false, 55)
+    }
+
     fn new(
         code: &'static str,
         message: impl Into<String>,
@@ -135,3 +177,24 @@ impl fmt::Display for AppError {
 }
 
 impl std::error::Error for AppError {}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        use rusqlite::ErrorCode;
+        if let rusqlite::Error::SqliteFailure(code, _) = &error {
+            match code.code {
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => {
+                    return Self::corpus_busy("local library is locked by another process");
+                }
+                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => {
+                    return Self::corpus_corrupt("local library database is corrupt");
+                }
+                ErrorCode::SchemaChanged => {
+                    return Self::migration_required("local library schema is incompatible");
+                }
+                _ => {}
+            }
+        }
+        Self::library_io(format!("SQLite failure: {error}"))
+    }
+}

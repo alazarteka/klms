@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::error::AppError;
 
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListMeta {
@@ -12,6 +12,8 @@ pub struct ListMeta {
     pub complete: bool,
     pub total: Option<usize>,
     pub next_cursor: Option<String>,
+    pub fresh_through: Option<i64>,
+    pub source_complete: Option<bool>,
 }
 
 pub struct CommandResult {
@@ -70,6 +72,32 @@ pub fn collection<T: Serialize>(
         complete: source_complete && returned == available,
         total: source_complete.then_some(available),
         next_cursor: None,
+        fresh_through: None,
+        source_complete: Some(source_complete),
+    });
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn local_collection<T: Serialize>(
+    command: &'static str,
+    data: &T,
+    human: String,
+    returned: usize,
+    limit: usize,
+    query_complete: bool,
+    fresh_through: Option<i64>,
+    source_complete: Option<bool>,
+) -> Result<CommandResult, AppError> {
+    let mut result = result(command, data, human)?;
+    result.meta = Some(ListMeta {
+        returned,
+        limit,
+        complete: query_complete,
+        total: query_complete.then_some(returned),
+        next_cursor: None,
+        fresh_through,
+        source_complete,
     });
     Ok(result)
 }

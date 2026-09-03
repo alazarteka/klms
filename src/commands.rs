@@ -9,7 +9,8 @@ use crate::{
     auth,
     cli::{
         ActivitiesCommand, AuthCommand, AuthMethodArg, AuthSecondFactorArg, Cli, Command,
-        CourseShowCommand, CoursesCommand, RequestCommand, SkillCommand,
+        CourseShowCommand, CoursesCommand, LibraryCommand, LibraryDownloadArg, LibraryFieldArg,
+        LibraryRelationsCommand, RequestCommand, SkillCommand,
     },
     client::{KlmsClient, validate_base_url},
     error::AppError,
@@ -25,6 +26,17 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             SkillCommand::Install => crate::skill::install(),
             SkillCommand::Status => crate::skill::status(),
         };
+    }
+    if let Command::Library(args) = &cli.command {
+        if !matches!(args.command, LibraryCommand::Sync(_)) {
+            return library_local(&args.command);
+        }
+    }
+    if let Command::Spec = &cli.command {
+        return crate::spec::run();
+    }
+    if let Command::Completions { shell } = &cli.command {
+        return crate::spec::completions(*shell);
     }
     let base_url = validate_base_url(&cli.base_url)?;
     match &cli.command {
@@ -72,6 +84,272 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             live(command, &client, &base_url)
         }
     }
+}
+
+fn library_local(command: &LibraryCommand) -> Result<CommandResult, AppError> {
+    let mut corpus = crate::corpus::Corpus::open()?;
+    match command {
+        LibraryCommand::Status => library_status(&corpus),
+        LibraryCommand::Search { query, list } => {
+            let (fresh_through, source_complete) = corpus.coverage()?;
+            let mut rows = corpus.search(query, list.limit.saturating_add(1))?;
+            let truncated = rows.len() > list.limit;
+            rows.truncate(list.limit);
+            let human = rows
+                .iter()
+                .map(|row| format!("{}\t{}\t{}", row.reference, row.kind, row.title))
+                .collect::<Vec<_>>()
+                .join("\n");
+            output::local_collection(
+                "library.search",
+                &rows,
+                human,
+                rows.len(),
+                list.limit,
+                !truncated,
+                fresh_through,
+                source_complete,
+            )
+        }
+        LibraryCommand::Changes(list) => {
+            let (fresh_through, source_complete) = corpus.coverage()?;
+            let mut rows = corpus.changes(list.limit.saturating_add(1))?;
+            let truncated = rows.len() > list.limit;
+            rows.truncate(list.limit);
+            let human = rows
+                .iter()
+                .map(|r| format!("{}\t{}\t{}", r.occurred_at, r.kind, r.subject_ref))
+                .collect::<Vec<_>>()
+                .join("\n");
+            output::local_collection(
+                "library.changes",
+                &rows,
+                human,
+                rows.len(),
+                list.limit,
+                !truncated,
+                fresh_through,
+                source_complete,
+            )
+        }
+        LibraryCommand::Activity(args) => {
+            let mut rows =
+                corpus.activity(args.subject.as_deref(), args.list.limit.saturating_add(1))?;
+            let truncated = rows.len() > args.list.limit;
+            rows.truncate(args.list.limit);
+            let human = rows
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{}\t{}\t{}\t{}",
+                        row.created_at, row.actor, row.field, row.subject_ref
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            output::local_collection(
+                "library.activity",
+                &rows,
+                human,
+                rows.len(),
+                args.list.limit,
+                !truncated,
+                None,
+                None,
+            )
+        }
+        LibraryCommand::Show { reference } => {
+            let row = corpus.show(reference)?;
+            let human = serde_json::to_string_pretty(&row)
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            output::result("library.show", &row, human)
+        }
+        LibraryCommand::History { reference, list } => {
+            let mut rows = corpus.history(reference, list.limit.saturating_add(1))?;
+            let truncated = rows.len() > list.limit;
+            rows.truncate(list.limit);
+            let human = rows
+                .iter()
+                .map(|row| format!("{}\t{}\t{}", row.id, row.observed_at, row.digest))
+                .collect::<Vec<_>>()
+                .join("\n");
+            output::local_collection(
+                "library.history",
+                &rows,
+                human,
+                rows.len(),
+                list.limit,
+                !truncated,
+                None,
+                None,
+            )
+        }
+        LibraryCommand::Content {
+            reference,
+            max_bytes,
+        } => library_content(&corpus, reference, *max_bytes),
+        LibraryCommand::Export { reference, out } => library_export(&corpus, reference, out),
+        LibraryCommand::Edit(args) => {
+            let value = read_library_text(args.value.as_deref(), args.value_file.as_deref())?;
+            let field = match args.field {
+                LibraryFieldArg::Title => "title",
+                LibraryFieldArg::Filename => "filename",
+                LibraryFieldArg::Summary => "summary",
+                LibraryFieldArg::Note => "note",
+                LibraryFieldArg::Tag => "tag",
+            };
+            let row = corpus.edit(
+                &args.reference,
+                field,
+                &value,
+                &args.actor,
+                args.expected_revision,
+            )?;
+            output::result(
+                "library.edit",
+                &row,
+                format!(
+                    "{} revision {}: {:?} -> {:?}",
+                    row.reference, row.revision, row.before, row.after
+                ),
+            )
+        }
+        LibraryCommand::Retract(args) => {
+            let row = corpus.retract(&args.reference, &args.actor)?;
+            output::result(
+                "library.retract",
+                &row,
+                format!("Retracted {}", row.target_ref),
+            )
+        }
+        LibraryCommand::Relations(args) => match &args.command {
+            LibraryRelationsCommand::Add {
+                left,
+                right,
+                kind,
+                actor,
+            } => {
+                let row = corpus.add_relation(left, right, kind, actor)?;
+                let reference = row.reference.clone();
+                output::result(
+                    "library.relations.add",
+                    &row,
+                    format!("Recorded {reference}"),
+                )
+            }
+        },
+        LibraryCommand::Sync(_) => Err(AppError::internal(
+            "sync was routed through the local library dispatcher",
+        )),
+    }
+}
+
+fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppError> {
+    let model = corpus.status()?;
+    let human = format!(
+        "Library: {}\nDatabase: {}\nObjects: {}\nSchema: {}\nCourses: {}\nResources: {}\nRepresentations: {}\nStored content: {} bytes",
+        if model.created {
+            "initialized"
+        } else {
+            "ready"
+        },
+        model.database_path,
+        model.object_store_path,
+        model.schema_version,
+        model.courses,
+        model.resources,
+        model.representations,
+        model.stored_bytes,
+    );
+    output::result("library.status", &model, human)
+}
+
+fn read_library_text(
+    value: Option<&str>,
+    path: Option<&std::path::Path>,
+) -> Result<String, AppError> {
+    use std::io::Read;
+    let mut text = if let Some(value) = value {
+        value.to_owned()
+    } else if let Some(path) = path {
+        if path == std::path::Path::new("-") {
+            let mut value = String::new();
+            std::io::stdin()
+                .take(1_048_577)
+                .read_to_string(&mut value)
+                .map_err(|e| AppError::config(format!("cannot read stdin: {e}")))?;
+            value
+        } else {
+            std::fs::read_to_string(path)
+                .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?
+        }
+    } else {
+        unreachable!("clap requires exactly one of --value and --value-file");
+    };
+    if text.len() > 1_048_576 {
+        return Err(AppError::limit("curation text exceeds 1 MiB"));
+    }
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(text)
+}
+
+#[derive(Serialize)]
+struct LibraryContentOutput {
+    #[serde(rename = "ref")]
+    reference: String,
+    byte_length: u64,
+    mime: Option<String>,
+    filename: String,
+    text: Option<String>,
+    truncated: bool,
+}
+fn library_content(
+    corpus: &crate::corpus::Corpus,
+    reference: &str,
+    max: usize,
+) -> Result<CommandResult, AppError> {
+    use std::io::Read;
+    let record = corpus.content(reference)?;
+    let mut file = std::fs::File::open(&record.path)
+        .map_err(|e| AppError::content_unavailable(format!("cannot read stored content: {e}")))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AppError::library_io(format!("cannot read stored content: {e}")))?;
+    let truncated = bytes.len() > max;
+    if truncated {
+        bytes.truncate(max);
+    }
+    let text = String::from_utf8(bytes).ok();
+    let model = LibraryContentOutput {
+        reference: record.reference,
+        byte_length: record.byte_length,
+        mime: record.mime,
+        filename: record.filename,
+        text: text.clone(),
+        truncated,
+    };
+    output::result(
+        "library.content",
+        &model,
+        text.unwrap_or_else(|| "Binary content is available through `library export`.".into()),
+    )
+}
+fn library_export(
+    corpus: &crate::corpus::Corpus,
+    reference: &str,
+    out: &std::path::Path,
+) -> Result<CommandResult, AppError> {
+    let bytes = corpus.export(reference, out)?;
+    let model = serde_json::json!({"ref":reference,"path":out,"byte_length":bytes});
+    output::result(
+        "library.export",
+        &model,
+        format!("Exported {} bytes to {}", bytes, out.display()),
+    )
 }
 
 fn auth_status(status: &auth::AuthStatus) -> Result<CommandResult, AppError> {
@@ -177,7 +455,9 @@ fn doctor(
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
     match command {
-        Command::Skill(_) => unreachable!("handled before authenticated dispatch"),
+        Command::Skill(_) | Command::Spec | Command::Completions { .. } => {
+            unreachable!("handled before authenticated dispatch")
+        }
         Command::Auth(args) => match args.command {
             AuthCommand::Login(_) | AuthCommand::Logout => {
                 unreachable!("handled before live dispatch")
@@ -337,6 +617,37 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
             RequestCommand::Get { path, max_bytes } => raw::get(client, path, *max_bytes),
         },
         Command::Doctor => unreachable!("handled before live dispatch"),
+        Command::Library(args) => match &args.command {
+            LibraryCommand::Sync(args) => {
+                let mut corpus = crate::corpus::Corpus::open()?;
+                let model = corpus.sync(
+                    client,
+                    base_url,
+                    args.course.as_deref(),
+                    crate::corpus::SyncOptions {
+                        notices: args.notices,
+                        files: args.files || args.download.is_some(),
+                        download_changed: matches!(
+                            args.download,
+                            Some(LibraryDownloadArg::Changed)
+                        ),
+                    },
+                )?;
+                let human = format!(
+                    "{} — {} courses, {} resources, {} representations, {} blobs, {} changes, {} truncated, {} failures",
+                    model.reference,
+                    model.courses,
+                    model.resources,
+                    model.representations,
+                    model.blobs_added,
+                    model.changes,
+                    model.truncated,
+                    model.failures.len()
+                );
+                output::result("library.sync", &model, human)
+            }
+            command => library_local(command),
+        },
     }
 }
 
