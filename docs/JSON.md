@@ -54,6 +54,20 @@ library.retract  {ref, target_ref, actor}
 library.relations.add {ref}
 ```
 
+`library.status.last_sync` is null before the first attempt; otherwise it is
+`{ref, scope, started_at, finished_at, status, source_complete}`. `scope` is
+`all` or the selected course reference (an unresolved filter can remain on a
+failed attempt). A persisted `running` status is projected as `unfinished`:
+completion was not recorded, and process liveness is unknown. A warning tells
+the caller to check the original process before retrying. No database rows or
+finish timestamps are rewritten by this projection.
+
+Local collection truncation and sync failures also populate `warnings`.
+Partial syncs still return a successful envelope and exit 0, with
+`data.status: "incomplete"` and `data.failures`; these must not be mistaken for
+complete source coverage. Human status/list output now exposes these same
+qualifications. The envelope remains version `"4"` and SQLite remains version 1.
+
 Interface discovery shapes are:
 
 ```text
@@ -90,7 +104,22 @@ URL, validators, byte length, MIME, and `sync_ref`. A→B→A creates three
 observations while storing two blobs. Corresponding remote byte changes use
 exact `sha256:` values in `before_ref` and `after_ref`.
 
-Bounded content reports `truncated` inside the `library.content` data object,
+Content/export refer to downloaded file bytes, not source-observation text.
+Use `library show REF` and `data.source.text` for stored notice text. Missing
+bytes retain error code `CONTENT_UNAVAILABLE` (exit 55), with hints to read
+source text, inspect non-file link metadata (`data.source.url`), or explicitly
+sync recorded file candidates for the relevant course. Non-file links and
+resources without recorded file candidates do not receive download-and-retry
+hints. Previously missing files point to their parent's observation state;
+the error does not claim that no remote file exists. Existing stored bytes
+take precedence over these hints, including historical content. A notice with
+no downloaded bytes lists up to 20 present file candidates in ascending
+representation-ID order under `error.details.representations` (reference
+strings), with filenames and the scoped download command in the hint. The
+hint retains the stored-text reading option when text exists and explicitly
+notes if the candidate list is truncated. Links and not-observed attachments
+are excluded. Bounded
+content reports `truncated` inside the `library.content` data object,
 not in the envelope. Export verifies the SHA-256 and refuses an existing
 destination. Ambiguous resource content returns `CONTENT_UNAVAILABLE` with
 candidate representation refs under `error.details`.
