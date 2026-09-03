@@ -104,3 +104,31 @@ filesystem are behind `unstable-dynamic`; the static path writes only to the
 writer or caller-supplied path it is given. Recorded as a `safe-to-run` audit,
 not an exemption. This is a side-effect review, not a review of the generated
 scripts' behavior in every shell.
+
+## 2026-09-03 clap review (PR #3)
+
+Reviewer: Codex agent for `klms` PR #3, task `/root/clap_upgrade`.
+
+Reviewed the complete source-archive deltas `clap` 4.6.4 -> 4.6.6 and
+`clap_builder` 4.6.2 -> 4.6.6. The four crates.io archives' SHA-256 digests
+match the old and new project lockfiles, and fresh archive extractions match
+the sources inspected. Recorded `safe-to-run` delta audits against the existing
+baseline versions; no exemptions or imported trust were added.
+
+- `clap`: no build script; library runtime source is unchanged, and the builder
+  dependency is pinned to the separately reviewed 4.6.6. The remaining delta is
+  examples (in-memory alias expansion and help snapshots), documentation,
+  package metadata, and its development lockfile.
+- `clap_builder`: no build script or dependency/feature changes. Runtime changes
+  adjust optional-value brackets in generated help, rename the private
+  `blacklist` field to `conflicts`, and expose the existing usage getter without
+  changing its behavior. These changes operate on in-memory command data and
+  introduce no filesystem, network, process, or environment side effects.
+  Other changes are documentation, unit tests, metadata, and its development
+  lockfile.
+- The project lockfile changes exactly these two crates; neither crate's own
+  development lockfile changes the graph used to build `klms`. Both retain
+  Rust 1.85 as their declared minimum, below this project's pinned Rust 1.86.
+
+This review covers changed build/runtime side effects, not a full correctness
+or memory-safety audit of clap or its previously baselined dependencies.
