@@ -130,14 +130,20 @@ pub enum LibraryCommand {
         #[command(flatten)]
         list: ListArgs,
     },
-    /// Print bounded locally stored text or bytes.
+    /// Preview downloaded file bytes (UTF-8 text when available).
+    #[command(
+        after_help = "Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links."
+    )]
     Content {
         #[arg(value_name = "REF")]
         reference: String,
         #[arg(long, value_name = "N", default_value_t = 1_048_576, value_parser = parse_preview_limit)]
         max_bytes: usize,
     },
-    /// Export locally stored content without overwriting.
+    /// Export downloaded file bytes without overwriting.
+    #[command(
+        after_help = "Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links."
+    )]
     Export {
         #[arg(value_name = "REF")]
         reference: String,

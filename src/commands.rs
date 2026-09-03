@@ -246,8 +246,8 @@ fn library_local(command: &LibraryCommand) -> Result<CommandResult, AppError> {
 
 fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppError> {
     let model = corpus.status()?;
-    let human = format!(
-        "Library: {}\nDatabase: {}\nObjects: {}\nSchema: {}\nCourses: {}\nResources: {}\nRepresentations: {}\nStored content: {} bytes",
+    let mut human = format!(
+        "Library storage: {}\nDatabase: {}\nObjects: {}\nSchema: {}\nCourses: {}\nResources: {}\nRepresentations: {}\nStored content: {} bytes",
         if model.created {
             "initialized"
         } else {
@@ -261,7 +261,41 @@ fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppEr
         model.representations,
         model.stored_bytes,
     );
-    output::result("library.status", &model, human)
+    if let Some(sync) = &model.last_sync {
+        human.push_str(&format!(
+            "\nLast sync attempt: {} — {}\nScope: {}\nStarted: {}\nFinished: {}",
+            sync.reference,
+            sync.status,
+            sync.scope,
+            crate::date::epoch_to_seoul(sync.started_at).unwrap_or_else(|| "unknown".into()),
+            sync.finished_at
+                .and_then(crate::date::epoch_to_seoul)
+                .unwrap_or_else(|| "not recorded".into()),
+        ));
+        if sync.scope != "all" {
+            human.push_str("\nCourse-scoped syncs do not establish global coverage.");
+        }
+    } else {
+        human.push_str("\nLast sync attempt: none");
+    }
+    human.push_str(&format!(
+        "\nLast complete global sync: {}",
+        model
+            .fresh_through
+            .and_then(crate::date::epoch_to_seoul)
+            .unwrap_or_else(|| "none".into()),
+    ));
+    let mut result = output::result("library.status", &model, human)?;
+    if model
+        .last_sync
+        .as_ref()
+        .is_some_and(|sync| sync.status == "unfinished")
+    {
+        result.warnings.push(
+            "This attempt did not record completion; it may still be active or may have been interrupted. Check the original process and retry the same command once it has stopped.".into(),
+        );
+    }
+    Ok(result)
 }
 
 fn read_library_text(
@@ -634,8 +668,9 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                     },
                 )?;
                 let human = format!(
-                    "{} — {} courses, {} resources, {} representations, {} blobs, {} changes, {} truncated, {} failures",
+                    "{} — {}: {} courses, {} resources, {} representations, {} blobs, {} changes, {} truncated, {} failures",
                     model.reference,
+                    model.status,
                     model.courses,
                     model.resources,
                     model.representations,
@@ -644,7 +679,9 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                     model.truncated,
                     model.failures.len()
                 );
-                output::result("library.sync", &model, human)
+                let mut result = output::result("library.sync", &model, human)?;
+                result.warnings.extend(model.failures);
+                Ok(result)
             }
             command => library_local(command),
         },

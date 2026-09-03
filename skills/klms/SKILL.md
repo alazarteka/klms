@@ -67,6 +67,19 @@ stored bytes, downloads without a verified blob are unconditional, and a
 course-scoped sync does not probe historical content outside its current
 discovery frontier.
 
+Inspect `library status` for the last attempt's scope/outcome and global
+freshness, not just storage readiness. `last_sync.status: "unfinished"` means
+completion was not recorded; the process may still be active or interrupted.
+Check the original process before retrying the same command once it has stopped.
+Do not infer liveness or rewrite history from this status. Partial syncs still
+exit 0: inspect `data.status`, `failures`, `truncated`, and `warnings`.
+
+Notice parsing excludes page controls, navigation, and view counters. The first
+resync after upgrading older observations can record normalization changes;
+preserve those historical records rather than deleting apparent duplicates.
+No-longer-observed notice links are absent from current search, but their
+history and curation remain accessible by reference.
+
 Keep source and effective values distinct. To curate, first inspect the
 subject's activity/history and pass the current field revision:
 
@@ -92,9 +105,18 @@ relation conflicts; retract its returned `relation:ID` before adding it again.
 
 Treat `library show REF` as subject-specific. A representation reports only its
 own effective filename/note/tag/summary, curation provenance, relationships,
-and current SHA-256 ref; do not infer sibling state from its parent. Prefer
-`library content` for bounded inspection and `library export` for full bytes;
-export refuses overwrites. If a resource has multiple stored attachments,
+and current SHA-256 ref; do not infer sibling state from its parent. Read stored
+notice text with `library show REF` (`data.source.text`). `library content`
+previews downloaded file bytes and `library export` exports those bytes; neither
+downloads anything. For metadata-only files, follow the scoped download hint
+only when downloading is within the user's request. Export refuses overwrites.
+Non-file link representations are not undownloaded files: inspect their URL
+with `library show REPRESENTATION_REF` (`data.source.url`), or read the parent
+notice's stored text with `library show NOTICE_REF`. Do not repeat download
+syncs to obtain link content or substitute a sibling attachment. If no file
+candidates are recorded, or a file is marked not-observed, inspect the parent's
+metadata and observation state; local absence does not establish remote absence.
+If a resource has multiple stored attachments,
 content/export returns `CONTENT_UNAVAILABLE` with candidate representation
 refs. Select one explicitly rather than guessing.
 

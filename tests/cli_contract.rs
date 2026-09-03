@@ -671,7 +671,7 @@ fn board_post_identity_is_consistent_across_list_and_detail() {
                 assert!(
                     request.starts_with("GET /mod/courseboard/article.php?id=10&bwid=11 HTTP/1.1")
                 );
-                "<main><h1>Notice</h1><p>Details</p></main>"
+                "<div class='courseboard_view'><div class='subject'><h3>Notice</h3></div><div class='content'>Details</div></div>"
             };
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         }
@@ -929,9 +929,9 @@ fn sync_with_notices_walks_board_pages() {
         "/mod/courseboard/view.php?id=9&page=2" => {
             Response::html("<table class='generaltable'></table>")
         }
-        "/mod/courseboard/article.php?id=9&bwid=10" => {
-            Response::html("<main><h1>Hello</h1><p>notice body</p></main>")
-        }
+        "/mod/courseboard/article.php?id=9&bwid=10" => Response::html(
+            "<div class='courseboard_view'><div class='subject'><h3>Hello</h3></div><div class='content'>notice body</div></div>",
+        ),
         target => panic!("unexpected request: {} {target}", request.method),
     });
     success_json(library_sync(&state, &data, &server, &["--notices"]));
@@ -941,6 +941,234 @@ fn sync_with_notices_walks_board_pages() {
     ));
     assert_eq!(notice["data"]["kind"], "notice");
     assert!(server.requests().iter().any(|line| line.contains("page=2")));
+}
+
+const NOTICE_MANIFEST: &str = "<main class='course-content'><li class='activity modtype_courseboard' \
+    id='module-9'><a href='/mod/courseboard/view.php?id=9'>\
+    <span class='instancename'>Notices</span></a></li></main>";
+const NOTICE_LIST: &str = "<table class='generaltable'><tr><td><a \
+    href='/mod/courseboard/article.php?id=9&bwid=10'>Exam schedule</a></td></tr></table>";
+
+#[test]
+fn notice_sync_ignores_chrome_but_records_title_body_and_attachment_changes() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = Arc::new(AtomicUsize::new(0));
+    let router_phase = Arc::clone(&phase);
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(NOTICE_MANIFEST),
+        "/mod/courseboard/view.php?id=9" => Response::html(NOTICE_LIST),
+        "/mod/courseboard/article.php?id=9&bwid=10" => {
+            let phase = router_phase.load(Ordering::Relaxed);
+            if phase == 5 {
+                return Response::html("<main>Changed upstream layout without a post body</main>");
+            }
+            let title = if phase >= 2 {
+                "Revised exam schedule"
+            } else {
+                "Exam schedule"
+            };
+            let body = if phase >= 3 { "Wednesday" } else { "Tuesday" };
+            let file = if phase >= 4 { "new.pdf" } else { "old.pdf" };
+            Response::html(format!(
+                "<h1>Generic heading</h1><div class='courseboard_view'>\
+                <div class='subject'><h3>{title}</h3></div>\
+                <div class='info'><div class='hit'>Views : {phase}</div>\
+                <div class='files'><a href='/pluginfile.php/1/{file}'>{file}</a></div></div>\
+                <div class='content'>{body}</div>\
+                <div class='pre_next'><a href='/neighbor/{phase}'>Navigation {phase}</a></div>\
+                <div id='password_confirm'>Enter password</div></div>"
+            ))
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    let run = || success_json(library_sync(&state, &data, &server, &["--notices"]));
+    run();
+    phase.store(1, Ordering::Relaxed);
+    assert_eq!(run()["data"]["changes"], 0);
+    for next in 2..=4 {
+        phase.store(next, Ordering::Relaxed);
+        assert!(run()["data"]["changes"].as_u64().unwrap() > 0);
+        assert_eq!(run()["data"]["changes"], 0);
+    }
+    let history = success_json(library_local(
+        &data,
+        &["library", "history", "board-post:9:10"],
+    ));
+    assert_eq!(history["data"].as_array().unwrap().len(), 4);
+    let before = success_json(library_local(
+        &data,
+        &["library", "show", "board-post:9:10"],
+    ));
+    phase.store(5, Ordering::Relaxed);
+    let failed = run();
+    assert_eq!(failed["data"]["status"], "incomplete");
+    assert!(
+        failed["data"]["failures"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap()
+            .contains("post region")
+    );
+    let after = success_json(library_local(
+        &data,
+        &["library", "show", "board-post:9:10"],
+    ));
+    assert_eq!(after["data"]["source"], before["data"]["source"]);
+    for query in ["Navigation", "Enter password"] {
+        let hits = success_json(library_local(&data, &["library", "search", query]));
+        assert!(hits["data"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn corrected_notice_keeps_history_curation_and_files_but_unindexes_old_navigation() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let corrected = Arc::new(AtomicBool::new(false));
+    let router_corrected = Arc::clone(&corrected);
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(NOTICE_MANIFEST),
+        "/mod/courseboard/view.php?id=9" => Response::html(NOTICE_LIST),
+        "/mod/courseboard/article.php?id=9&bwid=10" => {
+            let corrected = router_corrected.load(Ordering::Relaxed);
+            // Seed the same polluted source text/links that the old broad parser
+            // persisted, then move that chrome outside the semantic body.
+            let chrome = "<a href='/neighbor'>Phantomnavigation</a><p>Views : 1</p>";
+            let attachment = "<a href='/pluginfile.php/1/lecture.txt'>lecture.txt</a>";
+            let (body, outside) = if corrected {
+                ("Actual notice".to_owned(), chrome.to_owned())
+            } else {
+                (
+                    format!("Actual notice {chrome} {attachment}"),
+                    String::new(),
+                )
+            };
+            Response::html(format!(
+                "<div class='courseboard_view'><div class='subject'><h3>Exam schedule</h3></div><div class='content'>{body}</div><div class='pre_next'>{outside}</div></div>"
+            ))
+        }
+        "/pluginfile.php/1/lecture.txt" => Response::bytes("text/plain", "preserved bytes"),
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--notices", "--download", "changed"],
+    ));
+    let original = success_json(library_local(
+        &data,
+        &["library", "history", "board-post:9:10"],
+    ));
+    let notice = success_json(library_local(
+        &data,
+        &["library", "show", "board-post:9:10"],
+    ));
+    let reps = notice["data"]["representations"].as_array().unwrap();
+    let nav = reps
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/neighbor"))
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    let file = reps
+        .iter()
+        .find(|r| r["url"].as_str().unwrap().ends_with("/lecture.txt"))
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap();
+    success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "board-post:9:10",
+            "--field",
+            "note",
+            "--value",
+            "Keep my note",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    corrected.store(true, Ordering::Relaxed);
+    success_json(library_sync(&state, &data, &server, &["--notices"]));
+    let history = success_json(library_local(
+        &data,
+        &["library", "history", "board-post:9:10"],
+    ));
+    assert_eq!(history["data"].as_array().unwrap().len(), 2);
+    assert_eq!(history["data"][1], original["data"][0]);
+    let after = success_json(library_local(
+        &data,
+        &["library", "show", "board-post:9:10"],
+    ));
+    assert_eq!(after["data"]["effective"]["note"], "Keep my note");
+    let nav_state = success_json(library_local(&data, &["library", "show", nav]));
+    assert_eq!(nav_state["data"]["remote_state"], "not_observed");
+    // Older versions also retained index entries for already-missing links.
+    let database = rusqlite::Connection::open(data.path().join("klms/library.db")).unwrap();
+    database
+        .execute(
+            "INSERT INTO search_documents(subject_ref,kind,course,title,body)
+         VALUES(?1,'link','course:42','Phantomnavigation','Old index entry')",
+            [nav],
+        )
+        .unwrap();
+    drop(database);
+    assert_eq!(
+        success_json(library_sync(&state, &data, &server, &["--notices"]))["data"]["changes"],
+        0
+    );
+    let search = success_json(library_local(
+        &data,
+        &["library", "search", "Phantomnavigation"],
+    ));
+    assert!(search["data"].as_array().unwrap().is_empty());
+    // A later curation refresh must not reintroduce an obsolete notice link.
+    success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            nav,
+            "--field",
+            "note",
+            "--value",
+            "Phantomnavigation annotation",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    let search = success_json(library_local(
+        &data,
+        &["library", "search", "Phantomnavigation"],
+    ));
+    assert!(search["data"].as_array().unwrap().is_empty());
+    let old_file = success_json(library_local(&data, &["library", "content", file]));
+    assert_eq!(old_file["data"]["text"], "preserved bytes");
+    let files = success_json(library_local(&data, &["library", "search", "lecture.txt"]));
+    assert!(
+        files["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["ref"] == file)
+    );
+    assert_eq!(
+        success_json(library_sync(&state, &data, &server, &["--notices"]))["data"]["changes"],
+        0
+    );
 }
 
 #[test]
