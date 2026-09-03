@@ -99,6 +99,29 @@ pub fn has_next_page(html: &str) -> Result<bool, AppError> {
     )
 }
 
+pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppError> {
+    let document = Html::parse_document(html);
+    let selector = selector(
+        "a[rel=next][href], .pagination .next a[href], a[data-page-number][aria-label*=Next][href]",
+    )?;
+    let Some(href) = document
+        .select(&selector)
+        .find_map(|node| node.value().attr("href"))
+    else {
+        return Ok(None);
+    };
+    let url = base_url
+        .join(href)
+        .map_err(|e| AppError::shape(format!("invalid pagination URL: {e}")))?;
+    if url.scheme() != base_url.scheme()
+        || url.host_str() != base_url.host_str()
+        || url.port_or_known_default() != base_url.port_or_known_default()
+    {
+        return Err(AppError::shape("pagination URL left the KLMS origin"));
+    }
+    Ok(Some(crate::safe_url::display(&url)))
+}
+
 pub fn safe_html_preview(html: &str) -> String {
     let document = Html::parse_document(html);
     ["#region-main", "[role=main]", "main", "body"]
@@ -134,7 +157,7 @@ fn strip_embedded_active_markup(mut text: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resource_detail, sesskey};
+    use super::{next_page_url, resource_detail, sesskey};
     use url::Url;
 
     #[test]
@@ -168,5 +191,18 @@ mod tests {
         assert_eq!(detail.id.as_deref(), Some("11"));
         assert_eq!(detail.board_id.as_deref(), Some("10"));
         assert_eq!(detail.reference.as_deref(), Some("board-post:10:11"));
+    }
+
+    #[test]
+    fn pagination_stays_on_origin() {
+        let base = Url::parse("https://klms.example/").unwrap();
+        assert_eq!(next_page_url("<div class='pagination'><span class='next'><a href='/mod/courseboard/view.php?id=8&page=2'>Next</a></span></div>",&base).unwrap().as_deref(),Some("https://klms.example/mod/courseboard/view.php?id=8&page=2"));
+        assert!(
+            next_page_url(
+                "<a rel='next' href='https://external.example/page'>Next</a>",
+                &base
+            )
+            .is_err()
+        );
     }
 }

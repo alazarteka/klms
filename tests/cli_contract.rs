@@ -10,6 +10,9 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod fixture;
+use fixture::server::{Response, Server};
+
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_klms"))
 }
@@ -33,7 +36,7 @@ fn json_auth_status_is_one_document_without_secrets() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], "3");
+    assert_eq!(value["schema_version"], "4");
     assert_eq!(value["ok"], true);
     assert_eq!(value["data"]["configured"], false);
 }
@@ -791,4 +794,795 @@ fn skill_install_refuses_an_unexpected_discovery_path() {
     assert_eq!(value["error"]["code"], "CONFIG_ERROR");
     assert!(link.is_dir());
     assert!(!home.path().join("data/klms").exists());
+}
+
+const LIBRARY_DASHBOARD: &str = "<a href='/course/view.php?id=42'>Compilers(CS.420_2026_2)</a>";
+const LIBRARY_MANIFEST: &str = "<main class='course-content'>\
+    <li class='activity modtype_resource' id='module-7'>\
+    <a href='/mod/resource/view.php?id=7'>\
+    <span class='instancename'>Lecture One</span></a></li></main>";
+const LIBRARY_DETAIL: &str = "<main><h1>Lecture One</h1><p>compiler body</p>\
+    <a href='/pluginfile.php/1/mod_resource/content/1/lecture.txt'>lecture.txt</a></main>";
+
+fn library_sync(
+    state: &TempDir,
+    data: &TempDir,
+    server: &Server,
+    extra: &[&str],
+) -> std::process::Output {
+    let state_root = storage_state(state);
+    let mut arguments = vec![
+        "--json",
+        "--base-url",
+        server.url().leak(),
+        "library",
+        "sync",
+    ];
+    arguments.extend_from_slice(extra);
+    binary()
+        .env("XDG_STATE_HOME", state_root)
+        .env("XDG_DATA_HOME", data.path())
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn library_local(data: &TempDir, arguments: &[&str]) -> std::process::Output {
+    binary()
+        .env("XDG_DATA_HOME", data.path())
+        .arg("--json")
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn success_json(output: std::process::Output) -> Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn basic_library_server() -> Server {
+    Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+        "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+        target if target.starts_with("/pluginfile.php/") => {
+            Response::bytes("text/plain", b"fixture content".to_vec())
+                .header("ETag", "\"fixture-v1\"")
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn library_status_initializes_private_paths_without_auth() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = TempDir::new().unwrap();
+    for created in [true, false] {
+        let value = success_json(library_local(&data, &["library", "status"]));
+        assert_eq!(value["schema_version"], "4");
+        assert_eq!(value["data"]["schema_version"], 1);
+        assert_eq!(value["data"]["created"], created);
+    }
+    let root = data.path().join("klms");
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(root.join("library.db"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn sync_records_courses_resources_and_representations() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    let sync = success_json(library_sync(&state, &data, &server, &[]));
+    assert_eq!(sync["data"]["ref"], "sync:1");
+    assert_eq!(sync["data"]["source_complete"], true);
+    assert_eq!(sync["data"]["truncated"], 0);
+    let course = success_json(library_local(&data, &["library", "show", "course:42"]));
+    assert_eq!(
+        course["data"]["source"]["title"],
+        "Compilers(CS.420_2026_2)"
+    );
+    let resource = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(
+        resource["data"]["source"]["text"],
+        "Lecture One compiler body lecture.txt"
+    );
+    let representation = success_json(library_local(
+        &data,
+        &["library", "show", "representation:1"],
+    ));
+    assert_eq!(representation["data"]["source"]["filename"], "lecture.txt");
+}
+
+#[test]
+fn sync_with_notices_walks_board_pages() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(
+            "<main class='course-content'><li class='activity modtype_courseboard' \
+             id='module-9'><a href='/mod/courseboard/view.php?id=9'>\
+             <span class='instancename'>Notices</span></a></li></main>",
+        ),
+        "/mod/courseboard/view.php?id=9" => Response::html(
+            "<table class='generaltable'><tr><td><a \
+             href='/mod/courseboard/article.php?id=9&bwid=10'>Hello</a></td></tr></table>\
+             <a rel='next' href='/mod/courseboard/view.php?id=9&page=2'>Next</a>",
+        ),
+        "/mod/courseboard/view.php?id=9&page=2" => {
+            Response::html("<table class='generaltable'></table>")
+        }
+        "/mod/courseboard/article.php?id=9&bwid=10" => {
+            Response::html("<main><h1>Hello</h1><p>notice body</p></main>")
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &["--notices"]));
+    let notice = success_json(library_local(
+        &data,
+        &["library", "show", "board-post:9:10"],
+    ));
+    assert_eq!(notice["data"]["kind"], "notice");
+    assert!(server.requests().iter().any(|line| line.contains("page=2")));
+}
+
+#[test]
+fn sync_without_notices_does_not_request_boards() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(
+            "<main class='course-content'><li class='activity modtype_courseboard' \
+             id='module-9'><a href='/mod/courseboard/view.php?id=9'>\
+             <span class='instancename'>Notices</span></a></li></main>",
+        ),
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|line| line.contains("courseboard/view"))
+    );
+}
+
+#[test]
+fn files_validates_and_download_changed_stores_bytes_once() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    let first = success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--download", "changed"],
+    ));
+    let second = success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--download", "changed"],
+    ));
+    assert_eq!(first["data"]["blobs_added"], 1);
+    assert_eq!(second["data"]["blobs_added"], 0);
+    let status = success_json(library_local(&data, &["library", "status"]));
+    assert_eq!(status["data"]["blobs"], 1);
+    let gets = server
+        .requests()
+        .iter()
+        .filter(|line| line.starts_with("GET /pluginfile.php/"))
+        .count();
+    assert_eq!(gets, 1);
+}
+
+#[test]
+fn content_change_appends_history_and_before_after_refs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| {
+        let current = router_phase.load(Ordering::Relaxed);
+        match request.target.as_str() {
+            "/my/" => {
+                router_phase.fetch_add(1, Ordering::Relaxed);
+                Response::html(LIBRARY_DASHBOARD)
+            }
+            "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+            "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+            target if target.starts_with("/pluginfile.php/") => {
+                let value = if current == 2 { "B" } else { "A" };
+                Response::bytes("text/plain", value.as_bytes().to_vec())
+                    .header("ETag", &format!("\"{value}\""))
+            }
+            target => panic!("unexpected request: {} {target}", request.method),
+        }
+    });
+    for _ in 0..4 {
+        success_json(library_sync(
+            &state,
+            &data,
+            &server,
+            &["--download", "changed"],
+        ));
+    }
+    let history = success_json(library_local(
+        &data,
+        &["library", "history", "representation:1"],
+    ));
+    let verified: Vec<_> = history["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "verified_content")
+        .collect();
+    assert_eq!(verified.len(), 3);
+    let changes = success_json(library_local(&data, &["library", "changes"]));
+    let content_changes: Vec<_> = changes["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "verified_content_changed")
+        .collect();
+    assert_eq!(content_changes.len(), 2);
+    assert!(content_changes.iter().all(|entry| {
+        entry["before_ref"].as_str().unwrap().starts_with("sha256:")
+            && entry["after_ref"].as_str().unwrap().starts_with("sha256:")
+    }));
+}
+
+#[test]
+fn failed_dashboard_sync_never_marks_courses_not_listed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/my/" if router_phase.fetch_add(1, Ordering::Relaxed) == 0 => {
+            Response::html(LIBRARY_DASHBOARD)
+        }
+        "/my/" => Response::html("<html>incomplete dashboard</html>"),
+        "/course/view.php?id=42" => Response::html("<main class='course-content'></main>"),
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    assert!(!library_sync(&state, &data, &server, &[]).status.success());
+    let course = success_json(library_local(&data, &["library", "show", "course:42"]));
+    assert_eq!(course["data"]["remote_state"], "listed");
+}
+
+#[test]
+fn course_disappears_and_reappears() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/my/" => {
+            let run = router_phase.fetch_add(1, Ordering::Relaxed);
+            if run == 1 {
+                Response::html("<a href='/course/view.php?id=99'>Databases</a>")
+            } else {
+                Response::html(LIBRARY_DASHBOARD)
+            }
+        }
+        "/course/view.php?id=42" | "/course/view.php?id=99" => {
+            Response::html("<main class='course-content'></main>")
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    success_json(library_sync(&state, &data, &server, &[]));
+    let hidden = success_json(library_local(&data, &["library", "show", "course:42"]));
+    assert_eq!(hidden["data"]["remote_state"], "not_listed");
+    success_json(library_sync(&state, &data, &server, &[]));
+    let restored = success_json(library_local(&data, &["library", "show", "course:42"]));
+    assert_eq!(restored["data"]["remote_state"], "listed");
+}
+
+#[test]
+fn complete_manifest_marks_missing_resource_and_failed_detail_keeps_state() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| {
+        let run = router_phase.load(Ordering::Relaxed);
+        match request.target.as_str() {
+            "/my/" => {
+                router_phase.fetch_add(1, Ordering::Relaxed);
+                Response::html(LIBRARY_DASHBOARD)
+            }
+            "/course/view.php?id=42" if run == 2 => {
+                Response::html("<main class='course-content'></main>")
+            }
+            "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+            "/mod/resource/view.php?id=7" if run >= 3 => {
+                Response::html("failed").status("500 Internal Server Error")
+            }
+            "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+            target => panic!("unexpected request: {} {target}", request.method),
+        }
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    success_json(library_sync(&state, &data, &server, &[]));
+    let missing = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(missing["data"]["remote_state"], "not_observed");
+    let incomplete = success_json(library_sync(&state, &data, &server, &[]));
+    assert_eq!(incomplete["data"]["status"], "incomplete");
+    let retained = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(
+        retained["data"]["source"]["text"],
+        "Lecture One compiler body lecture.txt"
+    );
+}
+
+#[test]
+fn scoped_sync_validates_only_its_course() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(
+            "<a href='/course/view.php?id=42'>Compilers(CS.420)</a>\
+             <a href='/course/view.php?id=99'>Databases(CS.430)</a>",
+        ),
+        "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+        "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+        target if target.starts_with("/pluginfile.php/") => {
+            Response::bytes("text/plain", b"fixture".to_vec())
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    let value = success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--course", "course:42", "--files"],
+    ));
+    assert_eq!(value["data"]["source_complete"], false);
+    assert!(!server.requests().iter().any(|line| line.contains("id=99")));
+}
+
+#[test]
+fn edit_supersede_conflict_and_retract() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    success_json(library_sync(&state, &data, &server, &[]));
+    let first = success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "file:7",
+            "--field",
+            "title",
+            "--value",
+            "Human title",
+            "--actor",
+            "human",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    let second = success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "file:7",
+            "--field",
+            "title",
+            "--value",
+            "Agent title",
+            "--actor",
+            "agent",
+            "--expected-revision",
+            "1",
+        ],
+    ));
+    let conflict = library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "file:7",
+            "--field",
+            "title",
+            "--value",
+            "Stale",
+            "--expected-revision",
+            "1",
+        ],
+    );
+    assert_eq!(conflict.status.code(), Some(54));
+    success_json(library_local(
+        &data,
+        &[
+            "library",
+            "retract",
+            second["data"]["ref"].as_str().unwrap(),
+        ],
+    ));
+    let show = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(show["data"]["effective"]["title"], "Human title");
+    assert_eq!(first["data"]["actor"], "human");
+}
+
+#[test]
+fn summary_stale_after_source_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/my/" => {
+            router_phase.fetch_add(1, Ordering::Relaxed);
+            Response::html(LIBRARY_DASHBOARD)
+        }
+        "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+        "/mod/resource/view.php?id=7" => Response::html(format!(
+            "<main><h1>Lecture</h1><p>body {}</p></main>",
+            router_phase.load(Ordering::Relaxed)
+        )),
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "file:7",
+            "--field",
+            "summary",
+            "--value",
+            "Summary",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    success_json(library_sync(&state, &data, &server, &[]));
+    let show = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(show["data"]["effective"]["summary_stale"], true);
+}
+
+#[test]
+fn content_is_ambiguous_with_two_stored_representations_and_export_refuses_overwrite() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+        "/mod/resource/view.php?id=7" => Response::html(
+            "<main><a href='/pluginfile.php/one'>one.txt</a>\
+             <a href='/pluginfile.php/two'>two.txt</a></main>",
+        ),
+        "/pluginfile.php/one" => Response::bytes("text/plain", b"one".to_vec()),
+        "/pluginfile.php/two" => Response::bytes("text/plain", b"two".to_vec()),
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--download", "changed"],
+    ));
+    let ambiguous = library_local(&data, &["library", "content", "file:7"]);
+    assert_eq!(ambiguous.status.code(), Some(55));
+    let destination = data.path().join("out.txt");
+    fs::write(&destination, b"keep").unwrap();
+    let refusal = library_local(
+        &data,
+        &[
+            "library",
+            "export",
+            "representation:1",
+            "--out",
+            destination.to_str().unwrap(),
+        ],
+    );
+    assert!(!refusal.status.success());
+    assert_eq!(fs::read(destination).unwrap(), b"keep");
+}
+
+#[test]
+fn search_matches_source_text_and_active_curation_only() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    success_json(library_sync(&state, &data, &server, &[]));
+    let source = success_json(library_local(&data, &["library", "search", "compiler"]));
+    assert!(
+        source["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["ref"] == "file:7")
+    );
+    let edit = success_json(library_local(
+        &data,
+        &[
+            "library",
+            "edit",
+            "file:7",
+            "--field",
+            "note",
+            "--value",
+            "zirconium",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    let curated = success_json(library_local(&data, &["library", "search", "zirconium"]));
+    assert_eq!(curated["data"][0]["ref"], "file:7");
+    success_json(library_local(
+        &data,
+        &["library", "retract", edit["data"]["ref"].as_str().unwrap()],
+    ));
+    let absent = success_json(library_local(&data, &["library", "search", "zirconium"]));
+    assert!(absent["data"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn relations_add_conflict_and_retract() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    success_json(library_sync(&state, &data, &server, &[]));
+    let args = [
+        "library",
+        "relations",
+        "add",
+        "course:42",
+        "file:7",
+        "--kind",
+        "related_to",
+        "--actor",
+        "agent",
+    ];
+    let relation = success_json(library_local(&data, &args));
+    let conflict = library_local(&data, &args);
+    assert_eq!(conflict.status.code(), Some(54));
+    success_json(library_local(
+        &data,
+        &[
+            "library",
+            "retract",
+            relation["data"]["ref"].as_str().unwrap(),
+        ],
+    ));
+    success_json(library_local(&data, &args));
+    let activity = success_json(library_local(
+        &data,
+        &["library", "activity", "--subject", "course:42"],
+    ));
+    assert_eq!(activity["data"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn truncated_detail_links_never_mark_representations_not_observed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let many_links: String = (0..101)
+        .map(|index| {
+            format!(
+                "<a href='/pluginfile.php/1/mod_resource/content/1/extra-{index}.txt'>\
+                 extra {index}</a>"
+            )
+        })
+        .collect();
+    let server = Server::new(move |request| {
+        let run = router_phase.load(Ordering::Relaxed);
+        match request.target.as_str() {
+            "/my/" => {
+                router_phase.fetch_add(1, Ordering::Relaxed);
+                Response::html(LIBRARY_DASHBOARD)
+            }
+            "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+            "/mod/resource/view.php?id=7" if run == 2 => {
+                Response::html(format!("<main><h1>Lecture One</h1>{many_links}</main>"))
+            }
+            "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+            target => panic!("unexpected request: {} {target}", request.method),
+        }
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    // Parser caps mark the observation incomplete without failing the run.
+    let truncated = success_json(library_sync(&state, &data, &server, &[]));
+    assert_eq!(truncated["data"]["status"], "complete");
+    assert_eq!(truncated["data"]["truncated"], 1);
+    let lecture = success_json(library_local(
+        &data,
+        &["library", "show", "representation:1"],
+    ));
+    assert_eq!(lecture["data"]["source"]["filename"], "lecture.txt");
+    assert_eq!(lecture["data"]["remote_state"], "present");
+    let changes = success_json(library_local(&data, &["library", "changes"]));
+    assert!(
+        !changes["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "representation_not_observed")
+    );
+}
+
+#[test]
+fn head_validated_download_sends_no_conditional_headers() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = basic_library_server();
+    success_json(library_sync(&state, &data, &server, &["--files"]));
+    let heads = server
+        .requests()
+        .iter()
+        .filter(|line| line.starts_with("HEAD /pluginfile.php/"))
+        .count();
+    assert_eq!(heads, 1);
+    let download = success_json(library_sync(
+        &state,
+        &data,
+        &server,
+        &["--download", "changed"],
+    ));
+    assert_eq!(download["data"]["blobs_added"], 1);
+    let gets: Vec<_> = server
+        .recorded()
+        .into_iter()
+        .filter(|request| request.line.starts_with("GET /pluginfile.php/"))
+        .collect();
+    assert_eq!(gets.len(), 1);
+    assert!(!gets[0].has_header("If-None-Match"));
+    assert!(!gets[0].has_header("If-Modified-Since"));
+}
+
+#[test]
+fn forbidden_detail_records_access_lost_then_restored() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| {
+        let run = router_phase.load(Ordering::Relaxed);
+        match request.target.as_str() {
+            "/my/" => {
+                router_phase.fetch_add(1, Ordering::Relaxed);
+                Response::html(LIBRARY_DASHBOARD)
+            }
+            "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+            "/mod/resource/view.php?id=7" if run == 2 => {
+                Response::html("forbidden").status("403 Forbidden")
+            }
+            "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+            target => panic!("unexpected request: {} {target}", request.method),
+        }
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    let lost = success_json(library_sync(&state, &data, &server, &[]));
+    assert_eq!(lost["data"]["status"], "incomplete");
+    let hidden = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(hidden["data"]["remote_state"], "access_lost");
+    assert_eq!(
+        hidden["data"]["source"]["text"],
+        "Lecture One compiler body lecture.txt"
+    );
+    success_json(library_sync(&state, &data, &server, &[]));
+    let restored = success_json(library_local(&data, &["library", "show", "file:7"]));
+    assert_eq!(restored["data"]["remote_state"], "present");
+    let changes = success_json(library_local(&data, &["library", "changes"]));
+    let kinds: Vec<_> = changes["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["subject_ref"] == "file:7")
+        .map(|entry| entry["kind"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(kinds.contains(&"access_lost".to_owned()), "{kinds:?}");
+    assert!(kinds.contains(&"access_restored".to_owned()), "{kinds:?}");
+}
+
+#[test]
+fn reverted_source_keeps_every_observation_in_history() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let phase = std::sync::Arc::new(AtomicUsize::new(0));
+    let router_phase = std::sync::Arc::clone(&phase);
+    let server = Server::new(move |request| {
+        let run = router_phase.load(Ordering::Relaxed);
+        match request.target.as_str() {
+            "/my/" => {
+                let run = router_phase.fetch_add(1, Ordering::Relaxed);
+                if run == 1 {
+                    Response::html("<a href='/course/view.php?id=42'>Renamed Compilers</a>")
+                } else {
+                    Response::html(LIBRARY_DASHBOARD)
+                }
+            }
+            "/course/view.php?id=42" => Response::html(LIBRARY_MANIFEST),
+            "/mod/resource/view.php?id=7" if run == 2 => {
+                Response::html("<main><h1>Lecture One</h1><p>revised body</p></main>")
+            }
+            "/mod/resource/view.php?id=7" => Response::html(LIBRARY_DETAIL),
+            target => panic!("unexpected request: {} {target}", request.method),
+        }
+    });
+    for _ in 0..3 {
+        success_json(library_sync(&state, &data, &server, &[]));
+    }
+    let course = success_json(library_local(&data, &["library", "show", "course:42"]));
+    assert_eq!(
+        course["data"]["source"]["title"],
+        "Compilers(CS.420_2026_2)"
+    );
+    for (reference, kind) in [
+        ("course:42", "course_source"),
+        ("file:7", "resource_source"),
+    ] {
+        let history = success_json(library_local(&data, &["library", "history", reference]));
+        let observations = history["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["kind"] == kind)
+            .count();
+        assert_eq!(observations, 3, "{reference}");
+    }
+}
+
+#[test]
+fn assignment_activity_is_stored_under_its_parser_ref() {
+    let state = TempDir::new().unwrap();
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html(LIBRARY_DASHBOARD),
+        "/course/view.php?id=42" => Response::html(
+            "<main class='course-content'><li class='activity modtype_assign' \
+             id='module-5'><a href='/mod/assign/view.php?id=5'>\
+             <span class='instancename'>Homework One</span></a></li></main>",
+        ),
+        "/mod/assign/view.php?id=5" => {
+            Response::html("<main><h1>Homework One</h1><p>submit a parser</p></main>")
+        }
+        target => panic!("unexpected request: {} {target}", request.method),
+    });
+    success_json(library_sync(&state, &data, &server, &[]));
+    let assignment = success_json(library_local(&data, &["library", "show", "assign:5"]));
+    assert_eq!(assignment["data"]["ref"], "assign:5");
+    assert_eq!(assignment["data"]["kind"], "assign");
+    assert_eq!(
+        assignment["data"]["source"]["text"],
+        "Homework One submit a parser"
+    );
+    let search = success_json(library_local(&data, &["library", "search", "parser"]));
+    assert_eq!(search["data"][0]["ref"], "assign:5");
 }

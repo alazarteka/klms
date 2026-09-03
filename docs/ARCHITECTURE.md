@@ -4,6 +4,7 @@
 
 ```text
 CLI -> commands -> authenticated client + parsers -> models -> output
+              \-> corpus -> SQLite + object store
               \-> local skill installer
 ```
 
@@ -24,16 +25,19 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `present`: scannable human representations of typed records.
 - `output`: versioned JSON envelopes, human rendering, terminal sanitization, and
   exit categories.
+- `corpus`: the only module allowed to touch SQLite or the object store. It
+  owns local-library queries, curation, and sync transactions; commands never
+  embed SQL. Purely local operations do not load authentication.
 - `skill`: embedded companion-skill payload, XDG data placement, and the
   cross-client discovery symlink. It has no network or KLMS authentication
   dependency.
 
-The CLI does not introduce a provider framework, service container, plugin
-registry, or persistent database before multiple real implementations require
-one.
+The private versioned library is the CLI's one persistent store. No provider
+framework, service container, or plugin registry is introduced.
 
-The only persistent provider state is a mode-0600 JSON record containing KLMS
-cookie pairs and trusted-device identifiers. Moodle session keys are kept only
+Persistent state is limited to explicitly invoked local features: a mode-0600
+owned-session record, the installed companion skill, and the private versioned
+library described in `docs/LOCAL_LIBRARY.md`. Moodle session keys are kept only
 in memory. Consequently, `auth time-left` bootstraps from the dashboard and
 discloses that this read may refresh activity time.
 

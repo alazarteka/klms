@@ -11,4 +11,4 @@ pub use boards::{board_posts, is_notice_board};
 pub use calendar::calendar_page;
 pub use courses::{activities, course_detail, dashboard, is_video_activity};
 pub use coursework::{assignments, attendance, grades, quizzes};
-pub use detail::{has_next_page, resource_detail, safe_html_preview, sesskey};
+pub use detail::{has_next_page, next_page_url, resource_detail, safe_html_preview, sesskey};

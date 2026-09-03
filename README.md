@@ -109,6 +109,24 @@ Run `klms --help` or `klms <command> --help` for the rest of the command
 surface, including activities, quizzes, calendar events, boards, videos, and
 course files.
 
+For a private history that survives KLMS changes, initialize and synchronize
+the local versioned library explicitly:
+
+```bash
+klms library status
+klms library sync --files
+klms library sync --notices --files --download changed
+klms library search "compiler" --limit 20
+klms library changes
+klms library activity --subject file:1205160
+```
+
+The library stores normalized observations in SQLite and exact downloaded
+bytes once in a private SHA-256 object store under the XDG data directory. It
+does not schedule itself, write to KLMS, follow authenticated third-party
+links, or infer that an unlisted course was dropped. See
+[the local-library contract](docs/LOCAL_LIBRARY.md).
+
 ## JSON and agent use
 
 Put `--json` before the command for stable machine-readable output:
