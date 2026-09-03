@@ -32,6 +32,12 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             return library_local(&args.command);
         }
     }
+    if let Command::Spec = &cli.command {
+        return crate::spec::run();
+    }
+    if let Command::Completions { shell } = &cli.command {
+        return crate::spec::completions(*shell);
+    }
     let base_url = validate_base_url(&cli.base_url)?;
     match &cli.command {
         Command::Auth(args) if matches!(args.command, AuthCommand::Login(_)) => {
@@ -449,7 +455,7 @@ fn doctor(
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
     match command {
-        Command::Skill(_) => {
+        Command::Skill(_) | Command::Spec | Command::Completions { .. } => {
             unreachable!("handled before authenticated dispatch")
         }
         Command::Auth(args) => match args.command {

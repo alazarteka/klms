@@ -6,7 +6,9 @@ description: Use the installed `klms` CLI for structured read-only KAIST KLMS ac
 # KLMS CLI
 
 Use `klms --json` for machine-readable work. The global flag precedes the
-command:
+command. `klms --json spec` returns the complete argument tree (paths, kinds,
+required flags, choices, defaults, help) when you need to discover an option
+rather than guess it:
 
 ```bash
 klms --json doctor

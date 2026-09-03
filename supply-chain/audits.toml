@@ -21,6 +21,12 @@ who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.4.4"
 
+[[audits.clap_complete]]
+who = "Claude Fable 5.1 (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "4.6.9"
+notes = "Static completion generator. No build script. Only clap is a non-optional dependency; the unstable-dynamic modules that read the environment are feature-gated off. generate_to writes only to a caller-supplied path."
+
 [[audits.const-oid]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
 criteria = "safe-to-run"
