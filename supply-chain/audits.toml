@@ -21,6 +21,18 @@ who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.4.4"
 
+[[audits.clap]]
+who = "Codex agent (klms PR #3, /root/clap_upgrade)"
+criteria = "safe-to-run"
+delta = "4.6.4 -> 4.6.6"
+notes = "Reviewed the complete exact-version crate delta, verifying archive SHA-256 against both project lockfiles and extracted-source equality. No build script. Runtime library source is unchanged apart from documentation; the builder pin advances to the separately reviewed 4.6.6. Other changes are examples, snapshots, documentation, and the crate's own unused development lockfile. See BASELINE.md, 2026-09-03 clap review."
+
+[[audits.clap_builder]]
+who = "Codex agent (klms PR #3, /root/clap_upgrade)"
+criteria = "safe-to-run"
+delta = "4.6.2 -> 4.6.6"
+notes = "Reviewed the complete exact-version crate delta, verifying archive SHA-256 against both project lockfiles and extracted-source equality. No build script or dependency/feature changes. Runtime changes are in-memory optional-value help formatting, a private conflict-field rename, and exposing the existing usage getter; the remaining changes are documentation, tests, and the crate's unused development lockfile. No new filesystem, network, process, or environment side effects. See BASELINE.md, 2026-09-03 clap review."
+
 [[audits.clap_complete]]
 who = "Claude Fable 5.1 (review recorded for @alazarteka)"
 criteria = "safe-to-run"
