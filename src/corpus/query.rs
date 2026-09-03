@@ -42,7 +42,7 @@ impl Corpus {
         )? as u64;
         let last_sync = connection
             .query_row(
-                "SELECT id,started_at,finished_at,status,source_complete
+                "SELECT id,started_at,finished_at,status,source_complete,scope
                    FROM sync_runs
                   ORDER BY id DESC
                   LIMIT 1",
@@ -52,8 +52,12 @@ impl Corpus {
                         reference: format!("sync:{}", row.get::<_, i64>(0)?),
                         started_at: row.get(1)?,
                         finished_at: row.get(2)?,
-                        status: row.get(3)?,
+                        status: match row.get::<_, String>(3)?.as_str() {
+                            "running" => "unfinished".into(),
+                            status => status.into(),
+                        },
                         source_complete: row.get::<_, i64>(4)? != 0,
+                        scope: row.get(5)?,
                     })
                 },
             )
@@ -418,25 +422,34 @@ impl Corpus {
                 let ids = statement
                     .query_map([&resource], |row| row.get::<_, i64>(0))?
                     .collect::<Result<Vec<_>, _>>()?;
-                if ids.len() != 1 {
+                if ids.len() > 1 {
                     let references: Vec<_> = ids
                         .iter()
                         .map(|id| format!("representation:{id}"))
                         .collect();
                     return Err(AppError::content_unavailable(
-                        "resource content is unavailable or ambiguous",
+                        "multiple downloaded representations are available for this resource",
                     )
+                    .with_hint(format!(
+                        "Choose one representation reference for `klms library content REF` or `klms library export REF --out PATH`: {}.",
+                        references.join(", ")
+                    ))
                     .with_details(json!({"representations": references})));
                 }
-                latest_content(&self.storage.connection, ids[0])?
+                match ids.first() {
+                    Some(id) => latest_content(&self.storage.connection, *id)?,
+                    None => None,
+                }
             }
             _ => {
                 return Err(AppError::content_unavailable(
                     "reference has no stored content",
                 ));
             }
-        }
-        .ok_or_else(|| AppError::content_unavailable("no stored content for reference"))?;
+        };
+        let Some(row) = row else {
+            return Err(missing_content(&self.storage.connection, reference)?);
+        };
         let path = object_store::object_path(&self.storage.paths.objects, &row.sha256)?;
         Ok(ContentRecord {
             reference: format!("sha256:{}", row.sha256),
@@ -451,6 +464,187 @@ impl Corpus {
         let hash = content.reference.trim_start_matches("sha256:");
         object_store::export(&self.storage.paths.objects, hash, destination)
     }
+}
+struct MissingContentContext {
+    kind: String,
+    course: String,
+    text: String,
+    state: String,
+    has_present_file: bool,
+}
+
+fn missing_content(connection: &Connection, reference: &str) -> Result<AppError, AppError> {
+    let (resource, representation) = match reference.parse::<LibraryRef>()? {
+        LibraryRef::Resource(resource) => (resource, None),
+        LibraryRef::Representation(id) => {
+            let row = connection
+                .query_row(
+                    "SELECT r.ref,p.kind,p.remote_state FROM representations p
+                  JOIN resources r ON r.id=p.resource_id
+                  WHERE p.id=?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((resource, kind, state)) = row else {
+                return Ok(AppError::content_unavailable(
+                    "no stored content for reference",
+                ));
+            };
+            (resource, Some((kind, state)))
+        }
+        _ => {
+            return Ok(AppError::content_unavailable(
+                "no stored content for reference",
+            ));
+        }
+    };
+    let context = connection
+        .query_row(
+            "SELECT r.kind,c.ref,COALESCE(o.text,''),r.remote_state,
+                    EXISTS(SELECT 1 FROM representations p WHERE p.resource_id=r.id
+                           AND p.kind='file' AND p.remote_state='present')
+              FROM resources r
+              JOIN courses c ON c.id=r.course_id
+              LEFT JOIN resource_observations o ON o.id=(
+                SELECT id FROM resource_observations WHERE resource_id=r.id ORDER BY id DESC LIMIT 1)
+              WHERE r.ref=?1",
+            [&resource],
+            |row| Ok(MissingContentContext {
+                kind: row.get(0)?,
+                course: row.get(1)?,
+                text: row.get(2)?,
+                state: row.get(3)?,
+                has_present_file: row.get(4)?,
+            }),
+        )
+        .optional()?;
+    let Some(context) = context else {
+        return Ok(AppError::content_unavailable(
+            "no stored content for reference",
+        ));
+    };
+    let has_notice_text = context.kind == "notice" && !context.text.is_empty();
+    // A representation is its own subject: never substitute its parent's text
+    // or a sibling attachment for its bytes, even when those are available.
+    if representation
+        .as_ref()
+        .is_some_and(|(kind, _)| kind == "link")
+    {
+        let mut hint = format!(
+            "Inspect its recorded URL with `klms library show {reference}` (JSON: data.source.url). Content and export do not follow links."
+        );
+        if has_notice_text {
+            hint.push_str(&format!(
+                " Read the parent notice's stored text with `klms library show {resource}` (JSON: data.source.text)."
+            ));
+        }
+        return Ok(AppError::content_unavailable(
+            "this representation is stored as a non-file link, not downloaded file content",
+        )
+        .with_hint(hint));
+    }
+    if representation.is_none()
+        && context.kind == "notice"
+        && context.state == "present"
+        && context.has_present_file
+    {
+        // Only offer current file candidates, not links or historical missing
+        // attachments. Stored bytes have already taken precedence in content().
+        let mut statement = connection.prepare(
+            "SELECT p.id,o.filename FROM representations p
+              JOIN resources r ON r.id=p.resource_id
+              LEFT JOIN representation_observations o ON o.id=(
+                SELECT id FROM representation_observations
+                 WHERE representation_id=p.id ORDER BY id DESC LIMIT 1)
+              WHERE r.ref=?1 AND p.kind='file' AND p.remote_state='present'
+              ORDER BY p.id LIMIT 21",
+        )?;
+        let candidates = statement
+            .query_map([&resource], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut references = Vec::new();
+        let mut labels = Vec::new();
+        for (id, filename) in candidates.iter().take(20) {
+            let reference = format!("representation:{id}");
+            labels.push(match filename {
+                Some(filename) => format!("{reference} ({filename:?})"),
+                None => reference.clone(),
+            });
+            references.push(reference);
+        }
+        let mut hint = if has_notice_text {
+            format!(
+                "Read stored notice text with `klms library show {resource}` (JSON: data.source.text). "
+            )
+        } else {
+            format!("Inspect notice metadata with `klms library show {resource}`. ")
+        };
+        hint.push_str(&format!(
+            "Recorded file attachments without downloaded bytes: {}. ",
+            labels.join(", ")
+        ));
+        if candidates.len() > 20 {
+            hint.push_str("Only the first 20 candidates are listed; show the notice for the remaining metadata. ");
+        }
+        hint.push_str(&format!(
+            "To attempt downloading available files, run `klms library sync --course {} --notices --download changed`, then use an attachment reference with content or export. These commands operate on downloaded file bytes.",
+            context.course
+        ));
+        return Ok(
+            AppError::content_unavailable("notice attachments have not been downloaded")
+                .with_hint(hint)
+                .with_details(json!({"representations": references})),
+        );
+    }
+    if representation.is_none() && has_notice_text {
+        return Ok(AppError::content_unavailable(
+            "notice text is stored as source metadata, not downloaded file bytes",
+        )
+        .with_hint(format!(
+            "Read it with `klms library show {resource}` (JSON: data.source.text). Content and export operate on downloaded file bytes."
+        )));
+    }
+    if representation
+        .as_ref()
+        .is_some_and(|(_, state)| state == "not_observed")
+    {
+        return Ok(AppError::content_unavailable(
+            "no stored file bytes; this file is recorded as not observed",
+        ).with_hint(format!(
+            "Inspect its parent resource and observation state with `klms library show {resource}` before deciding whether to refresh it."
+        )));
+    }
+    let has_file_candidate = representation
+        .as_ref()
+        .map_or(context.has_present_file, |(kind, state)| {
+            kind == "file" && state == "present"
+        });
+    if context.state == "present" && has_file_candidate {
+        let course = &context.course;
+        let notice_flag = if context.kind == "notice" {
+            " --notices"
+        } else {
+            ""
+        };
+        return Ok(AppError::content_unavailable(
+            "metadata-only: file bytes have not been downloaded",
+        ).with_hint(format!(
+            "To attempt downloading available files, run `klms library sync --course {course}{notice_flag} --download changed`, then retry. Inspect metadata with `klms library show {reference}`."
+        )));
+    }
+    Ok(AppError::content_unavailable("no downloaded file bytes are stored for this reference")
+        .with_hint(format!(
+            "Inspect stored metadata and observation state with `klms library show {resource}`. The local record does not establish whether files are available remotely."
+        )))
 }
 pub fn effective_field(
     connection: &Connection,
@@ -549,7 +743,8 @@ pub fn refresh_subject(transaction: &Transaction<'_>, subject: &str) -> Result<(
                JOIN courses c ON c.id=r.course_id LEFT JOIN representation_observations o ON o.id=(
                  SELECT id FROM representation_observations
                   WHERE representation_id=p.id ORDER BY id DESC LIMIT 1)
-              WHERE p.id=?1",
+              WHERE p.id=?1 AND NOT (
+                r.kind='notice' AND p.kind='link' AND p.remote_state='not_observed')",
                 [id],
                 source_row,
             )

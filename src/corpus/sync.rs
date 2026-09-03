@@ -947,6 +947,16 @@ fn mark_missing_representations(
             )?;
         }
     }
+    // Also clear stale index entries left by earlier versions after a link
+    // had already become not_observed. Keep all history and file entries.
+    transaction.execute(
+        "DELETE FROM search_documents WHERE subject_ref IN (
+            SELECT 'representation:'||p.id FROM representations p
+              JOIN resources r ON r.id=p.resource_id
+             WHERE p.resource_id=?1 AND r.kind='notice' AND p.kind='link'
+               AND p.remote_state='not_observed')",
+        [resource_id],
+    )?;
     Ok(())
 }
 fn latest_bound_content(

@@ -89,7 +89,17 @@ pub fn local_collection<T: Serialize>(
     fresh_through: Option<i64>,
     source_complete: Option<bool>,
 ) -> Result<CommandResult, AppError> {
+    let human = if returned == 0 {
+        "No records found.".into()
+    } else {
+        human
+    };
     let mut result = result(command, data, human)?;
+    if !query_complete {
+        result.warnings.push(format!(
+            "Results truncated at {limit} records; increase --limit to see more."
+        ));
+    }
     result.meta = Some(ListMeta {
         returned,
         limit,
