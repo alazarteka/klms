@@ -109,6 +109,24 @@ Run `klms --help` or `klms <command> --help` for the rest of the command
 surface, including activities, quizzes, calendar events, boards, videos, and
 course files.
 
+For a private history that survives KLMS changes, initialize and synchronize
+the local versioned library explicitly:
+
+```bash
+klms library status
+klms library sync --files
+klms library sync --notices --files --download changed
+klms library search "compiler" --limit 20
+klms library changes
+klms library activity --subject file:1205160
+```
+
+The library stores normalized observations in SQLite and exact downloaded
+bytes once in a private SHA-256 object store under the XDG data directory. It
+does not schedule itself, write to KLMS, follow authenticated third-party
+links, or infer that an unlisted course was dropped. See
+[the local-library contract](docs/LOCAL_LIBRARY.md).
+
 ## JSON and agent use
 
 Put `--json` before the command for stable machine-readable output:
@@ -119,7 +137,17 @@ klms --json assignments list --course course:12345
 ```
 
 The [command contract](docs/COMMAND_CONTRACT.md) documents reference
-resolution, output schemas, retries, and safety boundaries.
+resolution, output schemas, retries, and safety boundaries. `klms spec` prints
+the executable command grammar, and `klms --json spec` emits the full argument
+tree for agents that want to discover the interface without parsing `--help`.
+
+Shell completions are generated from the same declaration:
+
+```bash
+klms completions bash > ~/.local/share/bash-completion/completions/klms
+klms completions zsh > ~/.zfunc/_klms
+klms completions fish > ~/.config/fish/completions/klms.fish
+```
 
 `klms skill install` installs the companion Agent Skill embedded in the binary
 under `~/.local/share/klms/skills/klms` and links it from

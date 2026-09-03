@@ -1,12 +1,14 @@
 ---
 name: klms
-description: Use the installed `klms` CLI for fast, structured access to KAIST KLMS authentication, sessions, courses, today/upcoming work, assignments, quizzes, notices, calendar, boards, files, videos, grades, and attendance. Prefer it over browser scraping and use its owned login flow.
+description: Use the installed `klms` CLI for structured read-only KAIST KLMS access and its private versioned local course library, including bounded search, history, content, export, curation, and relationships. Prefer it over browser scraping and use its owned login flow.
 ---
 
 # KLMS CLI
 
 Use `klms --json` for machine-readable work. The global flag precedes the
-command:
+command. `klms --json spec` returns the complete argument tree (paths, kinds,
+required flags, choices, defaults, help) when you need to discover an option
+rather than guess it:
 
 ```bash
 klms --json doctor
@@ -32,13 +34,69 @@ klms --json files list --course COURSE
 klms --json videos list --course COURSE
 klms --json grades show --course COURSE
 klms --json attendance show --course COURSE
+klms --json library status
+klms --json library sync --files
+klms --json library sync --course COURSE --notices --files --download changed
+klms --json library search QUERY --limit 50
+klms --json library changes --limit 50
+klms --json library activity --subject REF --limit 50
+klms --json library show REF
+klms --json library history REF --limit 50
+klms --json library content REF --max-bytes 1048576
+klms --json library export REF --out /absolute/new/path
 ```
 
 Prefer the canonical `ref` returned by discovery and list commands. Titles and
 codes are accepted for courses only when they resolve unambiguously. Read `ok`,
-the process exit status, `warnings`, and collection `meta`. If `complete` is
-false, do not claim the list is exhaustive. JSON schema details live in the
-repository's `docs/JSON.md`.
+the process exit status, `warnings`, and collection `meta`. For library
+queries, `complete` is local pagination completeness; `source_complete`
+independently reports remote coverage and may be null when unknown. Do not
+claim remote exhaustiveness unless `source_complete` is true. JSON schema
+details live in the repository's `docs/JSON.md`.
+
+The local library is the durable route for work across sessions. Sync only
+when a human or agent decides current observations are needed; there is no
+background schedule. Use `--files` to validate file metadata without
+downloading and `--download changed` to store verified bytes once in the local
+SHA-256 object store. An incomplete sync is evidence about that attempt, not
+evidence that absent courses or resources were removed.
+Likewise, an attachment becomes not-observed only after a complete typed detail
+collection; a failed detail fetch preserves its prior state.
+File validation is similarly scoped: HEAD observations do not rebind
+stored bytes, downloads without a verified blob are unconditional, and a
+course-scoped sync does not probe historical content outside its current
+discovery frontier.
+
+Keep source and effective values distinct. To curate, first inspect the
+subject's activity/history and pass the current field revision:
+
+```bash
+klms --json library edit REF --field title --value "Preferred title" --actor agent --expected-revision 0
+klms --json library edit REF --field summary --value-file summary.md --actor agent --expected-revision 0
+klms --json library relations add LEFT RIGHT --kind related_to --actor agent
+klms --json library retract assertion:ID --actor agent
+```
+
+Humans and agents have equal authority. `actor` records provenance only. Never
+retry `CURATION_CONFLICT` blindly: reread activity/history and decide whether
+the new assertion should explicitly supersede the current revision. Summaries
+are tied to an exact observation or blob; preserve `summary_stale` when source
+content changes. Representation history contains both source-metadata and
+verified-content events. Preserve every returned `sha256:` ref: it names an
+exact historical byte version and can be passed directly to `library content`
+or `library export`. Revisited bytes such as A→B→A remain three chronological
+events while sharing one CAS object for repeated A bytes.
+
+Relations are explicit assertions, not inferred candidates. A duplicate active
+relation conflicts; retract its returned `relation:ID` before adding it again.
+
+Treat `library show REF` as subject-specific. A representation reports only its
+own effective filename/note/tag/summary, curation provenance, relationships,
+and current SHA-256 ref; do not infer sibling state from its parent. Prefer
+`library content` for bounded inspection and `library export` for full bytes;
+export refuses overwrites. If a resource has multiple stored attachments,
+content/export returns `CONTENT_UNAVAILABLE` with candidate representation
+refs. Select one explicitly rather than guessing.
 
 For scheduled deadlines and calendar events, start with `today`, then
 `upcoming --through 7d`. These commands do not claim to include unscheduled
