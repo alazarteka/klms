@@ -2,6 +2,7 @@ mod auth;
 mod cli;
 mod client;
 mod commands;
+mod corpus;
 mod date;
 mod error;
 mod models;

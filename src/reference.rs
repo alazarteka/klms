@@ -12,6 +12,7 @@ pub enum ResourceRef {
     Board(String),
     BoardPost { board: String, post: String },
     File(String),
+    Activity { kind: String, id: String },
     Video { kind: String, id: String },
 }
 
@@ -31,6 +32,18 @@ impl ResourceRef {
                 })
             }
             ["file", id] if valid_id(id) => Ok(Self::File((*id).into())),
+            ["activity", kind, id]
+                if valid_id(id)
+                    && !kind.is_empty()
+                    && kind
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+            {
+                Ok(Self::Activity {
+                    kind: (*kind).into(),
+                    id: (*id).into(),
+                })
+            }
             [
                 kind @ ("vod" | "lti" | "panopto" | "panoptocourseembed"),
                 id,
@@ -55,6 +68,16 @@ impl ResourceRef {
                 kind: kind.to_ascii_lowercase(),
                 id,
             }),
+            other
+                if other
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+            {
+                Some(Self::Activity {
+                    kind: other.into(),
+                    id,
+                })
+            }
             _ => None,
         }
     }
@@ -73,6 +96,7 @@ impl ResourceRef {
             Self::Quiz(_) => Some("quiz"),
             Self::Board(_) => Some("courseboard"),
             Self::File(_) => Some("resource"),
+            Self::Activity { kind, .. } => Some(kind),
             Self::Video { kind, .. } => Some(kind),
             Self::Course(_) | Self::BoardPost { .. } => None,
         }
@@ -88,6 +112,7 @@ impl ResourceRef {
                 format!("/mod/courseboard/article.php?id={board}&bwid={post}")
             }
             Self::File(id) => format!("/mod/resource/view.php?id={id}"),
+            Self::Activity { kind, id } => format!("/mod/{kind}/view.php?id={id}"),
             Self::Video { kind, id } => format!("/mod/{kind}/view.php?id={id}"),
         }
     }
@@ -100,6 +125,7 @@ impl ResourceRef {
             Self::File(_) => kinds
                 .iter()
                 .any(|kind| matches!(*kind, "resource" | "coursefile")),
+            Self::Activity { kind, .. } => kinds.iter().any(|expected| kind == expected),
             Self::Video { kind, .. } => kinds.iter().any(|expected| kind == expected),
             Self::Course(_) | Self::BoardPost { .. } => false,
         }
@@ -115,6 +141,7 @@ impl fmt::Display for ResourceRef {
             Self::Board(id) => write!(formatter, "board:{id}"),
             Self::BoardPost { board, post } => write!(formatter, "board-post:{board}:{post}"),
             Self::File(id) => write!(formatter, "file:{id}"),
+            Self::Activity { kind, id } => write!(formatter, "activity:{kind}:{id}"),
             Self::Video { kind, id } => write!(formatter, "{kind}:{id}"),
         }
     }

@@ -29,22 +29,36 @@ klms courses resolve QUERY [--limit N]
 klms courses show COURSE
 klms activities list --course COURSE [--week N] [--kind KIND] [--limit N]
 klms assignments list --course COURSE [--limit N]
-klms assignments show ASSIGNMENT
+klms assignments show REF
 klms quizzes list --course COURSE [--limit N]
-klms quizzes show QUIZ
+klms quizzes show REF
 klms calendar list [--limit N]
 klms boards list --course COURSE [--limit N]
 klms boards posts BOARD [--limit N]
-klms boards show BOARD_POST_REF
+klms boards show BOARD_POST
 klms notices list --course COURSE [--limit N]
 klms notices show NOTICE
 klms files list --course COURSE [--limit N]
 klms files download FILE_REF_OR_URL --out PATH
 klms videos list --course COURSE [--limit N]
-klms videos show VIDEO
+klms videos show REF
 klms grades show --course COURSE
 klms attendance show --course COURSE
 klms request get PATH [--max-bytes N]
+klms library status
+klms library sync [--course COURSE] [--notices] [--files] [--download changed]
+klms library search QUERY [--limit N]
+klms library changes [--limit N]
+klms library activity [--subject REF] [--limit N]
+klms library show REF
+klms library history REF [--limit N]
+klms library content REF [--max-bytes N]
+klms library export REF --out PATH
+klms library edit REF --field title|filename|summary|note|tag (--value TEXT|--value-file PATH) [--actor ACTOR] --expected-revision N
+klms library retract REF [--actor ACTOR]
+klms library relations add LEFT RIGHT --kind KIND [--actor ACTOR]
+klms spec
+klms completions bash|elvish|fish|powershell|zsh
 ```
 
 `COURSE` accepts a `course:ID` reference, numeric course id, exact course code
@@ -67,7 +81,7 @@ whenever KLMS exposes them. Typed assignment and quiz lists include normalized
 ISO 8601 deadlines with the Korea-time offset while preserving KLMS's display
 text. Empty recognized lists are successful results. Unrecognized upstream
 markup is an explicit shape error. Ambiguous course resolution names the
-candidates; it never guesses.
+matches; it never guesses.
 
 `today` and `upcoming` are human-oriented calendar views. They use Asia/Seoul
 calendar dates, preserve exact timestamps, and compose the same typed calendar
@@ -114,6 +128,16 @@ refresh the session timer.
 
 The CLI does not submit assignments, begin quiz attempts, post to boards,
 check into attendance, or operate third-party services.
+
+All library commands except `library sync` are local and do not require a KLMS
+session. The first invocation initializes the private versioned library; see
+`docs/LOCAL_LIBRARY.md`. Synchronization is finite, typed, remotely read-only,
+and never follows third-party links with KLMS credentials. Collection metadata
+reports local bounds, global source completeness, and freshness. `changes`
+contains remote observations; `activity` contains local curation. Export
+verifies the source digest, creates a new destination, and never overwrites.
+Edits use expected revisions; relations are add/retract. Human and agent actors
+have equal authority.
 
 ## Help and specification
 

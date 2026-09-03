@@ -5,7 +5,10 @@ use std::{
 
 use reqwest::{
     blocking::Client,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderValue},
+    header::{
+        CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG, HeaderValue, IF_MODIFIED_SINCE,
+        IF_NONE_MATCH, LAST_MODIFIED,
+    },
     redirect::{Attempt, Policy},
 };
 use url::Url;
@@ -41,6 +44,23 @@ pub struct DownloadResponse {
     pub url: Url,
     pub content_type: Option<String>,
     pub bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteMetadata {
+    pub url: Url,
+    pub status: u16,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub content_length: Option<u64>,
+    pub content_type: Option<String>,
+    pub content_range: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ConditionalResponse {
+    pub metadata: RemoteMetadata,
+    pub bytes: Option<Vec<u8>>,
 }
 
 impl KlmsClient {
@@ -114,6 +134,87 @@ impl KlmsClient {
         Ok(ByteResponse {
             url: final_url,
             bytes,
+        })
+    }
+
+    pub fn head(&self, path: &str) -> Result<RemoteMetadata, AppError> {
+        let url = self.resolve(path)?;
+        let mut request = self.http.head(url);
+        if !self.cookie.is_empty() {
+            request = request.header(COOKIE, self.cookie.clone());
+        }
+        let response = request.send().map_err(|error| {
+            AppError::network(format!("KLMS HEAD failed: {}", error.without_url()))
+        })?;
+        if !response.status().is_success() {
+            return Err(AppError::http(
+                response.status().as_u16(),
+                response.url().path(),
+            ));
+        }
+        Ok(remote_metadata(&response))
+    }
+
+    pub fn get_conditional(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<ConditionalResponse, AppError> {
+        let url = self.resolve(path)?;
+        let mut request = self.http.get(url);
+        if !self.cookie.is_empty() {
+            request = request.header(COOKIE, self.cookie.clone());
+        }
+        if let Some(value) = etag {
+            request = request.header(
+                IF_NONE_MATCH,
+                HeaderValue::from_str(value)
+                    .map_err(|_| AppError::config("stored ETag is invalid for an HTTP header"))?,
+            );
+        }
+        if let Some(value) = last_modified {
+            request = request.header(
+                IF_MODIFIED_SINCE,
+                HeaderValue::from_str(value).map_err(|_| {
+                    AppError::config("stored Last-Modified is invalid for an HTTP header")
+                })?,
+            );
+        }
+        let mut response = request.send().map_err(|error| {
+            AppError::network(format!(
+                "conditional KLMS request failed: {}",
+                error.without_url()
+            ))
+        })?;
+        let metadata = remote_metadata(&response);
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(ConditionalResponse {
+                metadata,
+                bytes: None,
+            });
+        }
+        if !matches!(
+            response.status(),
+            reqwest::StatusCode::OK | reqwest::StatusCode::PARTIAL_CONTENT
+        ) {
+            return Err(AppError::http(metadata.status, metadata.url.path()));
+        }
+        if metadata
+            .content_length
+            .is_some_and(|n| n > max_bytes as u64)
+        {
+            return Err(AppError::limit(format!(
+                "KLMS response exceeded the {max_bytes} byte limit"
+            )));
+        }
+        let bytes = read_bounded(&mut response, max_bytes, false)?;
+        validate_complete_bytes(&metadata, bytes.len())?;
+        check_logged_out(&metadata.url, metadata.content_type.as_deref(), &bytes)?;
+        Ok(ConditionalResponse {
+            metadata,
+            bytes: Some(bytes),
         })
     }
 
@@ -192,16 +293,7 @@ impl KlmsClient {
     }
 
     fn send_get(&self, path: &str) -> Result<reqwest::blocking::Response, AppError> {
-        let url = self
-            .base_url
-            .join(path)
-            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
-        if origin(&url) != origin(&self.base_url) {
-            return Err(AppError::config("cross-origin request path refused"));
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(AppError::config("request URL must not contain userinfo"));
-        }
+        let url = self.resolve(path)?;
         let mut request = self.http.get(url);
         if !self.cookie.is_empty() {
             request = request.header(COOKIE, self.cookie.clone());
@@ -215,6 +307,20 @@ impl KlmsClient {
             return Err(AppError::http(status.as_u16(), final_url.path()));
         }
         Ok(response)
+    }
+
+    fn resolve(&self, path: &str) -> Result<Url, AppError> {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
+        if origin(&url) != origin(&self.base_url) {
+            return Err(AppError::config("cross-origin request path refused"));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::config("request URL must not contain userinfo"));
+        }
+        Ok(url)
     }
 
     pub fn ajax(&self, sesskey: &str, method: &'static str) -> Result<serde_json::Value, AppError> {
@@ -299,6 +405,70 @@ impl KlmsClient {
             .cloned()
             .unwrap_or(serde_json::Value::Null))
     }
+}
+
+fn remote_metadata(response: &reqwest::blocking::Response) -> RemoteMetadata {
+    let string_header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    RemoteMetadata {
+        url: response.url().clone(),
+        status: response.status().as_u16(),
+        etag: string_header(ETAG),
+        last_modified: string_header(LAST_MODIFIED),
+        content_length: response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok()),
+        content_type: content_type(response),
+        content_range: string_header(CONTENT_RANGE),
+    }
+}
+
+fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Result<(), AppError> {
+    if metadata
+        .content_length
+        .is_some_and(|length| length != body_length as u64)
+    {
+        return Err(AppError::upstream(
+            "KLMS response Content-Length did not match the received bytes",
+        ));
+    }
+    if metadata.status != reqwest::StatusCode::PARTIAL_CONTENT.as_u16() {
+        return Ok(());
+    }
+    let Some(value) = metadata.content_range.as_deref() else {
+        return Err(AppError::upstream(
+            "KLMS returned partial content without a complete Content-Range",
+        ));
+    };
+    let Some(range) = value.strip_prefix("bytes ") else {
+        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
+    };
+    let Some((bounds, total)) = range.split_once('/') else {
+        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
+    };
+    let Some((start, end)) = bounds.split_once('-') else {
+        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
+    };
+    let parsed = start
+        .parse::<u64>()
+        .ok()
+        .zip(end.parse::<u64>().ok())
+        .zip(total.parse::<u64>().ok());
+    if !parsed.is_some_and(|((start, end), total)| {
+        start == 0 && end.checked_add(1) == Some(total) && total == body_length as u64
+    }) {
+        return Err(AppError::upstream(
+            "KLMS returned a partial byte range, not a complete object",
+        ));
+    }
+    Ok(())
 }
 
 fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
@@ -392,7 +562,13 @@ fn looks_logged_out(url: &Url, html: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_base_url;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use super::{KlmsClient, validate_base_url};
 
     #[test]
     fn accepts_https_and_loopback_http_only() {
@@ -400,5 +576,56 @@ mod tests {
         assert!(validate_base_url("http://127.0.0.1:9999").is_ok());
         assert!(validate_base_url("http://example.com").is_err());
         assert!(validate_base_url("https://user@example.com").is_err());
+    }
+
+    #[test]
+    fn conditional_get_handles_opaque_etags_and_rejects_prefix_206() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("if-none-match: w/\"opaque-value\"")
+                );
+                if index == 0 {
+                    write!(stream, "HTTP/1.1 304 Not Modified\r\nETag: W/\"opaque-value\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    write!(stream, "HTTP/1.1 206 Partial Content\r\nETag: \"changed\"\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nContent-Range: bytes 0-2/8\r\nConnection: close\r\n\r\nnew").unwrap();
+                }
+            }
+        });
+        let client = KlmsClient::new(&format!("http://{address}"), None, 5).unwrap();
+        let unchanged = client
+            .get_conditional("/file", Some("W/\"opaque-value\""), None, 8)
+            .unwrap();
+        assert_eq!(unchanged.metadata.status, 304);
+        assert!(unchanged.bytes.is_none());
+        let changed = client
+            .get_conditional("/file", Some("W/\"opaque-value\""), None, 8)
+            .unwrap_err();
+        assert_eq!(changed.code, "UPSTREAM_ERROR");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn conditional_get_accepts_206_only_when_it_covers_the_complete_object() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nContent-Range: bytes 0-2/3\r\nConnection: close\r\n\r\nnew").unwrap();
+        });
+        let client = KlmsClient::new(&format!("http://{address}"), None, 5).unwrap();
+        let response = client.get_conditional("/file", None, None, 8).unwrap();
+        assert_eq!(response.bytes.as_deref(), Some(&b"new"[..]));
+        server.join().unwrap();
     }
 }

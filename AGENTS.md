@@ -1,8 +1,9 @@
 # Project guidance
 
-Keep `klms` a small, read-only Rust client. Preserve the dependency direction
+Keep `klms` a small Rust client that is read-only toward KLMS. Preserve the dependency direction
 documented in `docs/ARCHITECTURE.md`; Moodle/KLMS selectors belong in `parse`,
-credential discovery in `auth`, and network policy in `client`.
+credential discovery in `auth`, network policy in `client`, and `corpus` is the
+only module allowed to touch SQLite or the object store.
 
 Before compiling a changed dependency graph, run both pinned gates:
 
