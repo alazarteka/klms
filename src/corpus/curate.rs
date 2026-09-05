@@ -25,6 +25,7 @@ impl Corpus {
             ));
         }
         let reference = subject.parse::<LibraryRef>()?;
+        require_editable_subject(&reference)?;
         let subject = reference.to_string();
         let subject = subject.as_str();
         let transaction = self
@@ -132,6 +133,8 @@ impl Corpus {
         }
         let left_ref = left.parse::<LibraryRef>()?;
         let right_ref = right.parse::<LibraryRef>()?;
+        require_editable_subject(&left_ref)?;
+        require_editable_subject(&right_ref)?;
         let left = left_ref.to_string();
         let right = right_ref.to_string();
         if actor.trim().is_empty() {
@@ -169,5 +172,16 @@ impl Corpus {
         Ok(RelationResult {
             reference: format!("relation:{id}"),
         })
+    }
+}
+
+// Content-addressed blobs are immutable bytes, not subjects with effective
+// curation/search projections. Existence alone does not make a reference editable.
+fn require_editable_subject(reference: &LibraryRef) -> Result<(), AppError> {
+    match reference {
+        LibraryRef::Course(_) | LibraryRef::Resource(_) | LibraryRef::Representation(_) => Ok(()),
+        _ => Err(AppError::usage(
+            "curation subjects must be course, resource, or representation references",
+        )),
     }
 }

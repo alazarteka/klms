@@ -251,3 +251,287 @@ fn invalid_utf8_still_reports_binary_content() {
         assert_eq!(result["truncated"], false);
     }
 }
+
+fn database(data: &TempDir) -> rusqlite::Connection {
+    rusqlite::Connection::open(data.path().join("klms/library.db")).unwrap()
+}
+
+fn failure(output: Output, code: &str) -> Value {
+    assert!(!output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout)
+        .or_else(|_| serde_json::from_slice(&output.stderr))
+        .unwrap();
+    assert_eq!(envelope["error"]["code"], code);
+    envelope["error"].clone()
+}
+
+#[test]
+fn immutable_blob_references_cannot_create_invisible_curation() {
+    let data = TempDir::new().unwrap();
+    let server = server(b"fixture bytes", Arc::new(AtomicUsize::new(1)));
+    sync(&data, &server);
+    let reference = representation(&data);
+    let shown = success(local(&data, &["library", "show", &reference]));
+    let blob = shown["content"]["sha256_ref"].as_str().unwrap();
+    // The blob exists and remains showable; it is not an editable subject.
+    assert_eq!(
+        success(local(&data, &["library", "show", blob]))["ref"],
+        blob
+    );
+    failure(
+        local(
+            &data,
+            &[
+                "library",
+                "edit",
+                blob,
+                "--field",
+                "note",
+                "--value",
+                "invisible",
+                "--expected-revision",
+                "0",
+            ],
+        ),
+        "USAGE",
+    );
+    for (left, right) in [(blob, "file:7"), ("file:7", blob)] {
+        failure(
+            local(
+                &data,
+                &[
+                    "library",
+                    "relations",
+                    "add",
+                    left,
+                    right,
+                    "--kind",
+                    "related_to",
+                ],
+            ),
+            "USAGE",
+        );
+    }
+    let connection = database(&data);
+    for table in ["assertions", "relations"] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    assert!(
+        success(local(&data, &["library", "search", "invisible"]))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn malformed_persisted_json_is_reported_with_record_context() {
+    let data = TempDir::new().unwrap();
+    let server = server(b"fixture bytes", Arc::new(AtomicUsize::new(1)));
+    sync(&data, &server);
+    let connection = database(&data);
+    let change_id: i64 = connection
+        .query_row("SELECT MAX(id) FROM remote_changes", [], |row| row.get(0))
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE remote_changes SET details_json='{' WHERE id=?1",
+            [change_id],
+        )
+        .unwrap();
+    let error = failure(local(&data, &["library", "changes"]), "CORPUS_CORRUPT");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("remote_changes:{change_id} details_json"))
+    );
+    let observation_id: i64 = connection
+        .query_row("SELECT MAX(id) FROM resource_observations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE resource_observations SET source_json='{' WHERE id=?1",
+            [observation_id],
+        )
+        .unwrap();
+    let error = failure(
+        local(&data, &["library", "history", "file:7"]),
+        "CORPUS_CORRUPT",
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("resource_source:{observation_id} source"))
+    );
+}
+
+fn keys(value: &Value, expected: &[&str]) {
+    let actual: std::collections::BTreeSet<_> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(actual, expected.iter().copied().collect());
+}
+
+#[test]
+fn detail_response_keys_types_and_curation_remain_stable() {
+    let data = TempDir::new().unwrap();
+    let server = server(b"fixture bytes", Arc::new(AtomicUsize::new(1)));
+    sync(&data, &server);
+    let course = success(local(&data, &["library", "show", "course:42"]));
+    keys(
+        &course,
+        &[
+            "ref",
+            "kind",
+            "remote_state",
+            "source",
+            "effective",
+            "relations",
+        ],
+    );
+    keys(
+        &course["source"],
+        &[
+            "title",
+            "code",
+            "term",
+            "url",
+            "first_seen",
+            "last_seen",
+            "not_listed_since",
+        ],
+    );
+    assert_eq!(course["kind"], "course");
+    assert!(course["source"]["first_seen"].is_i64());
+    assert!(course["source"]["last_seen"].is_i64());
+    assert!(course["source"]["not_listed_since"].is_null());
+    assert_eq!(course["effective"]["title"], course["source"]["title"]);
+
+    let resource = success(local(&data, &["library", "show", "file:7"]));
+    keys(
+        &resource,
+        &[
+            "ref",
+            "kind",
+            "course_ref",
+            "remote_state",
+            "source",
+            "effective",
+            "representations",
+            "relations",
+        ],
+    );
+    keys(
+        &resource["source"],
+        &[
+            "title",
+            "url",
+            "week",
+            "section",
+            "text",
+            "complete",
+            "observed_at",
+        ],
+    );
+    assert_eq!(resource["source"]["title"], "Lecture");
+    assert!(resource["source"]["complete"].is_boolean());
+    assert!(resource["source"]["observed_at"].is_i64());
+    for representation in resource["representations"].as_array().unwrap() {
+        keys(
+            representation,
+            &["ref", "url", "kind", "filename", "has_content"],
+        );
+        assert!(representation["has_content"].is_boolean());
+    }
+    let reference = representation(&data);
+    let shown = success(local(&data, &["library", "show", &reference]));
+    keys(
+        &shown,
+        &[
+            "ref",
+            "resource_ref",
+            "remote_state",
+            "source",
+            "content",
+            "effective",
+            "relations",
+        ],
+    );
+    keys(
+        &shown["source"],
+        &["url", "filename", "mime", "observed_at"],
+    );
+    keys(
+        &shown["content"],
+        &["sha256_ref", "byte_length", "mime", "observed_at"],
+    );
+    assert_eq!(shown["resource_ref"], "file:7");
+    assert_eq!(shown["content"]["byte_length"], 13);
+    assert!(shown["content"]["observed_at"].is_i64());
+    success(local(
+        &data,
+        &[
+            "library",
+            "edit",
+            &reference,
+            "--field",
+            "filename",
+            "--value",
+            "curated.txt",
+            "--expected-revision",
+            "0",
+        ],
+    ));
+    let edited = success(local(&data, &["library", "show", &reference]));
+    assert_eq!(edited["source"], shown["source"]);
+    assert_eq!(edited["content"], shown["content"]);
+    assert_eq!(edited["effective"]["filename"], "curated.txt");
+}
+
+#[test]
+fn download_frontier_is_processed_in_representation_order() {
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html("<a href='/course/view.php?id=42'>Compilers(CS.420_2026_2)</a>"),
+        "/course/view.php?id=42" => Response::html(
+            "<main class='course-content'><li class='activity modtype_resource' id='module-7'><a href='/mod/resource/view.php?id=7'><span class='instancename'>Lecture</span></a></li></main>",
+        ),
+        "/mod/resource/view.php?id=7" => Response::html(
+            "<main><h1>Lecture</h1><a href='/pluginfile.php/z'>z.txt</a><a href='/pluginfile.php/a'>a.txt</a><a href='/pluginfile.php/m'>m.txt</a></main>",
+        ),
+        _ => Response::bytes("application/octet-stream", b"fixture".to_vec()),
+    });
+    sync(&data, &server);
+    let connection = database(&data);
+    let mut statement = connection
+        .prepare("SELECT url FROM representations WHERE kind='file' ORDER BY id")
+        .unwrap();
+    let expected: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| {
+            let url = url::Url::parse(&row.unwrap()).unwrap();
+            format!("HEAD {} HTTP/1.1", url.path())
+        })
+        .collect();
+    assert!(expected.len() >= 3);
+    let actual: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.starts_with("HEAD "))
+        .collect();
+    assert_eq!(actual, expected);
+}
