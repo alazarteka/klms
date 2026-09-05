@@ -152,13 +152,16 @@ fn verified_candidate_receives_install_destination_and_failure_is_propagated() {
         } else {
             assert_eq!(result.unwrap().data["updated"], true);
         }
-        assert_eq!(
-            fs::read_to_string(home.path().join("candidate-args")).unwrap(),
-            format!(
-                "--json\n__install\n--destination\n{}\n",
-                home.path().join("klms").display()
-            )
-        );
+        // Validate the candidate's CLI contract, not the sender's flag order.
+        use clap::Parser;
+        let arguments = fs::read_to_string(home.path().join("candidate-args")).unwrap();
+        let cli = crate::cli::Cli::try_parse_from(std::iter::once("klms").chain(arguments.lines()))
+            .unwrap();
+        assert!(cli.json);
+        let crate::cli::Command::Install { destination } = cli.command else {
+            panic!("candidate was not asked to install");
+        };
+        assert_eq!(destination, home.path().join("klms"));
     }
 }
 
