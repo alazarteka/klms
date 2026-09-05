@@ -19,7 +19,6 @@ pub enum ResourceRef {
 impl ResourceRef {
     pub fn parse(value: &str) -> Result<Self, AppError> {
         let parts: Vec<_> = value.split(':').collect();
-        let valid_id = |value: &str| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit());
         match parts.as_slice() {
             ["course", id] if valid_id(id) => Ok(Self::Course((*id).into())),
             ["assign", id] if valid_id(id) => Ok(Self::Assignment((*id).into())),
@@ -59,6 +58,9 @@ impl ResourceRef {
 
     pub fn from_activity(kind: &str, id: Option<&str>, url: Option<&str>) -> Option<Self> {
         let id = id.map(str::to_owned).or_else(|| url.and_then(module_id))?;
+        if !valid_id(&id) {
+            return None;
+        }
         match kind.to_ascii_lowercase().as_str() {
             "assign" => Some(Self::Assignment(id)),
             "quiz" => Some(Self::Quiz(id)),
@@ -69,9 +71,10 @@ impl ResourceRef {
                 id,
             }),
             other
-                if other
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+                if !other.is_empty()
+                    && other
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
             {
                 Some(Self::Activity {
                     kind: other.into(),
@@ -147,16 +150,21 @@ impl fmt::Display for ResourceRef {
     }
 }
 
+pub(crate) fn valid_id(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn module_id(value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
     url.query_pairs()
         .find_map(|(key, value)| (key == "id").then(|| value.into_owned()))
-        .filter(|value| value.chars().all(|c| c.is_ascii_digit()))
+        .filter(|value| valid_id(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::ResourceRef;
+    use url::Url;
 
     #[test]
     fn canonical_refs_round_trip_to_paths() {
@@ -166,6 +174,24 @@ mod tests {
             reference.path(),
             "/mod/courseboard/article.php?id=12&bwid=34"
         );
+    }
+
+    #[test]
+    fn inferred_references_obey_the_same_identity_rules_as_cli_input() {
+        for id in ["", "oops", "-1", "1:2", "１２"] {
+            assert!(ResourceRef::from_activity("assign", Some(id), None).is_none());
+            let url = format!("https://klms.kaist.ac.kr/mod/assign/view.php?id={id}");
+            assert!(ResourceRef::from_activity("assign", None, Some(&url)).is_none());
+            assert!(ResourceRef::from_url(&Url::parse(&url).unwrap()).is_none());
+        }
+        assert!(ResourceRef::from_activity("", Some("7"), None).is_none());
+        for kind in ["assign", "quiz", "courseboard", "resource", "vod", "CUSTOM"] {
+            let reference = ResourceRef::from_activity(kind, Some("007"), None).unwrap();
+            assert_eq!(
+                ResourceRef::parse(&reference.to_string()).unwrap(),
+                reference
+            );
+        }
     }
 
     #[test]
