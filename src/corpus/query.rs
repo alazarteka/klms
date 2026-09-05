@@ -4,6 +4,7 @@ use super::{
 };
 use crate::error::AppError;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::path::Path;
 pub const ACTIVE_ASSERTION: &str =
@@ -23,6 +24,104 @@ struct ContentRow {
     byte_length: i64,
     mime: Option<String>,
     filename: String,
+}
+
+struct CourseRow {
+    remote_state: String,
+    source: CourseSource,
+    digest: String,
+}
+#[derive(Serialize)]
+struct CourseSource {
+    title: String,
+    code: Option<String>,
+    term: Option<String>,
+    url: String,
+    first_seen: i64,
+    last_seen: i64,
+    not_listed_since: Option<i64>,
+}
+#[derive(Serialize)]
+struct CourseDetail<'a> {
+    #[serde(rename = "ref")]
+    reference: &'a str,
+    kind: &'static str,
+    remote_state: String,
+    source: CourseSource,
+    effective: Value,
+    relations: Vec<String>,
+}
+struct ResourceRow {
+    kind: String,
+    course_ref: String,
+    remote_state: String,
+    source: ResourceSource,
+    digest: String,
+}
+#[derive(Serialize)]
+struct ResourceSource {
+    title: String,
+    url: Option<String>,
+    week: Option<i64>,
+    section: Option<String>,
+    text: Option<String>,
+    complete: bool,
+    observed_at: i64,
+}
+#[derive(Serialize)]
+struct ResourceDetail<'a> {
+    #[serde(rename = "ref")]
+    reference: &'a str,
+    kind: String,
+    course_ref: String,
+    remote_state: String,
+    source: ResourceSource,
+    effective: Value,
+    representations: Vec<RepresentationSummary>,
+    relations: Vec<String>,
+}
+#[derive(Serialize)]
+struct RepresentationSummary {
+    #[serde(rename = "ref")]
+    reference: String,
+    url: String,
+    kind: String,
+    filename: Option<String>,
+    has_content: bool,
+}
+struct RepresentationRow {
+    resource_ref: String,
+    remote_state: String,
+    source: RepresentationSource,
+}
+#[derive(Serialize)]
+struct RepresentationSource {
+    url: String,
+    filename: Option<String>,
+    mime: Option<String>,
+    observed_at: Option<i64>,
+}
+#[derive(Serialize)]
+struct RepresentationContent {
+    sha256_ref: String,
+    byte_length: i64,
+    mime: Option<String>,
+    observed_at: i64,
+}
+#[derive(Serialize)]
+struct RepresentationDetail {
+    #[serde(rename = "ref")]
+    reference: String,
+    resource_ref: String,
+    remote_state: String,
+    source: RepresentationSource,
+    content: Option<RepresentationContent>,
+    effective: Value,
+    relations: Vec<String>,
+}
+fn detail_value(detail: impl Serialize) -> Result<Value, AppError> {
+    serde_json::to_value(detail)
+        .map_err(|error| AppError::internal(format!("failed to encode library detail: {error}")))
 }
 impl Corpus {
     pub fn status(&self) -> Result<LibraryStatus, AppError> {
@@ -115,22 +214,24 @@ impl Corpus {
                FROM remote_changes ORDER BY id DESC
               LIMIT ?1",
         )?;
-        statement
-            .query_map([limit as i64], |row| {
-                let details: String = row.get(6)?;
-                Ok(ChangeEntry {
-                    id: row.get(0)?,
-                    occurred_at: row.get(1)?,
-                    kind: row.get(2)?,
-                    subject_ref: row.get(3)?,
-                    before_ref: row.get(4)?,
-                    after_ref: row.get(5)?,
-                    details: serde_json::from_str(&details).unwrap_or_else(|_| json!({})),
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(AppError::from)
+        let mut rows = statement.query([limit as i64])?;
+        let mut changes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let details: String = row.get(6)?;
+            changes.push(ChangeEntry {
+                id,
+                occurred_at: row.get(1)?,
+                kind: row.get(2)?,
+                subject_ref: row.get(3)?,
+                before_ref: row.get(4)?,
+                after_ref: row.get(5)?,
+                details: stored_json(&details, &format!("remote_changes:{id} details_json"))?,
+            });
+        }
+        Ok(changes)
     }
+
     pub fn activity(
         &self,
         subject: Option<&str>,
@@ -187,17 +288,19 @@ impl Corpus {
               WHERE c.ref=?1",
                 [reference],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                    ))
+                    Ok(CourseRow {
+                        remote_state: row.get(0)?,
+                        source: CourseSource {
+                            first_seen: row.get(1)?,
+                            last_seen: row.get(2)?,
+                            not_listed_since: row.get(3)?,
+                            title: row.get(4)?,
+                            code: row.get(5)?,
+                            term: row.get(6)?,
+                            url: row.get(7)?,
+                        },
+                        digest: row.get(8)?,
+                    })
                 },
             )
             .optional()?
@@ -205,22 +308,18 @@ impl Corpus {
         let effective = effective_object(
             &self.storage.connection,
             reference,
-            Some(&row.8),
-            Some(&row.4),
+            Some(&row.digest),
+            Some(&row.source.title),
             None,
         )?;
-        Ok(json!({
-            "ref": reference,
-            "kind": "course",
-            "remote_state": row.0,
-            "source": {
-                "title": row.4, "code": row.5, "term": row.6, "url": row.7,
-                "first_seen": row.1, "last_seen": row.2,
-                "not_listed_since": row.3
-            },
-            "effective": effective,
-            "relations": relations(&self.storage.connection, reference)?
-        }))
+        detail_value(CourseDetail {
+            reference,
+            kind: "course",
+            remote_state: row.remote_state,
+            source: row.source,
+            effective,
+            relations: relations(&self.storage.connection, reference)?,
+        })
     }
     fn show_resource(&self, reference: &str) -> Result<Value, AppError> {
         let row = self
@@ -235,19 +334,21 @@ impl Corpus {
               WHERE r.ref=?1",
                 [reference],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, i64>(8)?,
-                        row.get::<_, i64>(9)?,
-                        row.get::<_, String>(10)?,
-                    ))
+                    Ok(ResourceRow {
+                        kind: row.get(0)?,
+                        course_ref: row.get(1)?,
+                        remote_state: row.get(2)?,
+                        source: ResourceSource {
+                            title: row.get(3)?,
+                            url: row.get(4)?,
+                            week: row.get(5)?,
+                            section: row.get(6)?,
+                            text: row.get(7)?,
+                            complete: row.get::<_, i64>(8)? != 0,
+                            observed_at: row.get(9)?,
+                        },
+                        digest: row.get(10)?,
+                    })
                 },
             )
             .optional()?
@@ -263,29 +364,32 @@ impl Corpus {
         )?;
         let representations = statement
             .query_map([reference], |item| {
-                Ok(json!({
-                    "ref": format!("representation:{}", item.get::<_, i64>(0)?),
-                    "url": item.get::<_, String>(1)?,
-                    "kind": item.get::<_, String>(2)?,
-                    "filename": item.get::<_, Option<String>>(3)?,
-                    "has_content": item.get::<_, i64>(4)? != 0
-                }))
+                Ok(RepresentationSummary {
+                    reference: format!("representation:{}", item.get::<_, i64>(0)?),
+                    url: item.get(1)?,
+                    kind: item.get(2)?,
+                    filename: item.get(3)?,
+                    has_content: item.get::<_, i64>(4)? != 0,
+                })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(json!({
-            "ref": reference, "kind": row.0, "course_ref": row.1,
-            "remote_state": row.2,
-            "source": {
-                "title": row.3, "url": row.4, "week": row.5,
-                "section": row.6, "text": row.7, "complete": row.8 != 0,
-                "observed_at": row.9
-            },
-            "effective": effective_object(
-                &self.storage.connection, reference, Some(&row.10), Some(&row.3), None
-            )?,
-            "representations": representations,
-            "relations": relations(&self.storage.connection, reference)?
-        }))
+        let effective = effective_object(
+            &self.storage.connection,
+            reference,
+            Some(&row.digest),
+            Some(&row.source.title),
+            None,
+        )?;
+        detail_value(ResourceDetail {
+            reference,
+            kind: row.kind,
+            course_ref: row.course_ref,
+            remote_state: row.remote_state,
+            source: row.source,
+            effective,
+            representations,
+            relations: relations(&self.storage.connection, reference)?,
+        })
     }
     fn show_representation(&self, id: i64) -> Result<Value, AppError> {
         let row = self
@@ -293,7 +397,7 @@ impl Corpus {
             .connection
             .query_row(
                 "SELECT r.ref,p.remote_state,p.url,o.filename,p.observed_mime,
-                    o.observed_at,o.digest FROM representations p
+                    o.observed_at FROM representations p
                JOIN resources r ON r.id=p.resource_id
                LEFT JOIN representation_observations o ON o.id=(
                  SELECT id FROM representation_observations
@@ -301,15 +405,16 @@ impl Corpus {
               WHERE p.id=?1",
                 [id],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                    ))
+                    Ok(RepresentationRow {
+                        resource_ref: row.get(0)?,
+                        remote_state: row.get(1)?,
+                        source: RepresentationSource {
+                            url: row.get(2)?,
+                            filename: row.get(3)?,
+                            mime: row.get(4)?,
+                            observed_at: row.get(5)?,
+                        },
+                    })
                 },
             )
             .optional()?
@@ -322,27 +427,34 @@ impl Corpus {
               WHERE representation_id=?1 ORDER BY id DESC LIMIT 1",
                 [id],
                 |item| {
-                    Ok(json!({
-                        "sha256_ref": format!("sha256:{}", item.get::<_, String>(0)?),
-                        "byte_length": item.get::<_, i64>(1)?,
-                        "mime": item.get::<_, Option<String>>(2)?,
-                        "observed_at": item.get::<_, i64>(3)?
-                    }))
+                    Ok(RepresentationContent {
+                        sha256_ref: format!("sha256:{}", item.get::<_, String>(0)?),
+                        byte_length: item.get(1)?,
+                        mime: item.get(2)?,
+                        observed_at: item.get(3)?,
+                    })
                 },
             )
             .optional()?;
         let reference = format!("representation:{id}");
         let digest = current_digest(&self.storage.connection, &LibraryRef::Representation(id))?;
-        Ok(json!({
-            "ref": reference, "resource_ref": row.0, "remote_state": row.1,
-            "source": {"url": row.2, "filename": row.3, "mime": row.4,
-                       "observed_at": row.5},
-            "content": content,
-            "effective": effective_object(
-                &self.storage.connection, &reference, digest.as_deref(), None, row.3.as_deref()
-            )?,
-            "relations": relations(&self.storage.connection, &reference)?
-        }))
+        let effective = effective_object(
+            &self.storage.connection,
+            &reference,
+            digest.as_deref(),
+            None,
+            row.source.filename.as_deref(),
+        )?;
+        let relations = relations(&self.storage.connection, &reference)?;
+        detail_value(RepresentationDetail {
+            reference,
+            resource_ref: row.resource_ref,
+            remote_state: row.remote_state,
+            source: row.source,
+            content,
+            effective,
+            relations,
+        })
     }
     fn show_blob(&self, sha256: &str) -> Result<Value, AppError> {
         let row = self
@@ -923,7 +1035,7 @@ fn history_entry(
         observed_at,
         kind: kind.into(),
         digest,
-        source: serde_json::from_str(&source).unwrap_or(Value::Null),
+        source: stored_json(&source, &format!("{kind}:{id} source"))?,
     })
 }
 fn latest_content(
@@ -961,4 +1073,10 @@ fn source_row(
         row.get(3)?,
         row.get(4)?,
     ))
+}
+
+fn stored_json(text: &str, context: &str) -> Result<Value, AppError> {
+    serde_json::from_str(text).map_err(|error| {
+        AppError::corpus_corrupt(format!("invalid persisted JSON in {context}: {error}"))
+    })
 }
