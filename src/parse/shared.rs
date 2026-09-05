@@ -1,32 +1,53 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
 
-use crate::{error::AppError, models::LinkItem, safe_url};
+use crate::{error::AppError, models::LinkItem, reference::valid_id, safe_url};
 
-pub(super) struct IndexedRows {
-    pub(super) rows: Vec<IndexedRow>,
+struct IndexedCell {
+    header: String,
+    value: String,
+    link: Option<String>,
 }
 
 pub(super) struct IndexedRow {
-    values: HashMap<String, String>,
-    links: HashMap<String, String>,
+    cells: Vec<IndexedCell>,
 }
 
 impl IndexedRow {
-    pub(super) fn value(&self, header: &str) -> Option<String> {
-        self.values
-            .iter()
-            .find_map(|(key, value)| key.contains(header).then(|| value.clone()))
-            .filter(|value| !value.is_empty() && value != "-")
+    // Exact headers win over qualified labels, but neither may be ambiguous.
+    // Both accessors resolve the same cell, including when its link is absent.
+    fn cell(&self, header: &str) -> Result<Option<&IndexedCell>, AppError> {
+        let exact = self.cells.iter().any(|cell| cell.header == header);
+        let mut matching = self.cells.iter().filter(|cell| {
+            if exact {
+                cell.header == header
+            } else {
+                cell.header.contains(header)
+            }
+        });
+        let cell = matching.next();
+        if matching.next().is_some() {
+            return Err(AppError::shape(format!(
+                "coursework table has ambiguous {header:?} columns"
+            )));
+        }
+        Ok(cell)
     }
 
-    pub(super) fn link_for(&self, header: &str, base_url: &Url) -> Option<Url> {
-        self.links
-            .iter()
-            .find_map(|(key, value)| key.contains(header).then_some(value))
-            .and_then(|value| base_url.join(value).ok())
+    pub(super) fn value(&self, header: &str) -> Result<Option<String>, AppError> {
+        Ok(self
+            .cell(header)?
+            .map(|cell| cell.value.clone())
+            .filter(|value| !value.is_empty() && value != "-"))
+    }
+
+    pub(super) fn link_for(&self, header: &str, base_url: &Url) -> Result<Option<Url>, AppError> {
+        Ok(self
+            .cell(header)?
+            .and_then(|cell| cell.link.as_deref())
+            .and_then(|value| base_url.join(value).ok()))
     }
 }
 
@@ -62,7 +83,7 @@ pub(super) fn semantic_table<'a>(
     }))
 }
 
-pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<IndexedRows, AppError> {
+pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<Vec<IndexedRow>, AppError> {
     let rows = selector("tr")?;
     let cells = selector("th, td")?;
     let links = selector("a[href]")?;
@@ -81,23 +102,21 @@ pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<IndexedRows, AppErro
         if row_cells.is_empty() {
             continue;
         }
-        let mut values = HashMap::new();
-        let mut row_links = HashMap::new();
-        for (header, cell) in headers.iter().zip(row_cells) {
-            values.insert(header.clone(), text(cell));
-            if let Some(href) = cell
-                .select(&links)
-                .find_map(|anchor| anchor.value().attr("href"))
-            {
-                row_links.insert(header.clone(), href.to_owned());
-            }
-        }
-        parsed.push(IndexedRow {
-            values,
-            links: row_links,
-        });
+        let cells = headers
+            .iter()
+            .zip(row_cells)
+            .map(|(header, cell)| IndexedCell {
+                header: header.clone(),
+                value: text(cell),
+                link: cell
+                    .select(&links)
+                    .find_map(|anchor| anchor.value().attr("href"))
+                    .map(str::to_owned),
+            })
+            .collect();
+        parsed.push(IndexedRow { cells });
     }
-    Ok(IndexedRows { rows: parsed })
+    Ok(parsed)
 }
 
 pub(super) fn link_items(
@@ -231,4 +250,67 @@ pub(super) fn week_number(value: &str) -> Option<u32> {
 pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
     url.query_pairs()
         .find_map(|(key, value)| names.contains(&key.as_ref()).then(|| value.into_owned()))
+        .filter(|value| valid_id(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_headers_keep_values_and_links_in_the_same_column() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        for (headers, cells, expected, link) in [
+            (
+                "<th>Course name</th><th>Name</th>",
+                "<td><a href='/course'>Course</a></td><td><a href='/assignment'>Work</a></td>",
+                "Work",
+                Some("/assignment"),
+            ),
+            (
+                "<th>Assignment name</th><th>Course</th>",
+                "<td>Work</td><td><a href='/course'>Course</a></td>",
+                "Work",
+                None,
+            ),
+        ] {
+            let document = Html::parse_document(&format!(
+                "<table><tr>{headers}</tr><tr>{cells}</tr></table>"
+            ));
+            let table = document.select(&selector("table").unwrap()).next().unwrap();
+            let rows = indexed_rows(table).unwrap();
+            assert_eq!(rows[0].value("name").unwrap().as_deref(), Some(expected));
+            assert_eq!(
+                rows[0]
+                    .link_for("name", &base)
+                    .unwrap()
+                    .as_ref()
+                    .map(Url::path),
+                link
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_headers_fail_for_both_value_and_link_access() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        for headers in [
+            "<th>Name</th><th>Name</th>",
+            "<th>Assignment name</th><th>Course name</th>",
+        ] {
+            let document = Html::parse_document(&format!(
+                "<table><tr>{headers}</tr><tr><td>Work</td><td><a href='/course'>Course</a></td></tr></table>"
+            ));
+            let table = document.select(&selector("table").unwrap()).next().unwrap();
+            let rows = indexed_rows(table).unwrap();
+            assert_eq!(
+                rows[0].value("name").unwrap_err().code,
+                "UPSTREAM_SHAPE_CHANGED"
+            );
+            assert_eq!(
+                rows[0].link_for("name", &base).unwrap_err().code,
+                "UPSTREAM_SHAPE_CHANGED"
+            );
+        }
+    }
 }

@@ -105,7 +105,7 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>,
             continue;
         };
         let Some(id) = url.query_pairs().find_map(|(key, value)| {
-            (key == "id" && value.chars().all(|c| c.is_ascii_digit())).then(|| value.into_owned())
+            (key == "id" && crate::reference::valid_id(&value)).then(|| value.into_owned())
         }) else {
             continue;
         };

@@ -303,35 +303,45 @@ fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppEr
     Ok(result)
 }
 
+const MAX_CURATION_TEXT: usize = 1024 * 1024;
+
 fn read_library_text(
     value: Option<&str>,
     path: Option<&std::path::Path>,
 ) -> Result<String, AppError> {
-    use std::io::Read;
     let mut text = if let Some(value) = value {
         value.to_owned()
     } else if let Some(path) = path {
         if path == std::path::Path::new("-") {
-            let mut value = String::new();
-            std::io::stdin()
-                .take(1_048_577)
-                .read_to_string(&mut value)
-                .map_err(|e| AppError::config(format!("cannot read stdin: {e}")))?;
-            value
+            read_curation_text(std::io::stdin().lock())?
         } else {
-            std::fs::read_to_string(path)
-                .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?
+            let file = std::fs::File::open(path)
+                .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?;
+            read_curation_text(file)?
         }
     } else {
         unreachable!("clap requires exactly one of --value and --value-file");
     };
-    if text.len() > 1_048_576 {
+    if text.len() > MAX_CURATION_TEXT {
         return Err(AppError::limit("curation text exceeds 1 MiB"));
     }
     while text.ends_with('\n') {
         text.pop();
     }
     Ok(text)
+}
+
+fn read_curation_text(reader: impl std::io::Read) -> Result<String, AppError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CURATION_TEXT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AppError::config(format!("cannot read curation text: {e}")))?;
+    if bytes.len() > MAX_CURATION_TEXT {
+        return Err(AppError::limit("curation text exceeds 1 MiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| AppError::config("curation text must be UTF-8"))
 }
 
 fn library_content(
@@ -924,4 +934,37 @@ fn duration(seconds: u64) -> String {
         (seconds % 3600) / 60,
         seconds % 60
     )
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::{read_curation_text, read_library_text};
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn curation_input_stops_at_limit_and_classifies_oversized_utf8() {
+        let bytes = "é".repeat(524_289).into_bytes();
+        let mut source = Cursor::new(bytes);
+        let error = read_curation_text(&mut source).unwrap_err();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        assert_eq!(source.position(), 1_048_577);
+        assert_eq!(
+            read_curation_text(Cursor::new("é".repeat(524_288)))
+                .unwrap()
+                .len(),
+            1_048_576
+        );
+        assert!(read_curation_text(Cursor::new([0xff])).is_err());
+        // The file route applies the same byte bound and trailing-newline rule.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("value.txt");
+        std::fs::write(&path, "value\n\n").unwrap();
+        assert_eq!(read_library_text(None, Some(&path)).unwrap(), "value");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::copy(&mut std::io::repeat(b'x').take(1_048_577), &mut file).unwrap();
+        assert_eq!(
+            read_library_text(None, Some(&path)).unwrap_err().code,
+            "LIMIT_EXCEEDED"
+        );
+    }
 }
