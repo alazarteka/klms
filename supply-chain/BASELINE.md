@@ -132,3 +132,17 @@ baseline versions; no exemptions or imported trust were added.
 
 This review covers changed build/runtime side effects, not a full correctness
 or memory-safety audit of clap or its previously baselined dependencies.
+
+## 2026-09-05 development policy tooling
+
+The workflow checker now uses PyYAML 6.0.3 from the official PyPI project,
+through `yaml.safe_load`, to inspect YAML structure instead of source spelling.
+It is a development-only dependency with an exact version and distribution
+hashes in `tests/supply_chain_contract.py.lock`. This records acceptance of the
+upstream parser; it is not an independent audit of PyYAML or its native extension.
+
+CI installs uv 0.12.10 using the official `astral-sh/setup-uv` v10.0.1 action at
+commit `20cfd1bf945f4377ade1205e4dbc17946fc9a30d`. Both pins were resolved against
+their official release repositories. No Rust dependencies, cargo-vet audits, or
+exemptions change. The Rust bootstrap tools retain their checksum verification
+and are exercised directly by the existing deny/vet gates.
