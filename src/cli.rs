@@ -37,6 +37,17 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Update this executable and its companion skill from the latest release.
+    #[command(
+        visible_alias = "upgrade",
+        after_help = "Examples:\n  klms update --check\n  klms update\n  klms --json update --check\n\nContacts GitHub, not KLMS. --check makes no installation changes. Updates the executable you invoked and the companion skill; no sign-in is required."
+    )]
+    Update(UpdateArgs),
+    #[command(name = "__install", hide = true)]
+    Install {
+        #[arg(long)]
+        destination: PathBuf,
+    },
     /// Install or inspect the companion Agent Skill.
     Skill(SkillArgs),
     /// Check configuration and the live session.
@@ -92,6 +103,13 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Check for a newer release without downloading or installing it.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, Args)]

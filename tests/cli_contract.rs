@@ -17,6 +17,48 @@ fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_klms"))
 }
 
+#[test]
+fn json_help_and_version_are_successful_without_authentication() {
+    let state = TempDir::new().unwrap();
+    for args in [
+        vec!["--json", "--version"],
+        vec!["--json", "--help"],
+        vec!["--json", "files", "download", "--help"],
+        vec!["update", "--help", "--json"],
+        vec!["upgrade", "--help", "--json"],
+    ] {
+        let output = binary()
+            .env("XDG_STATE_HOME", state.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["ok"], true);
+        if args.contains(&"--version") {
+            assert_eq!(value["command"], "version");
+            assert_eq!(value["data"]["version"], env!("CARGO_PKG_VERSION"));
+        } else {
+            assert_eq!(value["command"], "help");
+            assert!(value["data"]["text"].as_str().unwrap().contains("Usage:"));
+        }
+    }
+    assert!(!state.path().join("klms/session.json").exists());
+}
+
+#[test]
+fn invalid_json_invocations_remain_errors() {
+    let output = binary()
+        .args(["--json", "update", "--bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "USAGE");
+}
+
 fn storage_state(directory: &TempDir) -> PathBuf {
     let root = directory.path().join("state");
     fs::create_dir_all(root.join("klms")).unwrap();

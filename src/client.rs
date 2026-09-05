@@ -245,6 +245,7 @@ impl KlmsClient {
         writer: &mut impl Write,
     ) -> Result<DownloadResponse, AppError> {
         let mut response = self.send_get(path)?;
+        let metadata = remote_metadata(&response);
         let final_url = response.url().clone();
         if response
             .headers()
@@ -284,6 +285,7 @@ impl KlmsClient {
                 .write_all(&buffer[..read])
                 .map_err(|error| AppError::config(format!("failed to write download: {error}")))?;
         }
+        validate_complete_bytes(&metadata, total)?;
         check_logged_out(&final_url, content_type.as_deref(), &sample)?;
         Ok(DownloadResponse {
             url: final_url,
@@ -558,6 +560,51 @@ fn looks_logged_out(url: &Url, html: &str) -> bool {
     path.contains("/login/")
         || lower.contains("name=\"username\"") && lower.contains("name=\"password\"")
         || lower.contains("id=\"loginbtn\"")
+}
+
+/// Separate unauthenticated transport for explicit release checks/downloads.
+/// KLMS cookies and origin policy never enter this client.
+pub fn release_client(timeout: u64) -> Result<Client, AppError> {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout.clamp(1, 300)))
+        .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many release redirects")
+            } else if attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.error("release download requires HTTPS")
+            }
+        }))
+        .build()
+        .map_err(|e| AppError::network(e.to_string()))
+}
+
+pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, AppError> {
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| AppError::network(e.to_string()))?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(AppError::network(format!(
+            "release request returned HTTP {}",
+            response.status()
+        )));
+    }
+    let expected = response.content_length();
+    let mut bytes = Vec::new();
+    response
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AppError::network(format!("release response read failed: {e}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(AppError::limit("release response exceeds size limit"));
+    }
+    if expected.is_some_and(|length| length != bytes.len() as u64) {
+        return Err(AppError::network("incomplete release response"));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

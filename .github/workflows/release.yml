@@ -43,13 +43,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - name: Build locked release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Test the release target
+        run: cargo test --locked --release --target "${{ matrix.target }}" --all-targets
       - name: Verify binary and package
         shell: bash
         run: |
           binary="target/${{ matrix.target }}/release/klms"
           "$binary" --version
           "$binary" --help >/dev/null
-          package="klms-${{ github.ref_name }}-${{ matrix.target }}"
+          version="$("$binary" --version)"
+          version="${version#klms }"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Release tag does not match binary version" >&2
+            exit 1
+          fi
+          package="klms-v${version}-${{ matrix.target }}"
           mkdir -p "dist/$package"
           cp "$binary" "dist/$package/klms"
           cp README.md LICENSE "dist/$package/"
@@ -59,6 +67,7 @@ jobs:
           else
             (cd dist && shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256")
           fi
+          python3 scripts/release_smoke.py "dist/$package.tar.gz"
       - name: Upload candidate artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
