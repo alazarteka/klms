@@ -24,13 +24,17 @@ struct SkillState {
 
 pub fn install() -> Result<output::CommandResult, AppError> {
     let paths = Paths::discover()?;
-    validate_link(&paths.link, &paths.payload_dir)?;
+    install_at(&paths)
+}
+
+fn install_at(paths: &Paths) -> Result<output::CommandResult, AppError> {
+    preflight(paths)?;
     ensure_directory(&paths.payload_dir)?;
     write_atomic(&paths.payload_file, EMBEDDED_SKILL.as_bytes())?;
     ensure_directory(&paths.link_parent)?;
     install_link(&paths.link, &paths.payload_dir)?;
 
-    let state = inspect(&paths)?;
+    let state = inspect(paths)?;
     let human = format!(
         "Installed klms Agent Skill\nPayload: {}\nDiscovery link: {} -> {}",
         state.payload_path, state.link_path, state.payload_path
@@ -197,4 +201,128 @@ fn io_error(action: &str, path: &Path, error: std::io::Error) -> AppError {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+// Preserve skill content and discovery state if the final binary switch fails.
+// Empty directories created during installation may remain after rollback.
+pub fn with_install<T>(commit: impl FnOnce() -> Result<T, AppError>) -> Result<T, AppError> {
+    with_install_at(Paths::discover()?, commit)
+}
+
+fn with_install_at<T>(
+    paths: Paths,
+    commit: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    preflight(&paths)?;
+    let previous = match fs::read(&paths.payload_file) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(io_error("read", &paths.payload_file, error)),
+    };
+    let link_existed = fs::symlink_metadata(&paths.link).is_ok();
+    let result = install_at(&paths).and_then(|_| commit());
+    if let Err(error) = result {
+        let rollback = (|| {
+            if !link_existed && fs::symlink_metadata(&paths.link).is_ok() {
+                fs::remove_file(&paths.link).map_err(|e| io_error("restore", &paths.link, e))?;
+            }
+            match previous {
+                Some(bytes) => write_atomic(&paths.payload_file, &bytes)?,
+                None if paths.payload_file.exists() => fs::remove_file(&paths.payload_file)
+                    .map_err(|e| io_error("restore", &paths.payload_file, e))?,
+                None => (),
+            }
+            Ok::<(), AppError>(())
+        })();
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(AppError::config(format!(
+                "{error}; skill rollback also failed: {rollback}"
+            ))),
+        };
+    }
+    result
+}
+
+fn preflight(paths: &Paths) -> Result<(), AppError> {
+    validate_link(&paths.link, &paths.payload_dir)?;
+    for directory in [&paths.payload_dir, &paths.link_parent] {
+        // HOME itself may be a platform-managed symlink. Validate the managed
+        // destination and reject non-directory ancestors without following files.
+        for ancestor in directory.ancestors() {
+            match fs::metadata(ancestor) {
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(AppError::config(format!(
+                        "expected directory {}",
+                        display(ancestor)
+                    )));
+                }
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(io_error("inspect", ancestor, error)),
+            }
+        }
+        if let Ok(metadata) = fs::symlink_metadata(directory) {
+            if metadata.file_type().is_symlink() {
+                return Err(AppError::config(format!(
+                    "refusing unexpected symlink {}",
+                    display(directory)
+                )));
+            }
+        }
+    }
+    match fs::symlink_metadata(&paths.payload_file) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+            Err(AppError::config(format!(
+                "refusing unexpected skill payload {}",
+                display(&paths.payload_file)
+            )))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("inspect", &paths.payload_file, error)),
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    fn paths(home: &Path) -> Paths {
+        let payload_dir = home.join("data/klms");
+        let link_parent = home.join("skills");
+        Paths {
+            payload_file: payload_dir.join("SKILL.md"),
+            payload_dir,
+            link: link_parent.join("klms"),
+            link_parent,
+        }
+    }
+
+    #[test]
+    fn failed_binary_commit_restores_previous_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = paths(home.path());
+        fs::create_dir_all(&paths.payload_dir).unwrap();
+        fs::write(&paths.payload_file, b"old skill").unwrap();
+        let result = with_install_at(paths, || {
+            Err::<(), _>(AppError::config("binary rename failed"))
+        });
+        assert!(result.is_err());
+        let paths = self::paths(home.path());
+        assert_eq!(fs::read(paths.payload_file).unwrap(), b"old skill");
+        assert!(fs::symlink_metadata(paths.link).is_err());
+    }
+
+    #[test]
+    fn failed_binary_commit_removes_fresh_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let result = with_install_at(paths(home.path()), || {
+            Err::<(), _>(AppError::config("binary rename failed"))
+        });
+        assert!(result.is_err());
+        let paths = paths(home.path());
+        assert!(!paths.payload_file.exists());
+        assert!(fs::symlink_metadata(paths.link).is_err());
+    }
 }

@@ -338,34 +338,35 @@ impl Corpus {
             )?;
             blobs_added += inserted as u64;
             let previous = latest_bound_content(&transaction, target.id)?;
-            if previous.as_ref().map(|row| row.sha256.as_str()) != Some(&object.sha256) {
-                transaction.execute(
-                    "INSERT INTO content_observations(
+            // A successful download binds its validators to these bytes even
+            // when their digest has not changed. Keep that observation so the
+            // next sync does not download the same content again.
+            transaction.execute(
+                "INSERT INTO content_observations(
                        representation_id,sync_run_id,observed_at,sha256,etag,
                        last_modified,byte_length,mime
                      ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![
-                        target.id,
-                        run_id,
-                        now(),
-                        object.sha256,
-                        response.metadata.etag,
-                        response.metadata.last_modified,
-                        object.bytes as i64,
-                        response.metadata.content_type
-                    ],
+                params![
+                    target.id,
+                    run_id,
+                    now(),
+                    object.sha256,
+                    response.metadata.etag,
+                    response.metadata.last_modified,
+                    object.bytes as i64,
+                    response.metadata.content_type
+                ],
+            )?;
+            if let Some(previous) = previous.filter(|row| row.sha256 != object.sha256) {
+                change(
+                    &transaction,
+                    (run_id, now()),
+                    "verified_content_changed",
+                    &format!("representation:{}", target.id),
+                    Some(&format!("sha256:{}", previous.sha256)),
+                    Some(&format!("sha256:{}", object.sha256)),
+                    json!({}),
                 )?;
-                if let Some(previous) = previous {
-                    change(
-                        &transaction,
-                        (run_id, now()),
-                        "verified_content_changed",
-                        &format!("representation:{}", target.id),
-                        Some(&format!("sha256:{}", previous.sha256)),
-                        Some(&format!("sha256:{}", object.sha256)),
-                        json!({}),
-                    )?;
-                }
             }
             transaction.commit()?;
         }

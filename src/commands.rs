@@ -21,6 +21,11 @@ use crate::{
 };
 
 pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
+    match &cli.command {
+        Command::Update(args) => return crate::update::run(args.check, cli.timeout),
+        Command::Install { destination } => return crate::update::install(destination),
+        _ => {}
+    }
     if let Command::Skill(args) = &cli.command {
         return match args.command {
             SkillCommand::Install => crate::skill::install(),
@@ -329,48 +334,17 @@ fn read_library_text(
     Ok(text)
 }
 
-#[derive(Serialize)]
-struct LibraryContentOutput {
-    #[serde(rename = "ref")]
-    reference: String,
-    byte_length: u64,
-    mime: Option<String>,
-    filename: String,
-    text: Option<String>,
-    truncated: bool,
-}
 fn library_content(
     corpus: &crate::corpus::Corpus,
     reference: &str,
     max: usize,
 ) -> Result<CommandResult, AppError> {
-    use std::io::Read;
-    let record = corpus.content(reference)?;
-    let mut file = std::fs::File::open(&record.path)
-        .map_err(|e| AppError::content_unavailable(format!("cannot read stored content: {e}")))?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(max as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| AppError::library_io(format!("cannot read stored content: {e}")))?;
-    let truncated = bytes.len() > max;
-    if truncated {
-        bytes.truncate(max);
-    }
-    let text = String::from_utf8(bytes).ok();
-    let model = LibraryContentOutput {
-        reference: record.reference,
-        byte_length: record.byte_length,
-        mime: record.mime,
-        filename: record.filename,
-        text: text.clone(),
-        truncated,
-    };
-    output::result(
-        "library.content",
-        &model,
-        text.unwrap_or_else(|| "Binary content is available through `library export`.".into()),
-    )
+    let model = corpus.preview(reference, max)?;
+    let human = model
+        .text
+        .clone()
+        .unwrap_or_else(|| "Binary content is available through `library export`.".into());
+    output::result("library.content", &model, human)
 }
 fn library_export(
     corpus: &crate::corpus::Corpus,
@@ -489,7 +463,11 @@ fn doctor(
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
     match command {
-        Command::Skill(_) | Command::Spec | Command::Completions { .. } => {
+        Command::Skill(_)
+        | Command::Spec
+        | Command::Completions { .. }
+        | Command::Update(_)
+        | Command::Install { .. } => {
             unreachable!("handled before authenticated dispatch")
         }
         Command::Auth(args) => match args.command {
