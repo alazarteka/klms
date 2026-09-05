@@ -15,7 +15,7 @@ name = "klms"
 path = "src/main.rs"
 
 [dependencies]
-cbc = { version = "=0.1.2", features = ["alloc", "zeroize"] }
+cbc = { version = "=0.2.1", features = ["alloc", "zeroize"] }
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 clap_complete = "=4.6.9"
 kisaseed = { version = "=0.1.3", features = ["zeroize"] }
