@@ -281,6 +281,7 @@ impl Corpus {
                     values.push(target);
                 }
             }
+            values.sort_by_key(|target| target.id);
             values
         };
         let mut blobs_added = 0_u64;

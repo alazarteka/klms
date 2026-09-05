@@ -106,6 +106,10 @@ Multiple downloaded representations produce `CONTENT_UNAVAILABLE` with
 candidate references and a selection hint; choose a representation or exact
 `sha256:` value. Missing content errors explain the appropriate recovery path.
 
+Curation subjects and relation endpoints must be courses, resources, or
+representations. A `sha256:` reference identifies immutable bytes: it can be
+inspected or exported, but cannot receive edits or serve as a relation endpoint.
+
 `edit --field summary` binds the assertion to the current source digest.
 Retraction never deletes its assertion or relation. Effective fields use the
 highest active revision and include assertion provenance.
@@ -137,3 +141,6 @@ Library-specific errors are `MIGRATION_REQUIRED`, `CORPUS_BUSY`,
 notice sync and file downloads, not every course or file type.
 Committed fixtures contain no real KLMS HTML, credentials, grades, attendance,
 or course data.
+
+Malformed persisted JSON in change or history records returns `CORPUS_CORRUPT`
+with the record identity instead of silently substituting empty data.
