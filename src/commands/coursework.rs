@@ -2,10 +2,7 @@ use url::Url;
 
 use super::{activity_result, course_activities, module_path, query_value, resolve_course};
 use crate::{
-    cli::{
-        AgendaArgs, BoardsCommand, CalendarCommand, FilesCommand, ModuleCommand, NoticesCommand,
-        UpcomingArgs,
-    },
+    cli::{BoardsCommand, CalendarCommand, FilesCommand, ModuleCommand, NoticesCommand},
     client::KlmsClient,
     date,
     error::AppError,
@@ -124,37 +121,15 @@ pub(super) fn calendar(
     }
 }
 
-pub(super) fn upcoming(
-    client: &KlmsClient,
-    base_url: &Url,
-    args: &UpcomingArgs,
-) -> Result<CommandResult, AppError> {
-    agenda(
-        client,
-        base_url,
-        &args.clone().into(),
-        args.through,
-        "upcoming",
-    )
-}
-
-impl From<UpcomingArgs> for AgendaArgs {
-    fn from(args: UpcomingArgs) -> Self {
-        Self {
-            course: args.course,
-            list: args.list,
-        }
-    }
-}
-
 pub(super) fn agenda(
     client: &KlmsClient,
     base_url: &Url,
-    args: &AgendaArgs,
+    course: Option<&str>,
+    limit: usize,
     days: u32,
     label: &'static str,
 ) -> Result<CommandResult, AppError> {
-    let course_id = match &args.course {
+    let course_id = match course {
         Some(course) => Some(resolve_course(client, base_url, course)?.id),
         None => None,
     };
@@ -185,17 +160,9 @@ pub(super) fn agenda(
         .collect();
     rows.sort_by(|left, right| left.starts_at.cmp(&right.starts_at));
     let available = rows.len();
-    rows.truncate(args.list.limit);
+    rows.truncate(limit);
     let human = present::agenda(&rows, available, &today, &through);
-    output::collection(
-        label,
-        &rows,
-        human,
-        rows.len(),
-        args.list.limit,
-        available,
-        true,
-    )
+    output::collection(label, &rows, human, rows.len(), limit, available, true)
 }
 
 pub(super) fn boards(
