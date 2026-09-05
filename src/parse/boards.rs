@@ -23,6 +23,12 @@ pub fn board_posts(
     base_url: &Url,
     board_id: Option<String>,
 ) -> Result<Vec<BoardPost>, AppError> {
+    if board_id
+        .as_deref()
+        .is_some_and(|id| !crate::reference::valid_id(id))
+    {
+        return Err(AppError::shape("board page had no numeric board id"));
+    }
     let document = Html::parse_document(html);
     let anchors = selector("a[href*='/mod/courseboard/article.php']")?;
     let cells = selector("td")?;
@@ -86,6 +92,23 @@ pub fn board_posts(
 mod tests {
     use super::board_posts;
     use url::Url;
+
+    #[test]
+    fn malformed_board_ids_cannot_produce_typed_references() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        let html = "<table><tr><td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td></tr></table>";
+        for id in ["", "oops", "8:9"] {
+            assert!(board_posts(html, &base, Some(id.into())).is_err());
+        }
+        let rows = board_posts(
+            &html.replace("bwid=9", "bwid=oops"),
+            &base,
+            Some("8".into()),
+        )
+        .unwrap();
+        assert!(rows[0].id.is_none());
+        assert!(rows[0].reference.is_none());
+    }
 
     #[test]
     fn parses_courseboard_posts() {

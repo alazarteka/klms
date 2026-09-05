@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
 use reqwest::{
     Method,
@@ -165,8 +165,10 @@ impl SsoTransport {
             return Err(AppError::limit("KAIST SSO response exceeded 1 MiB"));
         }
         let url = response.url().clone();
-        let bytes = response
-            .bytes()
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut bytes)
             .map_err(|error| AppError::network(format!("failed to read SSO response: {error}")))?;
         if bytes.len() > MAX_BODY {
             return Err(AppError::limit("KAIST SSO response exceeded 1 MiB"));
@@ -217,4 +219,43 @@ fn origin(url: &Url) -> (String, String, u16) {
         url.host_str().unwrap_or_default().into(),
         url.port_or_known_default().unwrap_or(0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Write, net::TcpListener, thread};
+
+    #[test]
+    fn bounds_sso_response_without_content_length_before_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let mut received = 0;
+            while !request[..received]
+                .windows(4)
+                .any(|bytes| bytes == b"\r\n\r\n")
+            {
+                let read = stream.read(&mut request[received..]).unwrap();
+                assert!(read > 0, "fixture request headers were incomplete");
+                received += read;
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            // Keep the connection open after the cap. An unbounded reader would
+            // wait for EOF and fail with a timeout instead of the size limit.
+            let _ = stream.write_all(&vec![b'x'; MAX_BODY + 1]);
+            let _ = stream.read(&mut request);
+        });
+        let mut transport = SsoTransport::new(url.clone(), url.clone(), 2).unwrap();
+        let error = transport.get_text(url).unwrap_err();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        server.join().unwrap();
+    }
 }
