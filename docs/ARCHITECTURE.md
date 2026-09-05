@@ -6,6 +6,7 @@
 CLI -> commands -> authenticated client + parsers -> models -> output
               \-> corpus -> SQLite + object store
               \-> local skill installer
+              \-> update -> unauthenticated release client + local installer
 ```
 
 ## Boundaries
@@ -13,7 +14,8 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `cli`: command grammar only.
 - `commands`: validates a job and coordinates transport and parsing.
 - `client`: URL policy, cookie selection, timeouts, redirects, response bounds,
-  and authentication checks.
+  and authentication checks. It also provides a separate unauthenticated HTTPS
+  client for explicitly requested release updates.
 - `auth`: the typed KAIST SSO state machine, exact-origin login transport,
   transient cookies, SEED-CBC request encoding, terminal prompts, and private
   owned-session persistence. It exposes only non-secret status models.
@@ -31,6 +33,10 @@ CLI -> commands -> authenticated client + parsers -> models -> output
 - `skill`: embedded companion-skill payload, XDG data placement, and the
   cross-client discovery symlink. It has no network or KLMS authentication
   dependency.
+- `update`: stable release selection, checksum and candidate verification,
+  and shared executable installation. The standalone bootstrap script and
+  self-update both invoke the candidate's internal installer; no second binary
+  replacement implementation exists in shell.
 
 The private versioned library is the CLI's one persistent store. No provider
 framework, service container, or plugin registry is introduced.
@@ -81,3 +87,9 @@ install` writes that exact payload under `$XDG_DATA_HOME/klms/skills/klms` (or
 `~/.local/share/klms/skills/klms`) and links it from `~/.agents/skills/klms`.
 It never downloads mutable skill content at runtime and refuses to replace an
 unexpected discovery path.
+
+For executable installation, the candidate stages its binary on the destination
+filesystem, validates skill paths, and installs its embedded skill before the
+atomic binary rename. Ordinary commit failures restore the prior skill content
+and discovery link state. This does not promise crash atomicity across files.
+Checks and installation never load KLMS authentication.
