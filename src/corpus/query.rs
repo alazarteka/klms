@@ -136,6 +136,10 @@ impl Corpus {
         subject: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ActivityEntry>, AppError> {
+        let subject = subject
+            .map(str::parse::<LibraryRef>)
+            .transpose()?
+            .map(|reference| reference.to_string());
         let sql = format!(
             "SELECT 'assertion:'||a.id,a.subject_ref,a.field,a.value,a.actor,
                     a.revision,a.created_at,NOT ({ACTIVE_ASSERTION}) FROM assertions a
@@ -371,7 +375,7 @@ impl Corpus {
         )
     }
     pub fn history(&self, reference: &str, limit: usize) -> Result<Vec<HistoryEntry>, AppError> {
-        reference.parse::<LibraryRef>()?;
+        let reference = reference.parse::<LibraryRef>()?.to_string();
         let mut statement = self.storage.connection.prepare(
             "SELECT id,observed_at,kind FROM subject_history
               WHERE subject_ref=?1
@@ -463,6 +467,37 @@ impl Corpus {
         let content = self.content(reference)?;
         let hash = content.reference.trim_start_matches("sha256:");
         object_store::export(&self.storage.paths.objects, hash, destination)
+    }
+
+    pub fn preview(&self, reference: &str, max: usize) -> Result<super::ContentPreview, AppError> {
+        use std::io::Read;
+
+        let record = self.content(reference)?;
+        let file = std::fs::File::open(&record.path).map_err(|e| {
+            AppError::content_unavailable(format!("cannot read stored content: {e}"))
+        })?;
+        let mut bytes = Vec::new();
+        file.take((max as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|e| AppError::library_io(format!("cannot read stored content: {e}")))?;
+        let truncated = bytes.len() > max;
+        bytes.truncate(max);
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => Some(text.to_owned()),
+            Err(error) if truncated && error.error_len().is_none() => Some(
+                String::from_utf8(bytes[..error.valid_up_to()].to_vec())
+                    .expect("valid UTF-8 prefix"),
+            ),
+            Err(_) => None,
+        };
+        Ok(super::ContentPreview {
+            reference: record.reference,
+            byte_length: record.byte_length,
+            mime: record.mime,
+            filename: record.filename,
+            text,
+            truncated,
+        })
     }
 }
 struct MissingContentContext {

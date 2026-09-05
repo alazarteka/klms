@@ -34,6 +34,21 @@ export PATH="$HOME/.local/bin:$PATH"
 The archives and their checksums are also available on the
 [GitHub releases page](https://github.com/alazarteka/klms/releases).
 
+From 0.2.1 onward, check for and install updates directly:
+
+```bash
+klms update --check
+klms update
+```
+
+`upgrade` is an alias for `update`. The command checks the latest stable GitHub
+release and never downgrades. It updates the executable you invoked, including
+the target of a symlink, and installs its matching embedded skill. No KLMS
+sign-in is needed. Skill-path conflicts leave the previous binary intact;
+installation errors are nonzero failures. Update checks happen only when you
+ask for them. Older versions need the standalone installer once to gain this
+command.
+
 ## Sign in
 
 Easy Login is the default:
@@ -42,7 +57,7 @@ Easy Login is the default:
 klms auth login
 ```
 
-Enter your KAIST email address or phone number, then approve the comparison
+Enter your KAIST ID or email address, then approve the comparison
 number in the KAIST app. Password login works with either email or SMS
 verification:
 
@@ -170,6 +185,17 @@ make install-local
 
 `make install-local` builds the release binary, installs it under
 `~/.local/bin` by default, and installs the matching companion skill.
+
+The release workflow runs the tests on both supported targets, then verifies
+each packaged archive and its isolated installation. To repeat the archive
+check locally without touching your installed CLI or session:
+
+```bash
+uv run scripts/release_smoke.py path/to/klms-v0.2.1-aarch64-apple-darwin.tar.gz
+```
+
+Keep the matching `.sha256` file next to the archive. This check is offline;
+authenticated course checks are separate.
 
 ## License
 

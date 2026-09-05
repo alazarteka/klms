@@ -55,7 +55,7 @@ impl FromStr for LibraryRef {
             .strip_prefix("sha256:")
             .filter(|hash| valid_hash(hash, 64))
         {
-            return Ok(Self::Sha256(hash.into()));
+            return Ok(Self::Sha256(hash.to_ascii_lowercase()));
         }
         if valid_resource(value) {
             return Ok(Self::Resource(value.into()));
@@ -97,6 +97,17 @@ fn valid_resource(value: &str) -> bool {
 
 pub struct Corpus {
     storage: storage::CorpusStorage,
+}
+
+#[derive(serde::Serialize)]
+pub struct ContentPreview {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub byte_length: u64,
+    pub mime: Option<String>,
+    pub filename: String,
+    pub text: Option<String>,
+    pub truncated: bool,
 }
 
 impl Corpus {

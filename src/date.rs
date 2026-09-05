@@ -39,14 +39,14 @@ pub fn moodle_datetime(value: &str) -> Option<String> {
 
 pub fn normalize_datetime(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.contains('T') {
+    if value.as_bytes().get(10) == Some(&b'T') {
         return iso_datetime_to_seoul(value);
     }
-    if value.len() >= 10 {
+    if value.as_bytes().get(10) == Some(&b' ') && parse_date(&value[..10]).is_some() {
+        return iso_datetime_to_seoul(&format!("{}T{}", &value[..10], &value[11..]));
+    }
+    if value.len() == 10 && value.as_bytes().get(4) == Some(&b'-') {
         let (year, month, day) = parse_date(value)?;
-        if month > 12 || day == 0 || day > days_in_month(year, month) {
-            return None;
-        }
         return Some(format!(
             "{year:04}-{month:02}-{day:02}T00:00:00{SEOUL_OFFSET}"
         ));
@@ -57,9 +57,6 @@ pub fn normalize_datetime(value: &str) -> Option<String> {
 fn iso_datetime_to_seoul(value: &str) -> Option<String> {
     let (date, time_and_zone) = value.split_once('T')?;
     let (year, month, day) = parse_date(date)?;
-    if month > 12 || day == 0 || day > days_in_month(year, month) {
-        return None;
-    }
 
     let (clock, offset_seconds) = if let Some(clock) = time_and_zone.strip_suffix('Z') {
         (clock, 0)
@@ -71,6 +68,15 @@ fn iso_datetime_to_seoul(value: &str) -> Option<String> {
         let (clock, offset) = time_and_zone.split_at(index);
         let sign = if offset.starts_with('-') { -1 } else { 1 };
         let (hours, minutes) = offset.get(1..)?.split_once(':')?;
+        if hours.len() != 2
+            || minutes.len() != 2
+            || !hours
+                .bytes()
+                .chain(minutes.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
         let hours = hours.parse::<i64>().ok()?;
         let minutes = minutes.parse::<i64>().ok()?;
         if hours > 23 || minutes > 59 {
@@ -84,13 +90,17 @@ fn iso_datetime_to_seoul(value: &str) -> Option<String> {
     let mut parts = clock.split(':');
     let hour = parts.next()?.parse::<i64>().ok()?;
     let minute = parts.next()?.parse::<i64>().ok()?;
-    let second = parts
-        .next()
-        .unwrap_or("0")
-        .split('.')
-        .next()?
-        .parse::<i64>()
-        .ok()?;
+    let second = parts.next().unwrap_or("0");
+    let second = if let Some((second, fraction)) = second.split_once('.') {
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        second
+    } else {
+        second
+    }
+    .parse::<i64>()
+    .ok()?;
     if parts.next().is_some()
         || !(0..=23).contains(&hour)
         || !(0..=59).contains(&minute)
@@ -133,12 +143,23 @@ pub fn add_days(date: &str, days: i64) -> Option<String> {
 }
 
 fn parse_date(value: &str) -> Option<(i32, u32, u32)> {
-    let mut parts = value.get(..10)?.split('-');
-    Some((
+    if value.len() != 10
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || !value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut parts = value.split('-');
+    let (year, month, day) = (
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
-    ))
+    );
+    (day > 0 && day <= days_in_month(year, month)).then_some((year, month, day))
 }
 
 fn month_number(value: &str) -> Option<u32> {
@@ -237,5 +258,39 @@ mod tests {
             Some("2026-09-02T13:30:00+09:00")
         );
         assert!(normalize_datetime("2026-02-30T12:00:00+09:00").is_none());
+    }
+
+    #[test]
+    fn normalizes_supported_formats_without_discarding_time() {
+        for (input, expected) in [
+            (
+                "Tuesday, 17 March 2026, 11:59 PM",
+                "2026-03-17T23:59:00+09:00",
+            ),
+            ("1 January 2026, 12:05 AM", "2026-01-01T00:05:00+09:00"),
+            ("2026-09-01", "2026-09-01T00:00:00+09:00"),
+            ("2026-09-01 16:30:00", "2026-09-01T16:30:00+09:00"),
+            ("2026-09-01 16:30:00Z", "2026-09-02T01:30:00+09:00"),
+            ("2026-09-01T16:30", "2026-09-01T16:30:00+09:00"),
+        ] {
+            assert_eq!(
+                normalize_datetime(input).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "2026-09-01 garbage",
+            "2026-09-01extra",
+            "2026-00-01",
+            "2026-02-29",
+            "2026-09-01extraT12:00",
+            "2026-09-01T12:00:00.garbage",
+            "2026-09-01T12:00:00+09:-1",
+        ] {
+            assert!(normalize_datetime(input).is_none(), "{input}");
+        }
+        assert!(add_days("2026-02-29", 1).is_none());
+        assert!(add_days("2026-09-01T12:00", 1).is_none());
     }
 }

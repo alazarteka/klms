@@ -71,6 +71,9 @@ qualifications. The envelope remains version `"4"` and SQLite remains version 1.
 Interface discovery shapes are:
 
 ```text
+version      {name, version}
+help         {text}
+update       {current_version, latest_version, update_available, updated, path}
 spec         {name, version, global_args: [ARG], commands: [{path: [String],
               usage, about, args: [ARG], groups: [GROUP]}]}
              ARG = {name, kind: positional|flag|option, required, value,
@@ -78,6 +81,14 @@ spec         {name, version, global_args: [ARG], commands: [{path: [String],
              GROUP = {name, args: [String], required, multiple}
 completions  {shell, script}
 ```
+
+`--json --version` and explicit `--json ... --help` requests are successful
+envelopes on stdout. `update.current_version` is the running version before
+the operation; `latest_version` is the newest published stable release. Both
+omit the tag's `v` prefix. `path` is the resolved executable target.
+`updated` is true only after successful installation, and `--check` always
+leaves it false. An installation failure is a nonzero error envelope; errors
+from the candidate installer are retained under `error.details.candidate_error`.
 
 `spec` mirrors the executable Clap declaration; `usage` is the same line that
 `klms spec` prints without `--json`. Hidden arguments, `--help`, `--version`,
@@ -126,3 +137,9 @@ candidate representation refs under `error.details`.
 
 The machine contract remains experimental during `0.x`. Consumers should
 check both `schema_version` and the installed binary version.
+
+Numeric library references accepted with leading zeros resolve to the same
+canonical identity before curation is stored. Truncated UTF-8 content previews
+omit an incomplete trailing code point instead of classifying valid text as
+binary. A validator refresh with unchanged bytes can append a verified-content
+observation without adding a blob or emitting `verified_content_changed`.

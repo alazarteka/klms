@@ -12,7 +12,7 @@ is finite, typed, and read-only toward KLMS.
 4. Sequential edits supersede; stale expected revisions conflict.
 5. Absence is recorded only after a complete collection observation.
 6. A missing course means only that it is not currently listed.
-7. Failed or incomplete syncs create no missing event.
+7. Failed or incomplete collection observations create no missing event for that collection. A complete collection can record absence even if a different collection or a later file download fails.
 8. Remote changes and curation activity are separate streams.
 9. Local SHA-256 identifies bytes; ETags are opaque validators.
 10. Summaries are bound to a source digest and report staleness.

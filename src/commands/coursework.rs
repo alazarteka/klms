@@ -78,7 +78,6 @@ pub(super) fn videos(
         ModuleCommand::Show { target } => {
             let path = module_path(target, KINDS)?;
             let response = client.get(&path)?;
-            let requested = ResourceRef::parse(target).ok();
             let reference = ResourceRef::from_url(&response.url).ok_or_else(|| {
                 AppError::shape("module detail URL had no supported resource kind")
             })?;
@@ -90,15 +89,7 @@ pub(super) fn videos(
                     "module detail redirected to an unexpected resource kind",
                 ));
             }
-            if requested
-                .as_ref()
-                .and_then(ResourceRef::activity_kind)
-                .is_some_and(|kind| kind != detail_kind)
-            {
-                return Err(AppError::shape(
-                    "module detail redirected to a different resource kind",
-                ));
-            }
+            validate_detail_identity(base_url, &path, &response.url)?;
             let detail =
                 parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
             output::result("videos.show", &detail, present::detail(&detail))
@@ -376,6 +367,7 @@ fn show_module(
             "module detail redirected to an unexpected resource kind",
         ));
     }
+    validate_detail_identity(base_url, &path, &response.url)?;
     let detail = parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
     output::result(command, &detail, present::detail(&detail))
 }
@@ -410,9 +402,45 @@ fn show_board_post(
             "board post detail redirected to an unexpected resource kind",
         ));
     }
+    validate_detail_identity(base_url, &target, &response.url)?;
     let detail =
         parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")?;
     output::result(command, &detail, present::detail(&detail))
+}
+
+/// A known module or article URL identifies the requested object even when the
+/// server redirects. Extra query parameters and numeric zero padding do not.
+fn validate_detail_identity(base_url: &Url, target: &str, final_url: &Url) -> Result<(), AppError> {
+    let requested_url = base_url
+        .join(target)
+        .map_err(|_| AppError::usage("invalid module detail URL"))?;
+    let Some(requested) = ResourceRef::from_url(&requested_url) else {
+        return Ok(());
+    };
+    let final_reference = ResourceRef::from_url(final_url);
+    let same_id = |key| {
+        let requested = query_value(&requested_url, key);
+        let actual = query_value(final_url, key);
+        match (requested, actual) {
+            (Some(requested), Some(actual)) => {
+                requested.trim_start_matches('0') == actual.trim_start_matches('0')
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    };
+    if requested.activity_kind()
+        != final_reference
+            .as_ref()
+            .and_then(ResourceRef::activity_kind)
+        || !same_id("id")
+        || (requested_url.path() == "/mod/courseboard/article.php" && !same_id("bwid"))
+    {
+        return Err(AppError::shape(
+            "module detail redirected to a different resource identity",
+        ));
+    }
+    Ok(())
 }
 
 fn assignment_result(

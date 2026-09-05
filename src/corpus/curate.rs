@@ -25,6 +25,8 @@ impl Corpus {
             ));
         }
         let reference = subject.parse::<LibraryRef>()?;
+        let subject = reference.to_string();
+        let subject = subject.as_str();
         let transaction = self
             .storage
             .connection
@@ -69,6 +71,8 @@ impl Corpus {
             return Err(AppError::usage("actor must not be empty"));
         }
         let parsed = target.parse::<LibraryRef>()?;
+        let target = parsed.to_string();
+        let target = target.as_str();
         if !matches!(parsed, LibraryRef::Assertion(_) | LibraryRef::Relation(_)) {
             return Err(AppError::usage(
                 "retract accepts an assertion or relation reference",
@@ -128,6 +132,8 @@ impl Corpus {
         }
         let left_ref = left.parse::<LibraryRef>()?;
         let right_ref = right.parse::<LibraryRef>()?;
+        let left = left_ref.to_string();
+        let right = right_ref.to_string();
         if actor.trim().is_empty() {
             return Err(AppError::usage("actor must not be empty"));
         }
