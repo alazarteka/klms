@@ -24,22 +24,24 @@ struct SkillState {
 
 pub fn install() -> Result<output::CommandResult, AppError> {
     let paths = Paths::discover()?;
-    install_at(&paths)
-}
-
-fn install_at(paths: &Paths) -> Result<output::CommandResult, AppError> {
-    preflight(paths)?;
-    ensure_directory(&paths.payload_dir)?;
-    write_atomic(&paths.payload_file, EMBEDDED_SKILL.as_bytes())?;
-    ensure_directory(&paths.link_parent)?;
-    install_link(&paths.link, &paths.payload_dir)?;
-
-    let state = inspect(paths)?;
+    preflight(&paths)?;
+    install_files(&paths)?;
+    let state = inspect(&paths)?;
     let human = format!(
         "Installed klms Agent Skill\nPayload: {}\nDiscovery link: {} -> {}",
         state.payload_path, state.link_path, state.payload_path
     );
     output::result("skill.install", &state, human)
+}
+
+// The caller performs preflight once, before any install or rollback work.
+fn install_files(paths: &Paths) -> Result<(), AppError> {
+    ensure_directory(&paths.payload_dir)?;
+    write_atomic(&paths.payload_file, EMBEDDED_SKILL.as_bytes())?;
+    ensure_directory(&paths.link_parent)?;
+    install_link(&paths.link, &paths.payload_dir)?;
+
+    Ok(())
 }
 
 pub fn status() -> Result<output::CommandResult, AppError> {
@@ -220,7 +222,7 @@ fn with_install_at<T>(
         Err(error) => return Err(io_error("read", &paths.payload_file, error)),
     };
     let link_existed = fs::symlink_metadata(&paths.link).is_ok();
-    let result = install_at(&paths).and_then(|_| commit());
+    let result = install_files(&paths).and_then(|_| commit());
     if let Err(error) = result {
         let rollback = (|| {
             if !link_existed && fs::symlink_metadata(&paths.link).is_ok() {
