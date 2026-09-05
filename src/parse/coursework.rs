@@ -26,9 +26,9 @@ pub fn assignments(
     };
     let parsed = indexed_rows(table)?;
     let mut assignments = Vec::new();
-    for row in parsed.rows {
-        let title = row.value("name");
-        let Some(url) = row.link_for("name", page_url) else {
+    for row in parsed {
+        let title = row.value("name")?;
+        let Some(url) = row.link_for("name", page_url)? else {
             if title.is_some() {
                 return Err(AppError::shape(
                     "assignment row contained no recognizable detail link",
@@ -41,17 +41,17 @@ pub fn assignments(
                 "assignment detail link contained no numeric module id",
             ));
         };
-        let due_text = row.value("due date");
+        let due_text = row.value("due date")?;
         assignments.push(Assignment {
             id: id.clone(),
             reference: ResourceRef::Assignment(id).to_string(),
             course_id: course.id.clone(),
             course_ref: course.reference.clone(),
-            week: row.value("week").as_deref().and_then(week_number),
+            week: row.value("week")?.as_deref().and_then(week_number),
             title: title.unwrap_or_else(|| "Untitled assignment".into()),
             due_at: due_text.as_deref().and_then(crate::date::moodle_datetime),
             due_text,
-            submission_status: row.value("submit"),
+            submission_status: row.value("submit")?,
             url: safe_url::display(&url),
         });
     }
@@ -71,9 +71,9 @@ pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>,
     };
     let parsed = indexed_rows(table)?;
     let mut quizzes = Vec::new();
-    for row in parsed.rows {
-        let title = row.value("name");
-        let Some(url) = row.link_for("name", page_url) else {
+    for row in parsed {
+        let title = row.value("name")?;
+        let Some(url) = row.link_for("name", page_url)? else {
             if title.is_some() {
                 return Err(AppError::shape(
                     "quiz row contained no recognizable detail link",
@@ -86,19 +86,19 @@ pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>,
                 "quiz detail link contained no numeric module id",
             ));
         };
-        let closes_text = row.value("quiz closes");
+        let closes_text = row.value("quiz closes")?;
         quizzes.push(Quiz {
             id: id.clone(),
             reference: ResourceRef::Quiz(id).to_string(),
             course_id: course.id.clone(),
             course_ref: course.reference.clone(),
-            week: row.value("week").as_deref().and_then(week_number),
+            week: row.value("week")?.as_deref().and_then(week_number),
             title: title.unwrap_or_else(|| "Untitled quiz".into()),
             closes_at: closes_text
                 .as_deref()
                 .and_then(crate::date::moodle_datetime),
             closes_text,
-            grade: row.value("grade"),
+            grade: row.value("grade")?,
             url: safe_url::display(&url),
         });
     }
@@ -235,6 +235,65 @@ mod tests {
 
         let missing_id = "<table><tr><th>Week</th><th>Name</th><th>Quiz closes</th></tr><tr><td>1</td><td><a href='/mod/quiz/view.php'>Quiz</a></td><td>soon</td></tr></table>";
         assert!(quizzes(missing_id, &base, &course).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_ids_and_does_not_mix_overlapping_name_columns() {
+        let base = Url::parse(BASE).unwrap();
+        let course = Course {
+            id: "42".into(),
+            reference: "course:42".into(),
+            title: "Compilers".into(),
+            code: None,
+            term: None,
+            url: format!("{BASE}/course/view.php?id=42"),
+        };
+        for id in ["", "oops", "-1", "7:8"] {
+            let assignment = format!(
+                "<table><tr><th>Week</th><th>Name</th><th>Due date</th></tr><tr><td>1</td><td><a href='/mod/assign/view.php?id={id}'>Work</a></td><td>soon</td></tr></table>"
+            );
+            assert!(assignments(&assignment, &base, &course).is_err());
+            let quiz = assignment
+                .replace("Due date", "Quiz closes")
+                .replace("/assign/", "/quiz/");
+            assert!(quizzes(&quiz, &base, &course).is_err());
+        }
+        let html = "<table><tr><th>Week</th><th>Course name</th><th>Name</th><th>Due date</th></tr><tr><td>1</td><td><a href='/course/view.php?id=42'>Course</a></td><td><a href='/mod/assign/view.php?id=7'>Work</a></td><td>soon</td></tr></table>";
+        let rows = assignments(html, &base, &course).unwrap();
+        assert_eq!(rows[0].title, "Work");
+        assert_eq!(rows[0].reference, "assign:7");
+        let qualified = html
+            .replace("Course name", "Course")
+            .replace("<th>Name</th>", "<th>Assignment name</th>");
+        assert_eq!(
+            assignments(&qualified, &base, &course).unwrap()[0].reference,
+            "assign:7"
+        );
+        for ambiguous in [
+            html.replace("<th>Name</th>", "<th>Assignment name</th>"),
+            html.replace("Course name", "Name"),
+        ] {
+            assert_eq!(
+                assignments(&ambiguous, &base, &course).unwrap_err().code,
+                "UPSTREAM_SHAPE_CHANGED"
+            );
+            let quiz = ambiguous
+                .replace("Due date", "Quiz closes")
+                .replace("/assign/", "/quiz/");
+            assert_eq!(
+                quizzes(&quiz, &base, &course).unwrap_err().code,
+                "UPSTREAM_SHAPE_CHANGED"
+            );
+        }
+
+        assert!(
+            assignments(
+                &html.replace("<a href='/mod/assign/view.php?id=7'>Work</a>", "Work"),
+                &base,
+                &course
+            )
+            .is_err()
+        );
     }
 
     #[test]
