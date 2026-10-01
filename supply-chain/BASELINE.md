@@ -161,3 +161,14 @@ count does not change. This is a baseline carry-over, not an audit: the
 (prepared by Claude Code). Follow-up: replace this exemption with a delta
 certification from 0.23.43 or a full audit when the baseline ratchet reaches
 `rustls`.
+
+## 2026-10-01 setup-uv 10.2.0
+
+CI and release workflows move `astral-sh/setup-uv` from v10.0.1 to v10.2.0 at
+commit `c18668ad3cf93ea998bef934396af7bb5c839dc7`, replacing the commit recorded
+in the 2026-09-05 entry. This is Dependabot's proposal (#14) re-applied on the
+current `main`; the commit is the one named by the upstream v10.2.0 release
+notes, but it was not independently resolved against the release repository
+here. The uv version (0.12.10) and Python version are unchanged, no Rust
+dependencies or cargo-vet exemptions change, and the action remains pinned to a
+full commit SHA. Reviewer: pending `@alazarteka` (prepared by Claude Code).
