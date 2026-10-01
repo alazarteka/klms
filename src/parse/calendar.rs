@@ -10,6 +10,7 @@ pub struct CalendarPage {
     pub events: Vec<CalendarEvent>,
     pub complete: bool,
     pub unparsed_times: usize,
+    pub undated_events: usize,
     pub missing_course_ids: usize,
 }
 
@@ -106,9 +107,15 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
             "calendar page contained no recognizable event region",
         ));
     }
+    // A time that is present but unreadable suggests changed markup; an event
+    // with no time at all (e.g. a quiz without a close date) is simply undated.
     let unparsed_times = rows
         .iter()
-        .filter(|event| event.starts_at.is_none())
+        .filter(|event| event.starts_at.is_none() && event.when_text.is_some())
+        .count();
+    let undated_events = rows
+        .iter()
+        .filter(|event| event.starts_at.is_none() && event.when_text.is_none())
         .count();
     let missing_course_ids = rows
         .iter()
@@ -126,6 +133,7 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
         events: rows,
         complete: skipped == 0 && !has_next,
         unparsed_times,
+        undated_events,
         missing_course_ids,
     })
 }
@@ -187,6 +195,17 @@ mod tests {
         .unwrap();
         assert_eq!(unparsed.unparsed_times, 1);
         assert_eq!(unparsed.missing_course_ids, 1);
+    }
+
+    #[test]
+    fn counts_events_without_any_time_as_undated_not_unparsed() {
+        let page = calendar_page(
+            "<main class='calendarwrapper'><div class='event'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div></main>",
+            &Url::parse(BASE).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(page.unparsed_times, 0);
+        assert_eq!(page.undated_events, 1);
     }
 
     #[test]
