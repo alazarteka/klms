@@ -137,6 +137,7 @@ pub(super) fn agenda(
     let today = date::seoul_today();
     let through = date::add_days(&today, days as i64).expect("valid current date");
     let page = parse::calendar_page(&response.text, base_url)?;
+    let undated_events = page.undated_events;
     if !page.complete || page.unparsed_times > 0 {
         return Err(AppError::shape(
             "cannot build a complete agenda from the current calendar page",
@@ -162,7 +163,13 @@ pub(super) fn agenda(
     let available = rows.len();
     rows.truncate(limit);
     let human = present::agenda(&rows, available, &today, &through);
-    output::collection(label, &rows, human, rows.len(), limit, available, true)
+    let mut result = output::collection(label, &rows, human, rows.len(), limit, available, true)?;
+    if undated_events > 0 {
+        result.warnings.push(format!(
+            "{undated_events} calendar event(s) have no date and are not shown; see `klms calendar list`"
+        ));
+    }
+    Ok(result)
 }
 
 pub(super) fn boards(
