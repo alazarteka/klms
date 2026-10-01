@@ -146,3 +146,18 @@ commit `20cfd1bf945f4377ade1205e4dbc17946fc9a30d`. Both pins were resolved again
 their official release repositories. No Rust dependencies, cargo-vet audits, or
 exemptions change. The Rust bootstrap tools retain their checksum verification
 and are exercised directly by the existing deny/vet gates.
+
+## 2026-10-01 rustls security patch
+
+`cargo-deny` fails on `main` for GHSA-2mjx-qc3c-rqvc (rustls accepts
+plaintext handshake messages that should be encrypted); the advisory's fix is
+`rustls` >= 0.23.45. `Cargo.lock` moves `rustls` 0.23.43 -> 0.23.45 and no other
+crate changes. `Cargo.toml` is untouched because `rustls` is a transitive
+dependency of `reqwest`.
+
+The baseline `rustls` exemption moves from 0.23.43 to 0.23.45, so the exemption
+count does not change. This is a baseline carry-over, not an audit: the
+0.23.43..0.23.45 source diff was not inspected. Reviewer: pending `@alazarteka`
+(prepared by Claude Code). Follow-up: replace this exemption with a delta
+certification from 0.23.43 or a full audit when the baseline ratchet reaches
+`rustls`.
