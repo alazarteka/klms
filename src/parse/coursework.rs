@@ -128,15 +128,21 @@ pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
     table_report(
         html,
         course_id,
-        &["grade item", "percentage", "contribution"],
+        Some("grade item"),
+        &["grade", "range", "feedback", "percentage", "contribution"],
     )
 }
 
 pub fn attendance(html: &str, course_id: String) -> Result<Report, AppError> {
-    table_report(html, course_id, &["date", "attended", "absent"])
+    table_report(html, course_id, None, &["date", "attended", "absent"])
 }
 
-fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Report, AppError> {
+fn table_report(
+    html: &str,
+    course_id: String,
+    anchor: Option<&str>,
+    expected: &[&str],
+) -> Result<Report, AppError> {
     let document = Html::parse_document(html);
     let tables = selector("table")?;
     let rows = selector("tr")?;
@@ -148,12 +154,25 @@ fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Repo
             .map(|row| row.select(&cells).map(text).collect())
             .unwrap_or_default();
         let normalized: Vec<_> = headers.iter().map(|header| header_name(header)).collect();
-        let matched = expected
-            .iter()
-            .filter(|needle| normalized.iter().any(|header| header.contains(**needle)))
-            .count();
-        // A lone date/percentage column is not enough to identify a report.
-        if matched < 2 {
+        let recognizable = match anchor {
+            Some(anchor) => {
+                // Percentage and contribution are optional Moodle columns.
+                // Require a grade-item anchor and a separate grade-report role.
+                normalized.iter().any(|header| header.contains(anchor))
+                    && normalized.iter().any(|header| {
+                        !header.contains(anchor)
+                            && expected.iter().any(|needle| header.contains(needle))
+                    })
+            }
+            None => {
+                expected
+                    .iter()
+                    .filter(|needle| normalized.iter().any(|header| header.contains(**needle)))
+                    .count()
+                    >= 2
+            }
+        };
+        if !recognizable {
             continue;
         }
         let mut values = Vec::new();
@@ -201,6 +220,19 @@ mod tests {
         assert_eq!(rows[0].week, Some(2));
         assert_eq!(rows[0].due_at.as_deref(), Some("2030-03-17T23:50:00+09:00"));
         assert_eq!(rows[0].submission_status.as_deref(), Some("제출물 없음"));
+        for (label, expected) in [
+            ("2주차 2030.03.11 ~ 2030.03.17", Some(2)),
+            ("2030.03.17", None),
+            ("주차", None),
+        ] {
+            let rows = assignments(
+                &assignment.replace("2주차", label),
+                &base,
+                &example_course(),
+            )
+            .unwrap();
+            assert_eq!(rows[0].week, expected);
+        }
         let quiz = include_str!("../../tests/fixtures/localized/quiz.html");
         let rows = quizzes(quiz, &base, &example_course()).unwrap();
         assert_eq!(rows[0].reference, "quiz:8");
@@ -270,6 +302,29 @@ mod tests {
         assert!(attendance(unrelated, "42".into()).is_err());
         let result = grades("<table><tr><th>성적 항목</th><th>백분율</th></tr><tr><td>Practice</td><td>-</td></tr></table>", "42".into()).unwrap();
         assert_eq!(result.headers, ["성적 항목", "백분율"]);
+    }
+
+    #[test]
+    fn recognizes_compact_grade_reports_without_optional_columns() {
+        for headers in [
+            ["Grade item", "Grade", "Range", "Feedback"],
+            ["성적 항목", "성적", "범위", "피드백"],
+        ] {
+            let cells = headers.map(|header| format!("<th>{header}</th>")).join("");
+            let html = format!(
+                "<table><tr>{cells}</tr><tr><td>Practice</td><td>-</td><td>0–10</td><td></td></tr></table>"
+            );
+            let report = grades(&html, "42".into()).unwrap();
+            assert_eq!(report.headers, headers);
+            assert_eq!(report.rows.len(), 1);
+        }
+        for html in [
+            "<table><tr><th>Grade item</th></tr></table>",
+            "<table><tr><th>Grade</th><th>Range</th></tr></table>",
+            "<table><tr><th>Percentage</th><th>Contribution</th></tr></table>",
+        ] {
+            assert!(grades(html, "42".into()).is_err());
+        }
     }
 
     #[test]
