@@ -73,7 +73,7 @@ pub(super) fn semantic_table<'a>(
             .next()
             .map(|row| {
                 row.select(&cells)
-                    .map(|cell| text(cell).to_ascii_lowercase())
+                    .map(|cell| header_name(&text(cell)))
                     .collect()
             })
             .unwrap_or_default();
@@ -92,7 +92,7 @@ pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<Vec<IndexedRow>, App
         .next()
         .map(|row| {
             row.select(&cells)
-                .map(|cell| text(cell).to_ascii_lowercase())
+                .map(|cell| header_name(&text(cell)))
                 .collect()
         })
         .unwrap_or_default();
@@ -215,6 +215,29 @@ pub(super) fn text(element: ElementRef<'_>) -> String {
         .join(" ")
 }
 
+/// Preserve qualified English labels and ambiguity checks while recognizing
+/// the Korean labels used by KLMS. Unknown locales still fail visibly.
+pub(super) fn header_name(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact: String = normalized.chars().filter(|c| !c.is_whitespace()).collect();
+    let canonical = match compact.as_str() {
+        "주차" | "주차(토픽)" => "week",
+        "제목" => "name",
+        "마감일시" | "마감일" => "due date",
+        "제출" | "제출상태" => "submit",
+        "퀴즈그만하기" | "퀴즈종료" => "quiz closes",
+        "성적" => "grade",
+        "성적항목" => "grade item",
+        "백분율" => "percentage",
+        "강의합계에대한기여도" => "contribution",
+        "날짜" => "date",
+        "출석" => "attended",
+        "결석" => "absent",
+        _ => return normalized.to_ascii_lowercase(),
+    };
+    canonical.into()
+}
+
 pub(super) fn visible_text(element: ElementRef<'_>) -> String {
     element
         .descendants()
@@ -227,7 +250,8 @@ pub(super) fn visible_text(element: ElementRef<'_>) -> String {
                     matches!(
                         ancestor.value().name(),
                         "script" | "style" | "noscript" | "template"
-                    )
+                    ) || ancestor.value().attr("hidden").is_some()
+                        || ancestor.value().attr("aria-hidden") == Some("true")
                 });
             (!hidden).then_some(value.as_ref())
         })
@@ -238,13 +262,21 @@ pub(super) fn visible_text(element: ElementRef<'_>) -> String {
 
 pub(super) fn week_number(value: &str) -> Option<u32> {
     let lower = value.to_ascii_lowercase();
-    let position = lower.find("week")? + 4;
-    lower[position..]
-        .trim_start_matches(|c: char| !c.is_ascii_digit())
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
+    if let Some(position) = lower.find("week") {
+        return lower[position + 4..]
+            .trim_start_matches(|c: char| !c.is_ascii_digit())
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok();
+    }
+    let prefix = lower.split_once("주차")?.0.trim_end();
+    let number: String = prefix
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    number.chars().rev().collect::<String>().parse().ok()
 }
 
 pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
@@ -256,6 +288,14 @@ pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn understands_korean_week_labels_without_treating_dates_as_weeks() {
+        assert_eq!(week_number("6주차 2030.03.11 ~ 2030.03.17"), Some(6));
+        assert_eq!(week_number("Week 6"), Some(6));
+        assert_eq!(week_number("2030.03.17"), None);
+        assert_eq!(week_number("주차"), None);
+    }
 
     #[test]
     fn overlapping_headers_keep_values_and_links_in_the_same_column() {

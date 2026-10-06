@@ -665,6 +665,51 @@ fn schedule_views_accept_an_explicit_empty_calendar() {
 }
 
 #[test]
+fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
+    let html = include_str!("fixtures/localized/calendar.html")
+        .replace("&amp;time=1899989400", "")
+        .replace("내일", "오늘");
+    let server = Server::new(move |request| {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.target, "/calendar/view.php?view=upcoming");
+        Response::html(html.as_bytes())
+    });
+    let state_dir = TempDir::new().unwrap();
+    let state_path = storage_state(&state_dir);
+    for args in [
+        vec!["calendar", "list"],
+        vec!["today"],
+        vec!["upcoming", "--through", "7d", "--course", "42"],
+    ] {
+        let output = binary()
+            .env("XDG_STATE_HOME", &state_path)
+            .args(["--json", "--base-url", &server.url()])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["meta"]["complete"], true);
+        assert_eq!(value["data"].as_array().unwrap().len(), 1);
+        let event = &value["data"][0];
+        assert_eq!(event["title"], "Reading response is due");
+        assert_eq!(event["ref"], "assign:7");
+        assert_eq!(event["course_id"], "42");
+        assert_eq!(
+            event["url"],
+            format!("{}/mod/assign/view.php?id=7", server.url())
+        );
+        assert!(
+            event["starts_at"]
+                .as_str()
+                .unwrap()
+                .ends_with("T23:50:00+09:00")
+        );
+        assert_eq!(value["warnings"], serde_json::json!([]));
+    }
+}
+
+#[test]
 fn typed_show_rejects_a_mismatched_final_resource() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use scraper::Html;
+use scraper::{ElementRef, Html};
 use url::Url;
 
-use super::shared::{has_any, query_id, selector, text};
+use super::shared::{has_any, query_id, selector, text, visible_text};
 use crate::{date, error::AppError, models::CalendarEvent, reference::ResourceRef, safe_url};
 
 pub struct CalendarPage {
@@ -15,23 +15,19 @@ pub struct CalendarPage {
 }
 
 pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppError> {
+    calendar_page_on(html, base_url, &date::seoul_today())
+}
+
+fn calendar_page_on(html: &str, base_url: &Url, today: &str) -> Result<CalendarPage, AppError> {
     let document = Html::parse_document(html);
     let events = selector(".event, [data-region=event-list-item]")?;
-    let links = selector("a[href]")?;
-    let times = selector("time")?;
+    let titles = selector(".card-header .name, h3.name, [data-region=event-name]")?;
     let course_links = selector("a[href*='course/view.php']")?;
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
     let mut skipped = 0;
     for event in document.select(&events) {
-        let event_link = event.select(&links).find_map(|anchor| {
-            let href = anchor.value().attr("href")?;
-            let url = base_url.join(href).ok()?;
-            let path = url.path();
-            (path.contains("/mod/") || path.contains("/calendar/event.php"))
-                .then_some((anchor, url))
-        });
-        let Some((anchor, url)) = event_link else {
+        let Some((anchor, url)) = event_link(event, base_url)? else {
             skipped += 1;
             continue;
         };
@@ -48,25 +44,17 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
             ResourceRef::from_activity(&kind, None, Some(url.as_str()))
                 .map(|reference| reference.to_string())
         };
-        let time = event.select(&times).next();
-        let when_text = time.map(text).filter(|value| !value.is_empty());
-        let starts_at = time
-            .and_then(|node| node.value().attr("datetime"))
-            .and_then(date::normalize_datetime)
-            .or_else(|| when_text.as_deref().and_then(date::moodle_datetime))
-            .or_else(|| {
-                event
-                    .value()
-                    .attr("data-event-timestart")
-                    .or_else(|| event.value().attr("data-timestart"))
-                    .and_then(|value| value.parse::<i64>().ok())
-                    .and_then(date::epoch_to_seoul)
-            });
+        let (starts_at, when_text) = event_time(event, base_url, today)?;
         let course_link = event.select(&course_links).next();
         let course_url = course_link
             .and_then(|link| link.value().attr("href"))
             .and_then(|href| base_url.join(href).ok());
-        let title = text(anchor);
+        let title = event
+            .select(&titles)
+            .next()
+            .map(visible_text)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| text(anchor));
         let identity = event
             .value()
             .attr("data-event-id")
@@ -90,10 +78,7 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
             url: safe_url::display(&url),
         });
     }
-    let explicit_empty = document
-        .root_element()
-        .text()
-        .collect::<String>()
+    let explicit_empty = super::detail::safe_html_preview(html)
         .to_ascii_lowercase()
         .contains("there are no upcoming events");
     if rows.is_empty()
@@ -138,6 +123,115 @@ pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppErro
     })
 }
 
+fn event_link<'a>(
+    event: ElementRef<'a>,
+    base_url: &Url,
+) -> Result<Option<(ElementRef<'a>, Url)>, AppError> {
+    let links = selector("a[href]")?;
+    let footer = selector(".card-footer a[href]")?;
+    let footer_links: Vec<_> = event.select(&footer).collect();
+    let candidates: Vec<_> = if footer_links.is_empty() {
+        event.select(&links).collect()
+    } else {
+        footer_links
+    };
+    let mut selected: Option<(ElementRef<'a>, Url)> = None;
+    for anchor in candidates {
+        let Some(mut url) = anchor
+            .value()
+            .attr("href")
+            .and_then(|href| base_url.join(href).ok())
+        else {
+            continue;
+        };
+        if url.origin() != base_url.origin()
+            || !((url.path().starts_with("/mod/") && url.path().ends_with("/view.php"))
+                || url.path() == "/calendar/event.php")
+        {
+            continue;
+        }
+        // A footer action identifies the module, but is never a read target.
+        // Retain only its numeric identity, dropping action/token parameters.
+        if let Some(id) = query_id(&url, &["id"]) {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.query_pairs_mut().append_pair("id", &id);
+        } else {
+            continue;
+        }
+        if selected
+            .as_ref()
+            .is_some_and(|(_, previous)| previous != &url)
+        {
+            return Err(AppError::shape(
+                "calendar event has ambiguous resource links",
+            ));
+        }
+        selected = Some((anchor, url));
+    }
+    Ok(selected)
+}
+
+fn event_time(
+    event: ElementRef<'_>,
+    base_url: &Url,
+    today: &str,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let times = selector("time")?;
+    let regions =
+        selector(".description > .row:first-child, [data-region=event-date], .eventdate")?;
+    let links = selector("a[href]")?;
+    let time = event.select(&times).next();
+    let region = event.select(&regions).next();
+    let timestamp = event
+        .value()
+        .attr("data-event-timestart")
+        .or_else(|| event.value().attr("data-timestart"));
+    let linked_timestamp = region.and_then(|region| {
+        region.select(&links).find_map(|anchor| {
+            let url = base_url.join(anchor.value().attr("href")?).ok()?;
+            (url.origin() == base_url.origin() && url.path() == "/calendar/view.php")
+                .then(|| {
+                    url.query_pairs()
+                        .find(|(key, _)| key == "time")
+                        .map(|(_, value)| value.into_owned())
+                })
+                .flatten()
+        })
+    });
+    let mut when_text = time
+        .map(visible_text)
+        .filter(|value| !value.is_empty())
+        .or_else(|| region.map(visible_text).filter(|value| !value.is_empty()));
+    let starts_at = timestamp
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(date::epoch_to_seoul)
+        .or_else(|| {
+            time.and_then(|node| node.value().attr("datetime"))
+                .and_then(date::normalize_datetime)
+        })
+        .or_else(|| {
+            linked_timestamp
+                .as_deref()
+                .and_then(|value| value.parse::<i64>().ok())
+                .and_then(date::epoch_to_seoul)
+        })
+        .or_else(|| {
+            when_text
+                .as_deref()
+                .and_then(|value| date::calendar_datetime(value, today))
+        });
+    if starts_at.is_none()
+        && when_text.is_none()
+        && (timestamp.is_some()
+            || linked_timestamp.is_some()
+            || time.is_some_and(|node| node.value().attr("datetime").is_some()))
+    {
+        when_text = Some("[unrecognized event timestamp]".into());
+    }
+    Ok((starts_at, when_text))
+}
+
 fn module_kind(url: &Url) -> Option<String> {
     let parts: Vec<_> = url.path_segments()?.collect();
     parts
@@ -147,10 +241,69 @@ fn module_kind(url: &Url) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::calendar_page;
+    use super::{calendar_page, calendar_page_on};
     use url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
+
+    #[test]
+    fn calendar_cards_use_the_heading_and_timestamp_not_the_action_link() {
+        let fixture = include_str!("../../tests/fixtures/localized/calendar.html");
+        let base = Url::parse(BASE).unwrap();
+        for label in ["내일", "Tomorrow", "morgen"] {
+            let page =
+                calendar_page_on(&fixture.replace("내일", label), &base, "2030-03-16").unwrap();
+            let event = &page.events[0];
+            assert_eq!(event.title, "Reading response is due");
+            assert_eq!(event.reference.as_deref(), Some("assign:7"));
+            assert_eq!(event.url, format!("{BASE}/mod/assign/view.php?id=7"));
+            assert_eq!(
+                event.starts_at.as_deref(),
+                Some("2030-03-17T23:50:00+09:00")
+            );
+            assert!(page.complete);
+            assert_eq!(page.unparsed_times, 0);
+            assert_eq!(page.undated_events, 0);
+        }
+    }
+
+    #[test]
+    fn visible_dates_without_timestamps_are_not_silently_undated() {
+        let fixture = include_str!("../../tests/fixtures/localized/calendar.html")
+            .replace("&amp;time=1899989400", "");
+        let base = Url::parse(BASE).unwrap();
+        let page = calendar_page_on(&fixture, &base, "2030-12-31").unwrap();
+        assert_eq!(
+            page.events[0].starts_at.as_deref(),
+            Some("2031-01-01T23:50:00+09:00")
+        );
+        let unknown = calendar_page_on(
+            &fixture.replace("내일", "unknown date"),
+            &base,
+            "2030-12-31",
+        )
+        .unwrap();
+        assert_eq!(unknown.unparsed_times, 1);
+        assert_eq!(unknown.undated_events, 0);
+        assert!(
+            unknown.events[0]
+                .when_text
+                .as_deref()
+                .unwrap()
+                .contains("unknown date")
+        );
+    }
+
+    #[test]
+    fn ambiguous_resources_and_invalid_timestamp_markers_fail_visibly() {
+        let base = Url::parse(BASE).unwrap();
+        let ambiguous = "<main class='calendarwrapper'><div class='event'><a href='/mod/assign/view.php?id=7'>Work</a><a href='/mod/assign/view.php?id=8'>Other work</a></div></main>";
+        assert!(calendar_page(ambiguous, &base).is_err());
+        let invalid = "<main class='calendarwrapper'><div class='event'><a href='/mod/assign/view.php?id=7'>Work</a><time datetime='invalid'></time></div></main>";
+        let page = calendar_page(invalid, &base).unwrap();
+        assert_eq!(page.unparsed_times, 1);
+        assert_eq!(page.undated_events, 0);
+    }
 
     #[test]
     fn empty_pages_require_a_recognizable_container() {
