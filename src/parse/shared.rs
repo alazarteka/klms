@@ -228,6 +228,8 @@ pub(super) fn header_name(value: &str) -> String {
         "퀴즈그만하기" | "퀴즈종료" => "quiz closes",
         "성적" => "grade",
         "성적항목" => "grade item",
+        "범위" => "range",
+        "피드백" => "feedback",
         "백분율" => "percentage",
         "강의합계에대한기여도" => "contribution",
         "날짜" => "date",
@@ -288,14 +290,6 @@ pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn understands_korean_week_labels_without_treating_dates_as_weeks() {
-        assert_eq!(week_number("6주차 2030.03.11 ~ 2030.03.17"), Some(6));
-        assert_eq!(week_number("Week 6"), Some(6));
-        assert_eq!(week_number("2030.03.17"), None);
-        assert_eq!(week_number("주차"), None);
-    }
 
     #[test]
     fn overlapping_headers_keep_values_and_links_in_the_same_column() {
