@@ -1,7 +1,7 @@
 use scraper::Html;
 use url::Url;
 
-use super::shared::{indexed_rows, selector, semantic_table, text, week_number};
+use super::shared::{header_name, indexed_rows, selector, semantic_table, text, week_number};
 use crate::{
     error::AppError,
     models::{Assignment, Course, Quiz, Report},
@@ -106,21 +106,19 @@ pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>,
 }
 
 fn explicit_empty(document: &Html, kind: &str) -> bool {
-    let page_text = document
-        .root_element()
-        .text()
-        .collect::<String>()
-        .to_ascii_lowercase();
+    let page_text = super::detail::safe_html_preview(&document.html()).to_ascii_lowercase();
     match kind {
         "assignment" => {
             page_text.contains("there are no assignments")
                 || page_text.contains("no assignments found")
                 || page_text.contains("과제가 없습니다")
+                || page_text.contains("이 강좌에는 과제물들이(가) 없습니다")
         }
         "quiz" => {
             page_text.contains("there are no quizzes")
                 || page_text.contains("no quizzes found")
                 || page_text.contains("퀴즈가 없습니다")
+                || page_text.contains("이 강좌에는 퀴즈이(가) 없습니다")
         }
         _ => false,
     }
@@ -130,15 +128,21 @@ pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
     table_report(
         html,
         course_id,
-        &["grade item", "percentage", "contribution"],
+        Some("grade item"),
+        &["grade", "range", "feedback", "percentage", "contribution"],
     )
 }
 
 pub fn attendance(html: &str, course_id: String) -> Result<Report, AppError> {
-    table_report(html, course_id, &["date", "attended", "absent"])
+    table_report(html, course_id, None, &["date", "attended", "absent"])
 }
 
-fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Report, AppError> {
+fn table_report(
+    html: &str,
+    course_id: String,
+    anchor: Option<&str>,
+    expected: &[&str],
+) -> Result<Report, AppError> {
     let document = Html::parse_document(html);
     let tables = selector("table")?;
     let rows = selector("tr")?;
@@ -149,8 +153,26 @@ fn table_report(html: &str, course_id: String, expected: &[&str]) -> Result<Repo
             .next()
             .map(|row| row.select(&cells).map(text).collect())
             .unwrap_or_default();
-        let joined = headers.join(" ").to_ascii_lowercase();
-        if !expected.iter().any(|needle| joined.contains(needle)) {
+        let normalized: Vec<_> = headers.iter().map(|header| header_name(header)).collect();
+        let recognizable = match anchor {
+            Some(anchor) => {
+                // Percentage and contribution are optional Moodle columns.
+                // Require a grade-item anchor and a separate grade-report role.
+                normalized.iter().any(|header| header.contains(anchor))
+                    && normalized.iter().any(|header| {
+                        !header.contains(anchor)
+                            && expected.iter().any(|needle| header.contains(needle))
+                    })
+            }
+            None => {
+                expected
+                    .iter()
+                    .filter(|needle| normalized.iter().any(|header| header.contains(**needle)))
+                    .count()
+                    >= 2
+            }
+        };
+        if !recognizable {
             continue;
         }
         let mut values = Vec::new();
@@ -177,6 +199,133 @@ mod tests {
     use url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
+
+    fn example_course() -> Course {
+        Course {
+            id: "42".into(),
+            reference: "course:42".into(),
+            title: "Example course".into(),
+            code: None,
+            term: None,
+            url: format!("{BASE}/course/view.php?id=42"),
+        }
+    }
+
+    #[test]
+    fn parses_korean_coursework_with_dates_weeks_and_canonical_refs() {
+        let base = Url::parse(BASE).unwrap();
+        let assignment = include_str!("../../tests/fixtures/localized/assignment.html");
+        let rows = assignments(assignment, &base, &example_course()).unwrap();
+        assert_eq!(rows[0].reference, "assign:7");
+        assert_eq!(rows[0].week, Some(2));
+        assert_eq!(rows[0].due_at.as_deref(), Some("2030-03-17T23:50:00+09:00"));
+        assert_eq!(rows[0].submission_status.as_deref(), Some("제출물 없음"));
+        for (label, expected) in [
+            ("2주차 2030.03.11 ~ 2030.03.17", Some(2)),
+            ("2030.03.17", None),
+            ("주차", None),
+        ] {
+            let rows = assignments(
+                &assignment.replace("2주차", label),
+                &base,
+                &example_course(),
+            )
+            .unwrap();
+            assert_eq!(rows[0].week, expected);
+        }
+        let quiz = include_str!("../../tests/fixtures/localized/quiz.html");
+        let rows = quizzes(quiz, &base, &example_course()).unwrap();
+        assert_eq!(rows[0].reference, "quiz:8");
+        assert_eq!(rows[0].week, Some(3));
+        assert_eq!(
+            rows[0].closes_at.as_deref(),
+            Some("2030-03-18T14:05:00+09:00")
+        );
+        assert_eq!(rows[0].grade, None);
+        assert!(
+            assignments(
+                &assignment.replace("<th>제출</th>", "<th>제목</th>"),
+                &base,
+                &example_course()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn recognizes_only_visible_empty_messages_in_korean_and_english() {
+        let base = Url::parse(BASE).unwrap();
+        assert!(
+            assignments(
+                "<main>이 강좌에는 과제물들이(가) 없습니다.</main>",
+                &base,
+                &example_course()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            quizzes(
+                "<main>이 강좌에는 퀴즈이(가) 없습니다.</main>",
+                &base,
+                &example_course()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        for tag in ["script", "template", "style", "noscript"] {
+            let html = format!("<main>Changed page<{tag}>There are no assignments</{tag}></main>");
+            assert!(
+                assignments(&html, &base, &example_course()).is_err(),
+                "{tag}"
+            );
+        }
+        assert!(
+            quizzes(
+                "<main>Changed page<div hidden>No quizzes found</div></main>",
+                &base,
+                &example_course()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_korean_report_headers_and_skips_unrelated_tables() {
+        let unrelated = "<table><tr><th>Date</th></tr><tr><td>2030-03-17</td></tr></table>";
+        let report = format!(
+            "{unrelated}<table><tr><th>날짜</th><th>출석</th><th>결석</th></tr><tr><td>3월 17일</td><td>○</td><td></td></tr></table>"
+        );
+        let result = attendance(&report, "42".into()).unwrap();
+        assert_eq!(result.headers, ["날짜", "출석", "결석"]);
+        assert_eq!(result.rows.len(), 1);
+        assert!(attendance(unrelated, "42".into()).is_err());
+        let result = grades("<table><tr><th>성적 항목</th><th>백분율</th></tr><tr><td>Practice</td><td>-</td></tr></table>", "42".into()).unwrap();
+        assert_eq!(result.headers, ["성적 항목", "백분율"]);
+    }
+
+    #[test]
+    fn recognizes_compact_grade_reports_without_optional_columns() {
+        for headers in [
+            ["Grade item", "Grade", "Range", "Feedback"],
+            ["성적 항목", "성적", "범위", "피드백"],
+        ] {
+            let cells = headers.map(|header| format!("<th>{header}</th>")).join("");
+            let html = format!(
+                "<table><tr>{cells}</tr><tr><td>Practice</td><td>-</td><td>0–10</td><td></td></tr></table>"
+            );
+            let report = grades(&html, "42".into()).unwrap();
+            assert_eq!(report.headers, headers);
+            assert_eq!(report.rows.len(), 1);
+        }
+        for html in [
+            "<table><tr><th>Grade item</th></tr></table>",
+            "<table><tr><th>Grade</th><th>Range</th></tr></table>",
+            "<table><tr><th>Percentage</th><th>Contribution</th></tr></table>",
+        ] {
+            assert!(grades(html, "42".into()).is_err());
+        }
+    }
 
     #[test]
     fn parses_report_tables_by_semantics() {

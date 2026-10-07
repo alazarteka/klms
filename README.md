@@ -124,6 +124,12 @@ Run `klms --help` or `klms <command> --help` for the rest of the command
 surface, including activities, quizzes, calendar events, boards, videos, and
 course files.
 
+Coursework indexes and grade/attendance report headers recognize English and
+Korean KLMS labels. Calendar cards prefer structural timestamps and their event
+heading, with English/Korean date text as a fallback in Asia/Seoul. Other text
+locales are not verified; an unrecognized dated event fails agenda generation
+rather than being silently omitted.
+
 For a private history that survives KLMS changes, initialize and synchronize
 the local versioned library explicitly:
 
