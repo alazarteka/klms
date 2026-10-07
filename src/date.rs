@@ -3,6 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SEOUL_OFFSET: &str = "+09:00";
 
 pub fn moodle_datetime(value: &str) -> Option<String> {
+    if let Some(normalized) = korean_datetime(value) {
+        return Some(normalized);
+    }
     let parts: Vec<_> = value.split(',').map(str::trim).collect();
     let (date, time) = match parts.as_slice() {
         [_, date, time] => (*date, *time),
@@ -35,6 +38,88 @@ pub fn moodle_datetime(value: &str) -> Option<String> {
     Some(format!(
         "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00{SEOUL_OFFSET}"
     ))
+}
+
+fn korean_datetime(value: &str) -> Option<String> {
+    let (year, rest) = value.trim().split_once('년')?;
+    let (month, rest) = rest.split_once('월')?;
+    let (day, mut rest) = rest.split_once('일')?;
+    let year = year.trim().parse::<u32>().ok()?;
+    let month = month.trim().parse::<u32>().ok()?;
+    let day = day.trim().parse::<u32>().ok()?;
+    if !(1..=9999).contains(&year) || day == 0 || day > days_in_month(year as i32, month) {
+        return None;
+    }
+    rest = rest.trim();
+    if let Some(weekday) = rest.strip_prefix('(') {
+        rest = weekday.split_once(')')?.1.trim();
+    }
+    let (hour, minute, second) = localized_clock(rest)?;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}"
+    ))
+}
+
+/// Relative calendar labels are resolved against an explicit Seoul date so
+/// tests and callers never accidentally use the machine's local timezone.
+pub fn calendar_datetime(value: &str, today: &str) -> Option<String> {
+    if let Some(normalized) = normalize_datetime(value) {
+        return Some(normalized);
+    }
+    let (day, clock) = value.trim().split_once(',')?;
+    let offset = match day.trim().to_ascii_lowercase().as_str() {
+        "오늘" | "today" => 0,
+        "내일" | "tomorrow" => 1,
+        "어제" | "yesterday" => -1,
+        _ => return None,
+    };
+    let date = add_days(today, offset)?;
+    let (hour, minute, second) = localized_clock(clock.trim())?;
+    Some(format!(
+        "{date}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}"
+    ))
+}
+
+fn localized_clock(value: &str) -> Option<(u32, u32, u32)> {
+    let value = value.trim();
+    let (clock, period) = if let Some(clock) = value.strip_prefix("오전") {
+        (clock.trim(), Some(false))
+    } else if let Some(clock) = value.strip_prefix("오후") {
+        (clock.trim(), Some(true))
+    } else if let Some((clock, suffix)) = value.rsplit_once(' ') {
+        match suffix.to_ascii_lowercase().as_str() {
+            "am" => (clock.trim(), Some(false)),
+            "pm" => (clock.trim(), Some(true)),
+            _ => return None,
+        }
+    } else {
+        (value, None)
+    };
+    let parts: Vec<_> = clock.split(':').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let mut hour = parts[0].parse::<u32>().ok()?;
+    let minute = parts[1].parse::<u32>().ok()?;
+    let second = parts
+        .get(2)
+        .map_or(Some(0), |value| value.parse::<u32>().ok())?;
+    if minute > 59 || second > 59 {
+        return None;
+    }
+    if let Some(pm) = period {
+        if !(1..=12).contains(&hour) {
+            return None;
+        }
+        hour = hour % 12 + if pm { 12 } else { 0 };
+    } else if hour > 23 {
+        return None;
+    }
+    Some((hour, minute, second))
 }
 
 pub fn normalize_datetime(value: &str) -> Option<String> {
@@ -219,7 +304,57 @@ fn civil_from_days(days: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_days, epoch_to_seoul, moodle_datetime, normalize_datetime};
+    use super::{add_days, calendar_datetime, epoch_to_seoul, moodle_datetime, normalize_datetime};
+
+    #[test]
+    fn normalizes_korean_absolute_dates_and_validates_the_clock() {
+        for (input, expected) in [
+            (
+                "2030년 3월 17일(일요일) 오후 11:50",
+                "2030-03-17T23:50:00+09:00",
+            ),
+            ("2030년 3월 17일 오전 12:05", "2030-03-17T00:05:00+09:00"),
+            ("2030년 3월 17일 오후 12:05", "2030-03-17T12:05:00+09:00"),
+            ("2030년 3월 17일 23:50", "2030-03-17T23:50:00+09:00"),
+        ] {
+            assert_eq!(
+                normalize_datetime(input).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "2030년 2월 29일 오후 11:50",
+            "2030년 3월 17일 오후 0:05",
+            "2030년 3월 17일 24:00",
+            "2030년 3월 17일 23:60",
+            "2030년 3월 17일 23:50 trailing",
+        ] {
+            assert!(moodle_datetime(input).is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn relative_calendar_dates_use_the_explicit_seoul_day() {
+        assert_eq!(
+            calendar_datetime("내일 , 23:50", "2030-12-31").as_deref(),
+            Some("2031-01-01T23:50:00+09:00")
+        );
+        assert_eq!(
+            calendar_datetime("오늘, 오전 12:05", "2031-01-01").as_deref(),
+            Some("2031-01-01T00:05:00+09:00")
+        );
+        assert_eq!(
+            calendar_datetime("Yesterday, 11:50 PM", "2031-01-01").as_deref(),
+            Some("2030-12-31T23:50:00+09:00")
+        );
+        let seoul = normalize_datetime("2030-12-31T16:00:00Z").unwrap();
+        assert_eq!(
+            calendar_datetime("Tomorrow, 23:50", &seoul[..10]).as_deref(),
+            Some("2031-01-02T23:50:00+09:00")
+        );
+        assert!(calendar_datetime("someday, 23:50", "2030-12-31").is_none());
+    }
 
     #[test]
     fn normalizes_moodle_deadlines_to_seoul_iso() {
