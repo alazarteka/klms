@@ -8,9 +8,7 @@ targets = [
 
 [advisories]
 db-path = "target/supply-chain-tools/advisory-db"
-ignore = [
-    { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 is an unmaintained transitive dependency through scraper/selectors; no patched release currently exists" },
-]
+ignore = []
 
 [bans]
 multiple-versions = "warn"
