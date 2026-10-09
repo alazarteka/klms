@@ -3,10 +3,11 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use url::Url;
+
+use crate::date::epoch_now;
 
 use crate::error::AppError;
 
@@ -105,7 +106,7 @@ pub fn save(
     let stored = StoredSession {
         version: SESSION_VERSION,
         origin: origin(base_url),
-        created_at: now(),
+        created_at: epoch_now() as u64,
         cookies,
         devices,
     };
@@ -191,13 +192,6 @@ fn stored_origin_matches(stored: &str, current: &Url) -> bool {
 
 fn is_loopback(url: &Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(unix)]

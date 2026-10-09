@@ -5,9 +5,14 @@ mod schema;
 mod storage;
 mod sync;
 
+pub use object_store::digest;
+
 use std::{fmt, str::FromStr};
 
-use crate::{error::AppError, reference::ResourceRef};
+use crate::{
+    error::AppError,
+    reference::{ResourceRef, valid_id},
+};
 
 pub use crate::models::{
     ActivityEntry, ChangeEntry, ContentRecord, EditResult, HistoryEntry, LastSync, LibraryStatus,
@@ -78,10 +83,6 @@ impl fmt::Display for LibraryRef {
             Self::Sync(id) => write!(formatter, "sync:{id}"),
         }
     }
-}
-
-fn valid_id(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn valid_hash(value: &str, length: usize) -> bool {

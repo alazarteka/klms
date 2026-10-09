@@ -18,13 +18,10 @@ selectors.
 | VOD | links discovered from course structure, `/mod/vod/view.php?id=CM` |
 | Session duration | Moodle AJAX methods `core_session_time_remaining`, `core_session_touch` |
 
-Moodle AJAX calls use `/lib/ajax/service.php`, the authenticated page's
-`sesskey`, a fixed allowlisted method name, and a JSON request body. `sesskey`
-is never emitted. A protected local cache lets later timer checks avoid a
-dashboard touch. If the cache is absent or stale, the command bootstraps from
-an authenticated page and reports that this may itself have refreshed the
-timer. A rejected cached key is discarded logically and retried through that
-bootstrap path.
+Moodle AJAX calls use `/lib/ajax/service.php`, the `sesskey` read from a fresh
+`/my/` response, a fixed allowlisted method name, and a JSON request body. The
+`sesskey` is held in memory only and never emitted or persisted, so every timer
+check bootstraps from `/my/`, which may itself refresh the timer.
 
 Classum, Panopto, Zoom, and arbitrary LTI destinations are different origins
 and trust boundaries. Their links may be returned as metadata, but the KLMS

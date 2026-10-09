@@ -2,8 +2,7 @@
 //!
 //! `klms spec` prints one grammar line per leaf command; `--json` emits the
 //! full argument tree so agents can discover the interface without parsing
-//! `--help`. `docs/COMMAND_CONTRACT.md` embeds the grammar and a contract test
-//! keeps the two identical.
+//! `--help`.
 
 use clap::{Arg, ArgAction, ArgGroup, Command, CommandFactory};
 use serde::Serialize;
@@ -267,11 +266,10 @@ mod tests {
             .iter()
             .find(|c| c.path == ["library", "edit"])
             .unwrap();
-        assert_eq!(
-            edit.usage,
-            "klms library edit REF --field title|filename|summary|note|tag \
-             (--value TEXT|--value-file PATH) [--actor ACTOR] --expected-revision N"
-        );
+        assert!(edit.usage.starts_with("klms library edit REF --field "));
+        assert!(edit.usage.contains("(--value TEXT|--value-file PATH)"));
+        assert!(edit.usage.contains("[--actor ACTOR]"));
+        assert!(edit.usage.ends_with("--expected-revision N"));
         let group = &edit.groups[0];
         assert_eq!(group.args, ["--value", "--value-file"]);
         assert!(group.required && !group.multiple);

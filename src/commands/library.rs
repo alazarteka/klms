@@ -16,7 +16,7 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
     match command {
         LibraryCommand::Status => library_status(&corpus),
         LibraryCommand::Search { query, list } => {
-            let (fresh_through, source_complete) = corpus.coverage()?;
+            let coverage = corpus.coverage()?;
             let mut rows = corpus.search(query, list.limit.saturating_add(1))?;
             let truncated = rows.len() > list.limit;
             rows.truncate(list.limit);
@@ -32,12 +32,11 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
                 rows.len(),
                 list.limit,
                 !truncated,
-                fresh_through,
-                source_complete,
+                coverage,
             )
         }
         LibraryCommand::Changes(list) => {
-            let (fresh_through, source_complete) = corpus.coverage()?;
+            let coverage = corpus.coverage()?;
             let mut rows = corpus.changes(list.limit.saturating_add(1))?;
             let truncated = rows.len() > list.limit;
             rows.truncate(list.limit);
@@ -53,8 +52,7 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
                 rows.len(),
                 list.limit,
                 !truncated,
-                fresh_through,
-                source_complete,
+                coverage,
             )
         }
         LibraryCommand::Activity(args) => {
@@ -79,8 +77,7 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
                 rows.len(),
                 args.list.limit,
                 !truncated,
-                None,
-                None,
+                (None, None),
             )
         }
         LibraryCommand::Show { reference } => {
@@ -105,8 +102,7 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
                 rows.len(),
                 list.limit,
                 !truncated,
-                None,
-                None,
+                (None, None),
             )
         }
         LibraryCommand::Content {
