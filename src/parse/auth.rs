@@ -94,9 +94,9 @@ pub fn easy_login_code(html: &str) -> Option<String> {
     if let Some(code) = document
         .select(&accessible)
         .map(|element| element.text().collect::<String>())
-        .find(|text| digits_only(text).is_some())
+        .find_map(digits_only)
     {
-        return digits_only(code);
+        return Some(code);
     }
     let visible = Selector::parse(".auth_number .nember_wrap span").expect("valid selector");
     let code = document

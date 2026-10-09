@@ -1,7 +1,11 @@
 use scraper::Html;
 use url::Url;
 
-use super::shared::{header_name, indexed_rows, selector, semantic_table, text, week_number};
+use super::detail::preview_from_document;
+use super::shared::{
+    IndexedRow, first_row_cells, header_name, indexed_rows, query_id, selector, semantic_table,
+    text, week_number,
+};
 use crate::{
     error::AppError,
     models::{Assignment, Course, Quiz, Report},
@@ -14,114 +18,110 @@ pub fn assignments(
     page_url: &Url,
     course: &Course,
 ) -> Result<Vec<Assignment>, AppError> {
-    let document = Html::parse_document(html);
-    let table = semantic_table(&document, &["week", "name", "due date"])?;
-    let Some(table) = table else {
-        if explicit_empty(&document, "assignment") {
-            return Ok(Vec::new());
-        }
-        return Err(AppError::shape(
-            "assignment index contained no recognizable assignment table",
-        ));
-    };
-    let parsed = indexed_rows(table)?;
-    let mut assignments = Vec::new();
-    for row in parsed {
-        let title = row.value("name")?;
-        let Some(url) = row.link_for("name", page_url)? else {
-            if title.is_some() {
-                return Err(AppError::shape(
-                    "assignment row contained no recognizable detail link",
-                ));
-            }
-            continue;
-        };
-        let Some(id) = super::shared::query_id(&url, &["id"]) else {
-            return Err(AppError::shape(
-                "assignment detail link contained no numeric module id",
-            ));
-        };
-        let due_text = row.value("due date")?;
-        assignments.push(Assignment {
-            id: id.clone(),
-            reference: ResourceRef::Assignment(id).to_string(),
-            course_id: course.id.clone(),
-            course_ref: course.reference.clone(),
-            week: row.value("week")?.as_deref().and_then(week_number),
-            title: title.unwrap_or_else(|| "Untitled assignment".into()),
-            due_at: due_text.as_deref().and_then(crate::date::moodle_datetime),
-            due_text,
-            submission_status: row.value("submit")?,
-            url: safe_url::display(&url),
-        });
-    }
-    Ok(assignments)
+    index_rows(
+        html,
+        page_url,
+        "assignment",
+        &["week", "name", "due date"],
+        &[
+            "there are no assignments",
+            "no assignments found",
+            "과제가 없습니다",
+            "이 강좌에는 과제물들이(가) 없습니다",
+        ],
+        |row, id, title, url| {
+            let due_text = row.value("due date")?;
+            Ok(Assignment {
+                id: id.clone(),
+                reference: ResourceRef::Assignment(id).to_string(),
+                course_id: course.id.clone(),
+                course_ref: course.reference.clone(),
+                week: row.value("week")?.as_deref().and_then(week_number),
+                title,
+                due_at: due_text.as_deref().and_then(crate::date::moodle_datetime),
+                due_text,
+                submission_status: row.value("submit")?,
+                url: safe_url::display(url),
+            })
+        },
+    )
 }
 
 pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>, AppError> {
+    index_rows(
+        html,
+        page_url,
+        "quiz",
+        &["week", "name", "quiz closes"],
+        &[
+            "there are no quizzes",
+            "no quizzes found",
+            "퀴즈가 없습니다",
+            "이 강좌에는 퀴즈이(가) 없습니다",
+        ],
+        |row, id, title, url| {
+            let closes_text = row.value("quiz closes")?;
+            Ok(Quiz {
+                id: id.clone(),
+                reference: ResourceRef::Quiz(id).to_string(),
+                course_id: course.id.clone(),
+                course_ref: course.reference.clone(),
+                week: row.value("week")?.as_deref().and_then(week_number),
+                title,
+                closes_at: closes_text
+                    .as_deref()
+                    .and_then(crate::date::moodle_datetime),
+                closes_text,
+                grade: row.value("grade")?,
+                url: safe_url::display(url),
+            })
+        },
+    )
+}
+
+/// Shared walk over a coursework index table. `build` receives the row, the
+/// numeric module id, the title and the detail URL.
+fn index_rows<T>(
+    html: &str,
+    page_url: &Url,
+    kind: &str,
+    headers: &[&str],
+    empty_phrases: &[&str],
+    build: impl Fn(&IndexedRow, String, String, &Url) -> Result<T, AppError>,
+) -> Result<Vec<T>, AppError> {
     let document = Html::parse_document(html);
-    let table = semantic_table(&document, &["week", "name", "quiz closes"])?;
-    let Some(table) = table else {
-        if explicit_empty(&document, "quiz") {
+    let Some(table) = semantic_table(&document, headers)? else {
+        let page_text = preview_from_document(&document).to_ascii_lowercase();
+        if empty_phrases
+            .iter()
+            .any(|phrase| page_text.contains(phrase))
+        {
             return Ok(Vec::new());
         }
-        return Err(AppError::shape(
-            "quiz index contained no recognizable quiz table",
-        ));
+        return Err(AppError::shape(format!(
+            "{kind} index contained no recognizable {kind} table"
+        )));
     };
-    let parsed = indexed_rows(table)?;
-    let mut quizzes = Vec::new();
-    for row in parsed {
+    let mut items = Vec::new();
+    for row in indexed_rows(table)? {
         let title = row.value("name")?;
         let Some(url) = row.link_for("name", page_url)? else {
             if title.is_some() {
-                return Err(AppError::shape(
-                    "quiz row contained no recognizable detail link",
-                ));
+                return Err(AppError::shape(format!(
+                    "{kind} row contained no recognizable detail link"
+                )));
             }
             continue;
         };
-        let Some(id) = super::shared::query_id(&url, &["id"]) else {
-            return Err(AppError::shape(
-                "quiz detail link contained no numeric module id",
-            ));
+        let Some(id) = query_id(&url, &["id"]) else {
+            return Err(AppError::shape(format!(
+                "{kind} detail link contained no numeric module id"
+            )));
         };
-        let closes_text = row.value("quiz closes")?;
-        quizzes.push(Quiz {
-            id: id.clone(),
-            reference: ResourceRef::Quiz(id).to_string(),
-            course_id: course.id.clone(),
-            course_ref: course.reference.clone(),
-            week: row.value("week")?.as_deref().and_then(week_number),
-            title: title.unwrap_or_else(|| "Untitled quiz".into()),
-            closes_at: closes_text
-                .as_deref()
-                .and_then(crate::date::moodle_datetime),
-            closes_text,
-            grade: row.value("grade")?,
-            url: safe_url::display(&url),
-        });
+        let title = title.unwrap_or_else(|| format!("Untitled {kind}"));
+        items.push(build(&row, id, title, &url)?);
     }
-    Ok(quizzes)
-}
-
-fn explicit_empty(document: &Html, kind: &str) -> bool {
-    let page_text = super::detail::safe_html_preview(&document.html()).to_ascii_lowercase();
-    match kind {
-        "assignment" => {
-            page_text.contains("there are no assignments")
-                || page_text.contains("no assignments found")
-                || page_text.contains("과제가 없습니다")
-                || page_text.contains("이 강좌에는 과제물들이(가) 없습니다")
-        }
-        "quiz" => {
-            page_text.contains("there are no quizzes")
-                || page_text.contains("no quizzes found")
-                || page_text.contains("퀴즈가 없습니다")
-                || page_text.contains("이 강좌에는 퀴즈이(가) 없습니다")
-        }
-        _ => false,
-    }
+    Ok(items)
 }
 
 pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
@@ -148,11 +148,7 @@ fn table_report(
     let rows = selector("tr")?;
     let cells = selector("th, td")?;
     for table in document.select(&tables) {
-        let headers: Vec<_> = table
-            .select(&rows)
-            .next()
-            .map(|row| row.select(&cells).map(text).collect())
-            .unwrap_or_default();
+        let headers = first_row_cells(table, &rows, &cells);
         let normalized: Vec<_> = headers.iter().map(|header| header_name(header)).collect();
         let recognizable = match anchor {
             Some(anchor) => {

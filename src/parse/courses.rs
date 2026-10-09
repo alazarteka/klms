@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use scraper::{ElementRef, Html};
 use url::Url;
 
-use super::shared::{first_text, has_any, link_items, selected_value, selector, text, week_number};
+use super::shared::{
+    first_text, has_any, link_items, module_kind, selected_value, selector, text, week_number,
+};
 use crate::{
     error::AppError,
     models::{Activity, Course, CourseDetail, Dashboard},
@@ -26,7 +28,6 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
         &document,
         base_url,
         ".block_timeline a[href], [data-region=event-list-content] a[href]",
-        usize::MAX,
     )?;
     Ok(Dashboard {
         term,
@@ -154,7 +155,7 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>,
 
 fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activity>, AppError> {
     let modules = selector("li.activity, .activity-item[data-id]")?;
-    let anchors = selector(".activityinstance a[href], a.aalink[href], a[href]")?;
+    let anchors = selector("a[href]")?;
     let downloads = selector("[onclick*='downloadFile']")?;
     let names = selector(".instancename, .activityname, .activity-title")?;
     let headings = selector(".sectionname, .section-title, h3")?;
@@ -187,14 +188,7 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
             .value()
             .classes()
             .find_map(|class| class.strip_prefix("modtype_").map(str::to_owned))
-            .or_else(|| {
-                url.as_ref().and_then(|url| {
-                    let parts: Vec<_> = url.path_segments()?.collect();
-                    parts
-                        .windows(2)
-                        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
-                })
-            })
+            .or_else(|| url.as_ref().and_then(module_kind))
             .unwrap_or_else(|| "activity".into());
         let section = module
             .ancestors()
