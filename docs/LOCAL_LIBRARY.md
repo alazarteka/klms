@@ -43,21 +43,9 @@ running. Preserve a corrupt library before attempting recovery.
 
 ## Commands
 
-```text
-klms library status
-klms library sync [--course COURSE] [--notices] [--files] [--download changed]
-klms library search QUERY [--limit N]
-klms library changes [--limit N]
-klms library activity [--subject REF] [--limit N]
-klms library show REF
-klms library history REF [--limit N]
-klms library content REF [--max-bytes N]
-klms library export REF --out PATH
-klms library edit REF --field FIELD (--value TEXT | --value-file PATH)
-                  [--actor ACTOR] --expected-revision N
-klms library retract REF [--actor ACTOR]
-klms library relations add LEFT RIGHT --kind KIND [--actor ACTOR]
-```
+The `klms library` subcommands are listed by `klms library --help` and `klms spec`;
+grammar rules are in [COMMAND_CONTRACT.md](COMMAND_CONTRACT.md) and output shapes
+in [JSON.md](JSON.md).
 
 Only `sync` loads a session. With no flags, sync records courses, manifests,
 and typed activity details. `--notices` walks bounded board pagination.
@@ -69,9 +57,7 @@ failures make the run incomplete.
 
 Notice observations contain the post title, body, body links, and attachments,
 not surrounding navigation, dialogs, or view counters. Unrecognized notice
-structure fails visibly rather than storing the whole page. After upgrading
-from broad page extraction, the first notice resync can record normalization
-changes; old observations and change events are not rewritten. Obsolete notice
+structure fails visibly rather than storing the whole page. Obsolete notice
 links stop appearing in current search but remain available by reference with
 their history and curation. Historical downloaded files remain searchable.
 
@@ -100,11 +86,10 @@ file or a resource without recorded file candidates, inspect its stored
 metadata and observation state; local absence does not prove remote absence
 or guarantee that another sync will recover bytes.
 
-`content` returns a bounded preview and reports `truncated` inside its data
-object. `export` verifies the digest and refuses an existing destination.
-Multiple downloaded representations produce `CONTENT_UNAVAILABLE` with
-candidate references and a selection hint; choose a representation or exact
-`sha256:` value. Missing content errors explain the appropriate recovery path.
+`content` returns a bounded preview. `export` verifies the digest and refuses
+an existing destination. Multiple downloaded representations produce
+`CONTENT_UNAVAILABLE` with candidate references; choose a representation or
+exact `sha256:` value.
 
 Curation subjects and relation endpoints must be courses, resources, or
 representations. A `sha256:` reference identifies immutable bytes: it can be
@@ -114,28 +99,21 @@ inspected or exported, but cannot receive edits or serve as a relation endpoint.
 Retraction never deletes its assertion or relation. Effective fields use the
 highest active revision and include assertion provenance.
 
-The JSON envelope is schema `"4"`; the SQLite schema uses `user_version = 1`.
 Local collection `complete` means the local limit did not truncate results.
 `source_complete` describes the latest global sync, while `fresh_through` is
-the finish time of the latest complete, source-complete global sync.
-
-Human status separates storage readiness from the last sync attempt, scope,
-times, and last complete global sync. Course-scoped success does not establish
-global coverage. Local lists warn when truncated and report empty results;
-warnings appear on stderr in human mode and in the JSON envelope otherwise.
-Partial syncs retain exit status 0 but explicitly report `incomplete` and their
-failures; callers must inspect the result rather than treating exit 0 as proof
-of complete source coverage.
+the finish time of the latest complete, source-complete global sync. Course-scoped
+success does not establish global coverage. Local lists warn when truncated
+(stderr in human mode, `warnings` in JSON). Partial syncs exit 0 but report
+`incomplete` and their failures; callers must inspect the result.
 
 An attempt without a completion record is exposed as `unfinished`, whether its
-process is still active or was interrupted. Status does not track process
-liveness. Check the original process and retry the same command once it has
-stopped. This projection does not rewrite persisted `running` rows, fabricate
-finish times, or change the last known complete global-sync time.
+process is still active or was interrupted. Check the original process and retry
+the same command once it has stopped. Persisted `running` rows are never
+rewritten.
 
 ## Errors and validation boundary
 
-Library-specific errors are `MIGRATION_REQUIRED`, `CORPUS_BUSY`,
+Library-specific error codes are `MIGRATION_REQUIRED`, `CORPUS_BUSY`,
 `CURATION_CONFLICT`, `CONTENT_UNAVAILABLE`, `CORPUS_CORRUPT`, and
 `LIBRARY_IO`. Validation covers synthetic integration cases and sampled live
 notice sync and file downloads, not every course or file type.

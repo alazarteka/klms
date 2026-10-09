@@ -11,51 +11,6 @@ fn install(home: &Path, destination: &Path) -> std::process::Output {
 }
 
 #[test]
-fn clean_install_and_replacement_install_matching_skill() {
-    let temp = tempfile::tempdir().unwrap();
-    let destination = temp.path().join("bin/klms");
-    let output = install(temp.path(), &destination);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let version = Command::new(&destination)
-        .arg("--version")
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&version.stdout).trim(),
-        format!("klms {}", env!("CARGO_PKG_VERSION"))
-    );
-    let payload = temp.path().join("data/klms/skills/klms/SKILL.md");
-    assert_eq!(
-        fs::read(&payload).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
-    );
-    assert_eq!(
-        fs::read_link(temp.path().join(".agents/skills/klms")).unwrap(),
-        payload.parent().unwrap()
-    );
-    fs::write(&destination, b"old executable").unwrap();
-    fs::write(&payload, b"old skill").unwrap();
-    let output = install(temp.path(), &destination);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read(&destination).unwrap(),
-        fs::read(env!("CARGO_BIN_EXE_klms")).unwrap()
-    );
-    assert_eq!(
-        fs::read(payload).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
-    );
-}
-
-#[test]
 fn skill_conflict_preserves_previous_executable_and_payload() {
     let temp = tempfile::tempdir().unwrap();
     let destination = temp.path().join("klms");

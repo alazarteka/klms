@@ -7,8 +7,7 @@ CREATE TABLE sync_runs (
   scope TEXT NOT NULL,
   status TEXT NOT NULL
     CHECK (status IN ('running','complete','incomplete','failed')),
-  source_complete INTEGER NOT NULL DEFAULT 0,
-  failures TEXT NOT NULL DEFAULT '[]'
+  source_complete INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE TABLE courses (
   id INTEGER PRIMARY KEY,
@@ -71,9 +70,6 @@ CREATE TABLE representations (
   first_seen INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
   not_observed_since INTEGER,
-  observed_etag TEXT,
-  observed_last_modified TEXT,
-  observed_length INTEGER,
   observed_mime TEXT,
   UNIQUE(resource_id, url)
 ) STRICT;

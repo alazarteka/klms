@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use super::*;
 #[test]
 fn stable_versions_and_no_downgrade_comparison() {

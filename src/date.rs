@@ -200,13 +200,15 @@ fn iso_datetime_to_seoul(value: &str) -> Option<String> {
     epoch_to_seoul(unix)
 }
 
-pub fn seoul_today() -> String {
-    let seconds = SystemTime::now()
+pub fn epoch_now() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-        + 9 * 60 * 60;
-    civil_from_days(seconds.div_euclid(86_400))
+}
+
+pub fn seoul_today() -> String {
+    civil_from_days((epoch_now() + 9 * 60 * 60).div_euclid(86_400))
 }
 
 pub fn epoch_to_seoul(timestamp: i64) -> Option<String> {

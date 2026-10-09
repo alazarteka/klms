@@ -3,9 +3,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use super::{
     Corpus, EditResult, LibraryRef, RelationResult, RetractionResult,
     query::{ACTIVE_RELATION, current_digest, effective_field, refresh_subject},
-    storage::now,
 };
-use crate::error::AppError;
+use crate::{date::epoch_now as now, error::AppError};
 
 impl Corpus {
     pub fn edit(
