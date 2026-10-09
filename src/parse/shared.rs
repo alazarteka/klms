@@ -60,6 +60,28 @@ pub(super) fn has_any(document: &Html, selectors: &[&str]) -> Result<bool, AppEr
     Ok(false)
 }
 
+pub(super) const NEXT_PAGE_SELECTORS: &[&str] = &[
+    "a[rel=next]",
+    ".pagination .next a",
+    "a[data-page-number][aria-label*=Next]",
+];
+
+pub(super) fn has_next_link(document: &Html) -> Result<bool, AppError> {
+    has_any(document, NEXT_PAGE_SELECTORS)
+}
+
+pub(super) fn first_row_cells(
+    table: ElementRef<'_>,
+    rows: &Selector,
+    cells: &Selector,
+) -> Vec<String> {
+    table
+        .select(rows)
+        .next()
+        .map(|row| row.select(cells).map(text).collect())
+        .unwrap_or_default()
+}
+
 pub(super) fn semantic_table<'a>(
     document: &'a Html,
     expected: &[&str],
@@ -68,15 +90,10 @@ pub(super) fn semantic_table<'a>(
     let rows = selector("tr")?;
     let cells = selector("th, td")?;
     Ok(document.select(&tables).find(|table| {
-        let headers: Vec<_> = table
-            .select(&rows)
-            .next()
-            .map(|row| {
-                row.select(&cells)
-                    .map(|cell| header_name(&text(cell)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let headers: Vec<_> = first_row_cells(*table, &rows, &cells)
+            .iter()
+            .map(|header| header_name(header))
+            .collect();
         expected
             .iter()
             .all(|needle| headers.iter().any(|header| header.contains(needle)))
@@ -119,16 +136,14 @@ pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<Vec<IndexedRow>, App
     Ok(parsed)
 }
 
-pub(super) fn link_items(
-    document: &Html,
+fn collect_links<'a>(
+    anchors: impl Iterator<Item = ElementRef<'a>>,
     base_url: &Url,
-    css: &str,
-    limit: usize,
-) -> Result<Vec<LinkItem>, AppError> {
-    let selector = selector(css)?;
+    limit: Option<usize>,
+) -> Vec<LinkItem> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for anchor in document.select(&selector) {
+    for anchor in anchors {
         let title = text(anchor);
         let Some(url) = anchor
             .value()
@@ -144,11 +159,20 @@ pub(super) fn link_items(
             title,
             url: safe_url::display(&url),
         });
-        if rows.len() == limit {
+        if Some(rows.len()) == limit {
             break;
         }
     }
-    Ok(rows)
+    rows
+}
+
+pub(super) fn link_items(
+    document: &Html,
+    base_url: &Url,
+    css: &str,
+) -> Result<Vec<LinkItem>, AppError> {
+    let selector = selector(css)?;
+    Ok(collect_links(document.select(&selector), base_url, None))
 }
 
 pub(super) fn link_items_in(
@@ -157,29 +181,7 @@ pub(super) fn link_items_in(
     limit: usize,
 ) -> Result<Vec<LinkItem>, AppError> {
     let anchors = selector("a[href]")?;
-    let mut seen = HashSet::new();
-    let mut rows = Vec::new();
-    for anchor in root.select(&anchors) {
-        let title = text(anchor);
-        let Some(url) = anchor
-            .value()
-            .attr("href")
-            .and_then(|href| base_url.join(href).ok())
-        else {
-            continue;
-        };
-        if title.is_empty() || !seen.insert(url.to_string()) {
-            continue;
-        }
-        rows.push(LinkItem {
-            title,
-            url: safe_url::display(&url),
-        });
-        if rows.len() == limit {
-            break;
-        }
-    }
-    Ok(rows)
+    Ok(collect_links(root.select(&anchors), base_url, Some(limit)))
 }
 
 pub(super) fn first_text(document: &Html, css: &str) -> Result<Option<String>, AppError> {
@@ -279,6 +281,13 @@ pub(super) fn week_number(value: &str) -> Option<u32> {
         .take_while(char::is_ascii_digit)
         .collect();
     number.chars().rev().collect::<String>().parse().ok()
+}
+
+pub(super) fn module_kind(url: &Url) -> Option<String> {
+    let parts: Vec<_> = url.path_segments()?.collect();
+    parts
+        .windows(2)
+        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
 }
 
 pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {

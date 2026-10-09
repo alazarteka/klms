@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use scraper::{ElementRef, Html};
 use url::Url;
 
-use super::shared::{has_any, query_id, selector, text, visible_text};
+use super::shared::{has_any, has_next_link, module_kind, query_id, selector, text, visible_text};
 use crate::{date, error::AppError, models::CalendarEvent, reference::ResourceRef, safe_url};
 
 pub struct CalendarPage {
@@ -78,7 +78,7 @@ fn calendar_page_on(html: &str, base_url: &Url, today: &str) -> Result<CalendarP
             url: safe_url::display(&url),
         });
     }
-    let explicit_empty = super::detail::safe_html_preview(html)
+    let explicit_empty = super::detail::preview_from_document(&document)
         .to_ascii_lowercase()
         .contains("there are no upcoming events");
     if rows.is_empty()
@@ -106,14 +106,7 @@ fn calendar_page_on(html: &str, base_url: &Url, today: &str) -> Result<CalendarP
         .iter()
         .filter(|event| event.course_id.is_none())
         .count();
-    let has_next = has_any(
-        &document,
-        &[
-            "a[rel=next]",
-            ".pagination .next a",
-            "a[data-page-number][aria-label*=Next]",
-        ],
-    )?;
+    let has_next = has_next_link(&document)?;
     Ok(CalendarPage {
         events: rows,
         complete: skipped == 0 && !has_next,
@@ -230,13 +223,6 @@ fn event_time(
         when_text = Some("[unrecognized event timestamp]".into());
     }
     Ok((starts_at, when_text))
-}
-
-fn module_kind(url: &Url) -> Option<String> {
-    let parts: Vec<_> = url.path_segments()?.collect();
-    parts
-        .windows(2)
-        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
 }
 
 #[cfg(test)]

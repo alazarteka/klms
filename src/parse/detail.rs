@@ -1,8 +1,10 @@
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
 use url::Url;
 
-use super::shared::{first_text, has_any, link_items_in, query_id, selector, visible_text};
+use super::shared::{
+    NEXT_PAGE_SELECTORS, first_text, has_next_link, link_items_in, query_id, selector, visible_text,
+};
 use crate::{
     error::AppError,
     models::{LinkItem, ResourceDetail},
@@ -47,13 +49,7 @@ pub fn resource_detail(
             ".page-header-headings h1, #page-header h1, h1, title",
         )?
         .unwrap_or_else(|| format!("{kind} detail"));
-        let content = ["#region-main", "[role=main]", "main", "body"]
-            .into_iter()
-            .find_map(|css| {
-                Selector::parse(css)
-                    .ok()
-                    .and_then(|selector| document.select(&selector).next())
-            });
+        let content = content_root(&document);
         let text_value = content
             .map(visible_text)
             .map(strip_embedded_active_markup)
@@ -138,21 +134,17 @@ fn notice_content(
 
 pub fn has_next_page(html: &str) -> Result<bool, AppError> {
     let document = Html::parse_document(html);
-    has_any(
-        &document,
-        &[
-            "a[rel=next]",
-            ".pagination .next a",
-            "a[data-page-number][aria-label*=Next]",
-        ],
-    )
+    has_next_link(&document)
 }
 
 pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppError> {
     let document = Html::parse_document(html);
-    let selector = selector(
-        "a[rel=next][href], .pagination .next a[href], a[data-page-number][aria-label*=Next][href]",
-    )?;
+    let joined = NEXT_PAGE_SELECTORS
+        .iter()
+        .map(|css| format!("{css}[href]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selector = selector(&joined)?;
     let Some(href) = document
         .select(&selector)
         .find_map(|node| node.value().attr("href"))
@@ -172,7 +164,17 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
 }
 
 pub fn safe_html_preview(html: &str) -> String {
-    let document = Html::parse_document(html);
+    preview_from_document(&Html::parse_document(html))
+}
+
+pub(super) fn preview_from_document(document: &Html) -> String {
+    content_root(document)
+        .map(visible_text)
+        .map(strip_embedded_active_markup)
+        .unwrap_or_default()
+}
+
+fn content_root(document: &Html) -> Option<ElementRef<'_>> {
     ["#region-main", "[role=main]", "main", "body"]
         .into_iter()
         .find_map(|css| {
@@ -180,9 +182,6 @@ pub fn safe_html_preview(html: &str) -> String {
                 .ok()
                 .and_then(|selector| document.select(&selector).next())
         })
-        .map(visible_text)
-        .map(strip_embedded_active_markup)
-        .unwrap_or_default()
 }
 
 fn strip_embedded_active_markup(mut text: String) -> String {
