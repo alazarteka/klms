@@ -1,4 +1,5 @@
-use super::{Corpus, SyncSummary, object_store, query::refresh_subject, storage::now};
+use super::{Corpus, SyncSummary, object_store, query::refresh_subject};
+use crate::date::epoch_now as now;
 use crate::{
     client::{KlmsClient, RemoteMetadata},
     error::AppError,
@@ -80,11 +81,9 @@ impl Corpus {
         match self.collect_sync(client, base_url, filter, options, run_id, started_at) {
             Ok(summary) => Ok(summary),
             Err(error) => {
-                let failures = serde_json::to_string(&vec![error.message.clone()])
-                    .unwrap_or_else(|_| "[]".into());
                 let _ = self.storage.connection.execute(
-                    "UPDATE sync_runs SET finished_at=?1,status='failed',failures=?2 WHERE id=?3",
-                    params![now(), failures, run_id],
+                    "UPDATE sync_runs SET finished_at=?1,status='failed' WHERE id=?2",
+                    params![now(), run_id],
                 );
                 Err(error)
             }
@@ -228,19 +227,9 @@ impl Corpus {
             [run_id],
             |row| row.get::<_, i64>(0),
         )? as u64;
-        let encoded_failures = serde_json::to_string(&failures)
-            .map_err(|error| AppError::internal(error.to_string()))?;
         self.storage.connection.execute(
-            "UPDATE sync_runs
-                SET finished_at=?1,status=?2,source_complete=?3,failures=?4
-              WHERE id=?5",
-            params![
-                now(),
-                status,
-                source_complete as i64,
-                encoded_failures,
-                run_id
-            ],
+            "UPDATE sync_runs SET finished_at=?1,status=?2,source_complete=?3 WHERE id=?4",
+            params![now(), status, source_complete as i64, run_id],
         )?;
         Ok(SyncSummary {
             reference: format!("sync:{run_id}"),
@@ -366,7 +355,7 @@ impl Corpus {
                     &format!("representation:{}", target.id),
                     Some(&format!("sha256:{}", previous.sha256)),
                     Some(&format!("sha256:{}", object.sha256)),
-                    json!({}),
+                    None,
                 )?;
             }
             transaction.commit()?;
@@ -375,17 +364,8 @@ impl Corpus {
     }
     fn update_metadata(&self, id: i64, metadata: &RemoteMetadata) -> Result<(), AppError> {
         self.storage.connection.execute(
-            "UPDATE representations
-                SET observed_etag=?1,observed_last_modified=?2,
-                    observed_length=?3,observed_mime=?4
-              WHERE id=?5",
-            params![
-                metadata.etag,
-                metadata.last_modified,
-                metadata.content_length.map(|value| value as i64),
-                metadata.content_type,
-                id
-            ],
+            "UPDATE representations SET observed_mime=?1 WHERE id=?2",
+            params![metadata.content_type, id],
         )?;
         Ok(())
     }
@@ -643,7 +623,7 @@ fn upsert_course(
             &course.reference,
             previous.as_deref(),
             Some(&digest),
-            json!({"title": course.title}),
+            Some(json!({"title": course.title})),
         )?;
     }
     Ok(id)
@@ -740,7 +720,7 @@ fn upsert_resource(
             &resource.reference,
             previous,
             Some(&digest),
-            json!({"kind": resource.kind}),
+            Some(json!({"kind": resource.kind})),
         )?;
     }
     if let (Some(before), Some(after)) = (previous_state.as_deref(), desired) {
@@ -758,7 +738,7 @@ fn upsert_resource(
                 &resource.reference,
                 None,
                 None,
-                json!({}),
+                None,
             )?;
         }
     }
@@ -823,7 +803,7 @@ fn upsert_representation(
             &format!("representation:{id}"),
             previous,
             Some(&digest),
-            json!({}),
+            None,
         )?;
     }
     if restored {
@@ -834,11 +814,51 @@ fn upsert_representation(
             &format!("representation:{id}"),
             None,
             None,
-            json!({}),
+            None,
         )?;
     }
     refresh_subject(transaction, &format!("representation:{id}"))?;
     Ok(id)
+}
+/// Rows selected as (`id`, `key`) that `seen` does not claim are marked
+/// missing, with one recorded change each.
+struct Missing<'a> {
+    select: &'a str,
+    update: &'a str,
+    kind: &'a str,
+    details: Option<Value>,
+}
+fn mark_missing(
+    transaction: &Transaction<'_>,
+    (run_id, at): (i64, i64),
+    missing: Missing<'_>,
+    select_params: impl rusqlite::Params,
+    seen: impl Fn(i64, &str) -> bool,
+    subject: impl Fn(i64, &str) -> String,
+) -> Result<(), AppError> {
+    let rows = {
+        let mut statement = transaction.prepare(missing.select)?;
+        statement
+            .query_map(select_params, |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, key) in rows {
+        if !seen(id, &key) {
+            transaction.execute(missing.update, params![at, id])?;
+            change(
+                transaction,
+                (run_id, at),
+                missing.kind,
+                &subject(id, &key),
+                None,
+                None,
+                missing.details.clone(),
+            )?;
+        }
+    }
+    Ok(())
 }
 fn mark_missing_courses(
     transaction: &Transaction<'_>,
@@ -846,33 +866,19 @@ fn mark_missing_courses(
     at: i64,
     seen: &HashSet<i64>,
 ) -> Result<(), AppError> {
-    let rows = {
-        let mut statement =
-            transaction.prepare("SELECT id,ref FROM courses WHERE remote_state='listed'")?;
-        statement
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, reference) in rows {
-        if !seen.contains(&id) {
-            transaction.execute(
-                "UPDATE courses SET remote_state='not_listed',not_listed_since=?1 WHERE id=?2",
-                params![at, id],
-            )?;
-            change(
-                transaction,
-                (run_id, at),
-                "course_not_listed",
-                &reference,
-                None,
-                None,
-                json!({}),
-            )?;
-        }
-    }
-    Ok(())
+    mark_missing(
+        transaction,
+        (run_id, at),
+        Missing {
+            select: "SELECT id,ref FROM courses WHERE remote_state='listed'",
+            update: "UPDATE courses SET remote_state='not_listed',not_listed_since=?1 WHERE id=?2",
+            kind: "course_not_listed",
+            details: None,
+        },
+        [],
+        |id, _| seen.contains(&id),
+        |_, reference| reference.to_owned(),
+    )
 }
 fn mark_missing_resources(
     transaction: &Transaction<'_>,
@@ -881,36 +887,21 @@ fn mark_missing_resources(
     course_ref: &str,
     seen: Option<&HashSet<String>>,
 ) -> Result<(), AppError> {
-    let rows = {
-        let mut statement = transaction.prepare(
-            "SELECT r.id,r.ref FROM resources r JOIN courses c ON c.id=r.course_id
+    mark_missing(
+        transaction,
+        (run_id, at),
+        Missing {
+            select: "SELECT r.id,r.ref FROM resources r JOIN courses c ON c.id=r.course_id
               WHERE c.ref=?1 AND r.remote_state='present' AND r.kind!='notice'",
-        )?;
-        statement
-            .query_map([course_ref], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, reference) in rows {
-        if !seen.is_some_and(|values| values.contains(&reference)) {
-            transaction.execute(
-                "UPDATE resources SET remote_state='not_observed',
+            update: "UPDATE resources SET remote_state='not_observed',
                         not_observed_since=?1 WHERE id=?2",
-                params![at, id],
-            )?;
-            change(
-                transaction,
-                (run_id, at),
-                "resource_not_observed",
-                &reference,
-                None,
-                None,
-                json!({"collection": "course_manifest"}),
-            )?;
-        }
-    }
-    Ok(())
+            kind: "resource_not_observed",
+            details: Some(json!({"collection": "course_manifest"})),
+        },
+        [course_ref],
+        |_, reference| seen.is_some_and(|values| values.contains(reference)),
+        |_, reference| reference.to_owned(),
+    )
 }
 fn mark_missing_representations(
     transaction: &Transaction<'_>,
@@ -919,35 +910,21 @@ fn mark_missing_representations(
     resource_id: i64,
     seen: &HashSet<String>,
 ) -> Result<(), AppError> {
-    let rows = {
-        let mut statement = transaction.prepare(
-            "SELECT id,url FROM representations
+    mark_missing(
+        transaction,
+        (run_id, at),
+        Missing {
+            select: "SELECT id,url FROM representations
               WHERE resource_id=?1 AND remote_state='present'",
-        )?;
-        statement
-            .query_map([resource_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, url) in rows {
-        if !seen.contains(&url) {
-            transaction.execute(
-                "UPDATE representations SET remote_state='not_observed',
+            update: "UPDATE representations SET remote_state='not_observed',
                         not_observed_since=?1 WHERE id=?2",
-                params![at, id],
-            )?;
-            change(
-                transaction,
-                (run_id, at),
-                "representation_not_observed",
-                &format!("representation:{id}"),
-                None,
-                None,
-                json!({"collection": "resource_detail"}),
-            )?;
-        }
-    }
+            kind: "representation_not_observed",
+            details: Some(json!({"collection": "resource_detail"})),
+        },
+        [resource_id],
+        |_, url| seen.contains(url),
+        |id, _| format!("representation:{id}"),
+    )?;
     // Also clear stale index entries left by earlier versions after a link
     // had already become not_observed. Keep all history and file entries.
     transaction.execute(
@@ -1037,7 +1014,7 @@ fn change(
     subject: &str,
     before: Option<&str>,
     after: Option<&str>,
-    details: Value,
+    details: Option<Value>,
 ) -> Result<(), AppError> {
     transaction.execute(
         "INSERT INTO remote_changes(
@@ -1050,7 +1027,7 @@ fn change(
             subject,
             before,
             after,
-            details.to_string()
+            details.map_or_else(|| "{}".to_owned(), |value| value.to_string())
         ],
     )?;
     Ok(())

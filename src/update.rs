@@ -10,9 +10,8 @@ use std::{
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-use crate::{client::release_bytes as fetch, error::AppError, output, skill};
+use crate::{client::release_bytes as fetch, corpus::digest, error::AppError, output, skill};
 
 const REPO: &str = "alazarteka/klms";
 const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
@@ -231,10 +230,7 @@ fn verify_checksum(bytes: &[u8], checksum: &[u8], name: &str) -> Result<(), AppE
     let text =
         std::str::from_utf8(checksum).map_err(|_| AppError::upstream("invalid checksum file"))?;
     let fields: Vec<_> = text.split_whitespace().collect();
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let digest = digest(bytes);
     if fields.len() != 2 || fields[0] != digest || fields[1].trim_start_matches('*') != name {
         return Err(AppError::upstream(
             "release archive checksum verification failed",
