@@ -29,36 +29,24 @@ fixture-backed loopback integration tests.
 
 ## Dependency policy
 
-Dependency policy is evaluated before any project build, test, procedural
-macro, or dependency build script executes in CI:
+Dependencies are pinned to exact versions and `Cargo.lock` is committed. CI
+runs `cargo-deny` before compiling anything:
 
 ```bash
-./tests/supply_chain_contract.sh
-./scripts/cargo-deny.sh --log-level info --locked check advisories bans sources licenses
-./scripts/cargo-vet.sh check --locked --no-registry-suggestions
+./scripts/cargo-deny.sh check advisories bans sources licenses
 ```
 
-`cargo-deny` rejects RustSec advisories, malware, yanked dependencies, unknown
-registries, Git dependencies, wildcard requirements, and unapproved licenses.
-`deny.toml` independently blocks the malicious crates and exact compromised
-versions identified in the 2026-08-20 Rust supply-chain incident.
+The script downloads a pinned `cargo-deny` release and verifies its SHA-256
+before extracting or running it. `deny.toml` rejects RustSec advisories,
+yanked crates, unknown registries, repository-hosted dependencies, wildcard
+requirements, and unapproved licenses, and blocks the malicious crates and
+compromised versions from the 2026-08-20 Rust supply-chain incident.
 
-`cargo-vet` records exact-version trust decisions and prevents silent graph
-drift. An exemption is review debt, not proof that code is safe. New or updated
-third-party code requires an explicit audit, trusted import, or documented
-reviewed exemption in the same change.
-
-All external GitHub Actions are pinned to full commit SHAs. Workflows use
-read-only permissions by default, do not persist checkout credentials, and run
-the dependency gates before the first Cargo compilation command.
-
-Neither a clean advisory scan nor a cargo-vet ledger proves that unknown code
-is benign. Review build scripts, procedural macros, publisher changes, unusual
-file access, network behavior, and newly introduced native code manually.
+All external workflow actions are pinned to full commit SHAs, and workflows use
+read-only permissions and do not persist checkout credentials. Dependabot
+proposes updates; review build scripts, procedural macros, and publisher
+changes by hand, since a clean advisory scan does not prove code is benign.
 
 The HTML selector stack includes MPL-2.0 dependencies. Linking and ordinary
 use are permitted; copying or modifying MPL-covered source requires preserving
 the license obligations for the affected files.
-
-See [docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) for the required
-update sequence.
