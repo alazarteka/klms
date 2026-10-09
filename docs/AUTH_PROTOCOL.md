@@ -48,11 +48,10 @@ retained for later login policy checks.
 
 ## Persistent boundary
 
-After a successful link, only cookie pairs issued by the KLMS host at `/` and
-trusted-device identifiers are retained. General KAIST SSO cookies, passwords,
-verification codes, encryption keys, raw HTML, and Moodle `sesskey` values are
-discarded. The versioned session file is atomically written with private Unix
-permissions. `auth logout` deletes this file only.
+After a successful link, only KLMS-host cookies and trusted-device identifiers
+are retained; everything else is discarded. The storage policy and file
+permissions are in [SECURITY.md](../SECURITY.md). `auth logout` deletes the
+session file only.
 
 All known result codes are mapped in `src/auth/codes.rs`. Any unknown result
 fails closed as `AUTH_PROTOCOL_CHANGED` so upstream changes cannot silently

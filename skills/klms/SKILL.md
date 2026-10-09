@@ -74,9 +74,6 @@ Check the original process before retrying the same command once it has stopped.
 Do not infer liveness or rewrite history from this status. Partial syncs still
 exit 0: inspect `data.status`, `failures`, `truncated`, and `warnings`.
 
-Notice parsing excludes page controls, navigation, and view counters. The first
-resync after upgrading older observations can record normalization changes;
-preserve those historical records rather than deleting apparent duplicates.
 No-longer-observed notice links are absent from current search, but their
 history and curation remain accessible by reference.
 
@@ -143,9 +140,8 @@ Panopto, Zoom, or other external links as if they shared KLMS authorization.
 Remote operations are read-only except `klms auth extend`. Use that command
 only when the user asks to extend the current session or when preserving an
 active session is necessary for the task. It is safe to retry. `auth time-left`
-reports the server value, but its first dashboard bootstrap may itself refresh
-the timer; preserve the `bootstrap_may_have_extended_session` field when
-explaining the result.
+bootstraps from the dashboard, which may itself refresh the timer; preserve the
+`bootstrap_may_have_extended_session` field when explaining the result.
 
 Do not reinterpret access as authorization to submit work, start quizzes,
 check into attendance, or post messages. Downloads require an explicit `--out`

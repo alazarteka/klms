@@ -23,6 +23,10 @@ CLI -> commands -> authenticated client + parsers -> models -> output
   here.
 - `models`: typed records returned by commands.
 - `reference`: canonical resource-reference parsing and endpoint mapping.
+- `course_pages`: course activities across paged week formats.
+- `safe_url`: URL redaction for diagnostics and raw reads.
+- `spec`: the executable command grammar emitted by `klms spec`.
+- `error`: typed application errors and their codes.
 - `date`: narrow KLMS date normalization and Korea-time window arithmetic.
 - `present`: scannable human representations of typed records.
 - `output`: versioned JSON envelopes, human rendering, terminal sanitization, and
@@ -38,13 +42,10 @@ CLI -> commands -> authenticated client + parsers -> models -> output
   self-update both invoke the candidate's internal installer; no second binary
   replacement implementation exists in shell.
 
-The private versioned library is the CLI's one persistent store. No provider
-framework, service container, or plugin registry is introduced.
-
-Persistent state is limited to explicitly invoked local features: a mode-0600
-owned-session record, the installed companion skill, and the private versioned
-library described in `docs/LOCAL_LIBRARY.md`. Moodle session keys are kept only
-in memory. Consequently, `auth time-left` bootstraps from the dashboard and
+Persistent state is limited to the owned-session record, the installed
+companion skill, and the local library ([LOCAL_LIBRARY.md](LOCAL_LIBRARY.md)).
+What may be stored is defined in [SECURITY.md](../SECURITY.md). Moodle session
+keys live only in memory, so `auth time-left` bootstraps from the dashboard and
 discloses that this read may refresh activity time.
 
 ## Trust boundaries
@@ -68,10 +69,9 @@ content-read-only: they do not submit coursework or change course data, though
 KLMS itself may refresh its session activity timer when serving an authenticated
 page. Commands that make a diagnostic bootstrap read disclose that effect.
 
-All requests are bounded while streaming and have configurable, capped
-timeouts. Moodle AJAX methods are fixed in a client-side allowlist; arbitrary
-POST is not exposed. Future fan-out is bounded and deterministic. No command
-performs an update check or analytics request during startup.
+All requests are bounded while streaming and have capped timeouts. Moodle AJAX
+methods are fixed in a client-side allowlist; arbitrary POST is not exposed. No
+command performs an update check or analytics request during startup.
 
 Login uses a separate, short-lived blocking transport. In production it permits
 only `sso.kaist.ac.kr` and `klms.kaist.ac.kr`; HTTP loopback origins exist only
@@ -82,14 +82,14 @@ codes fail closed.
 
 ## Companion skill
 
-The release binary embeds the repository's `skills/klms/SKILL.md`. `skill
-install` writes that exact payload under `$XDG_DATA_HOME/klms/skills/klms` (or
+The binary embeds `skills/klms/SKILL.md`. `skill install` writes that exact
+payload under `$XDG_DATA_HOME/klms/skills/klms` (or
 `~/.local/share/klms/skills/klms`) and links it from `~/.agents/skills/klms`.
-It never downloads mutable skill content at runtime and refuses to replace an
-unexpected discovery path.
+It never downloads skill content and refuses to replace an unexpected discovery
+path.
 
 For executable installation, the candidate stages its binary on the destination
 filesystem, validates skill paths, and installs its embedded skill before the
 atomic binary rename. Ordinary commit failures restore the prior skill content
-and discovery link state. This does not promise crash atomicity across files.
-Checks and installation never load KLMS authentication.
+and link state; crash atomicity across files is not promised. Checks and
+installation never load KLMS authentication.
