@@ -39,17 +39,7 @@ struct CourseCollection {
     resources: Vec<PendingResource>,
     manifest_complete: bool,
 }
-struct ExistingCourse {
-    id: i64,
-    state: String,
-    digest: Option<String>,
-}
-struct ExistingResource {
-    id: i64,
-    state: String,
-    digest: Option<String>,
-}
-struct ExistingRepresentation {
+struct Existing {
     id: i64,
     state: String,
     digest: Option<String>,
@@ -100,7 +90,6 @@ impl Corpus {
     ) -> Result<SyncSummary, AppError> {
         let response = client.get("/my/")?;
         let dashboard = parse::dashboard(&response.text, base_url)?;
-        let list_complete = dashboard.courses_complete;
         let mut courses = dashboard.courses;
         if let Some(value) = filter {
             courses = resolve_course(courses, value)?;
@@ -150,7 +139,8 @@ impl Corpus {
                     .entry(resource.course_ref.clone())
                     .or_default()
                     .insert(resource.reference.clone());
-                let resource_id = upsert_resource(&transaction, run_id, observed_at, resource)?;
+                let resource_id =
+                    upsert_resource(&transaction, run_id, observed_at, course_id, resource)?;
                 resource_count += 1;
                 if resource.observe && !resource.complete {
                     truncated_count += 1;
@@ -195,7 +185,7 @@ impl Corpus {
                 refresh_subject(&transaction, &resource.reference)?;
             }
         }
-        if list_complete && filter.is_none() {
+        if filter.is_none() {
             mark_missing_courses(&transaction, run_id, observed_at, &course_ids)?;
         }
         for collection in &collections {
@@ -221,7 +211,7 @@ impl Corpus {
         } else {
             "incomplete"
         };
-        let source_complete = list_complete && failures.is_empty() && filter.is_none();
+        let source_complete = failures.is_empty() && filter.is_none();
         let changes = self.storage.connection.query_row(
             "SELECT COUNT(*) FROM remote_changes WHERE sync_run_id=?1",
             [run_id],
@@ -561,7 +551,7 @@ fn upsert_course(
            FROM courses c WHERE c.ref=?1",
             [&course.reference],
             |row| {
-                Ok(ExistingCourse {
+                Ok(Existing {
                     id: row.get(0)?,
                     state: row.get(1)?,
                     digest: row.get(2)?,
@@ -569,7 +559,7 @@ fn upsert_course(
             },
         )
         .optional()?;
-    let (id, event) = if let Some(existing) = existing {
+    let (id, event) = if let Some(existing) = &existing {
         transaction.execute(
             "UPDATE courses SET remote_state='listed',last_seen=?1,not_listed_since=NULL
               WHERE id=?2",
@@ -590,15 +580,8 @@ fn upsert_course(
         )?;
         (transaction.last_insert_rowid(), Some("course_appeared"))
     };
-    let previous = transaction
-        .query_row(
-            "SELECT digest FROM course_observations
-          WHERE course_id=?1 ORDER BY id DESC LIMIT 1",
-            [id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if previous.as_deref() != Some(&digest) {
+    let previous = existing.as_ref().and_then(|row| row.digest.as_deref());
+    if previous != Some(digest.as_str()) {
         transaction.execute(
             "INSERT INTO course_observations(
                course_id,sync_run_id,observed_at,digest,title,code,term,url
@@ -621,7 +604,7 @@ fn upsert_course(
             (run_id, at),
             kind,
             &course.reference,
-            previous.as_deref(),
+            previous,
             Some(&digest),
             Some(json!({"title": course.title})),
         )?;
@@ -632,13 +615,9 @@ fn upsert_resource(
     transaction: &Transaction<'_>,
     run_id: i64,
     at: i64,
+    course_id: i64,
     resource: &PendingResource,
 ) -> Result<i64, AppError> {
-    let course_id: i64 = transaction.query_row(
-        "SELECT id FROM courses WHERE ref=?1",
-        [&resource.course_ref],
-        |row| row.get::<_, i64>(0),
-    )?;
     let existing = transaction
         .query_row(
             "SELECT r.id,r.remote_state,
@@ -647,7 +626,7 @@ fn upsert_resource(
            FROM resources r WHERE r.ref=?1",
             [&resource.reference],
             |row| {
-                Ok(ExistingResource {
+                Ok(Existing {
                     id: row.get(0)?,
                     state: row.get(1)?,
                     digest: row.get(2)?,
@@ -726,7 +705,6 @@ fn upsert_resource(
     if let (Some(before), Some(after)) = (previous_state.as_deref(), desired) {
         if before != after {
             let kind = match (before, after) {
-                ("not_observed", "present") => "resource_restored",
                 (_, "access_lost") => "access_lost",
                 ("access_lost", "present") => "access_restored",
                 _ => "resource_restored",
@@ -761,7 +739,7 @@ fn upsert_representation(
            FROM representations p WHERE p.resource_id=?1 AND p.url=?2",
             params![resource_id, url.as_str()],
             |row| {
-                Ok(ExistingRepresentation {
+                Ok(Existing {
                     id: row.get(0)?,
                     state: row.get(1)?,
                     digest: row.get(2)?,
@@ -925,8 +903,10 @@ fn mark_missing_representations(
         |_, url| seen.contains(url),
         |id, _| format!("representation:{id}"),
     )?;
-    // Also clear stale index entries left by earlier versions after a link
-    // had already become not_observed. Keep all history and file entries.
+    // Drop search entries for notice links that are not_observed. This covers
+    // links just marked missing above (mark_missing does not call
+    // refresh_subject) and any stale entries left by earlier versions. Keep
+    // all history and file entries.
     transaction.execute(
         "DELETE FROM search_documents WHERE subject_ref IN (
             SELECT 'representation:'||p.id FROM representations p

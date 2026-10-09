@@ -19,7 +19,7 @@ pub fn store(root: &Path, bytes: &[u8]) -> Result<StoredObject, AppError> {
     let sha256 = digest(bytes);
     let directory = root.join(&sha256[..2]);
     private_dir(&directory)?;
-    let destination = root.join(&sha256[..2]).join(&sha256[2..]);
+    let destination = directory.join(&sha256[2..]);
     if let Ok(metadata) = fs::symlink_metadata(&destination) {
         if metadata.file_type().is_symlink()
             || !metadata.file_type().is_file()
@@ -75,7 +75,7 @@ pub fn store(root: &Path, bytes: &[u8]) -> Result<StoredObject, AppError> {
 }
 
 pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf, AppError> {
-    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !super::valid_hash(sha256, 64) {
         return Err(AppError::corpus_corrupt("invalid object digest"));
     }
     let path = root.join(&sha256[..2]).join(&sha256[2..]);

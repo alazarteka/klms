@@ -5,8 +5,6 @@ mod schema;
 mod storage;
 mod sync;
 
-pub use object_store::digest;
-
 use std::{fmt, str::FromStr};
 
 use crate::{
