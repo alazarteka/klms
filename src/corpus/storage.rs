@@ -3,7 +3,7 @@ use std::{
     fs::OpenOptions,
     io,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
@@ -200,13 +200,6 @@ fn set_private_file(path: &Path) -> Result<(), AppError> {
 #[cfg(not(unix))]
 fn set_private_file(_path: &Path) -> Result<(), AppError> {
     Ok(())
-}
-
-pub fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 fn io_error(action: &str, path: &Path, error: io::Error) -> AppError {

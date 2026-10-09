@@ -129,7 +129,7 @@ impl KlmsClient {
             )));
         }
         let content_type = content_type(&response);
-        let bytes = read_bounded(&mut response, max_bytes, false)?;
+        let bytes = read_bounded(&mut response, max_bytes)?;
         check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
         Ok(ByteResponse {
             url: final_url,
@@ -209,7 +209,7 @@ impl KlmsClient {
                 "KLMS response exceeded the {max_bytes} byte limit"
             )));
         }
-        let bytes = read_bounded(&mut response, max_bytes, false)?;
+        let bytes = read_bounded(&mut response, max_bytes)?;
         validate_complete_bytes(&metadata, bytes.len())?;
         check_logged_out(&metadata.url, metadata.content_type.as_deref(), &bytes)?;
         Ok(ConditionalResponse {
@@ -222,7 +222,7 @@ impl KlmsClient {
         let mut response = self.send_get(path)?;
         let final_url = response.url().clone();
         let content_type = content_type(&response);
-        let bytes = read_bounded(&mut response, max_bytes, true)?;
+        let bytes = read_prefix(&mut response, max_bytes)?;
         let truncated = bytes.len() > max_bytes;
         let bytes = if truncated {
             bytes[..max_bytes].to_vec()
@@ -481,10 +481,10 @@ fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn read_bounded(
+/// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
+fn read_prefix(
     response: &mut reqwest::blocking::Response,
     max_bytes: usize,
-    allow_truncation: bool,
 ) -> Result<Vec<u8>, AppError> {
     let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
     response
@@ -492,7 +492,15 @@ fn read_bounded(
         .take(max_bytes as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-    if body.len() > max_bytes && !allow_truncation {
+    Ok(body)
+}
+
+fn read_bounded(
+    response: &mut reqwest::blocking::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AppError> {
+    let body = read_prefix(response, max_bytes)?;
+    if body.len() > max_bytes {
         return Err(AppError::limit(format!(
             "KLMS response exceeded the {max_bytes} byte limit"
         )));

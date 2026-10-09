@@ -78,7 +78,9 @@ pub fn collection<T: Serialize>(
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Local-library freshness: (`fresh_through`, `source_complete`).
+pub type Coverage = (Option<i64>, Option<bool>);
+
 pub fn local_collection<T: Serialize>(
     command: &'static str,
     data: &T,
@@ -86,8 +88,7 @@ pub fn local_collection<T: Serialize>(
     returned: usize,
     limit: usize,
     query_complete: bool,
-    fresh_through: Option<i64>,
-    source_complete: Option<bool>,
+    (fresh_through, source_complete): Coverage,
 ) -> Result<CommandResult, AppError> {
     let human = if returned == 0 {
         "No records found.".into()
