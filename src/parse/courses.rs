@@ -84,6 +84,22 @@ pub fn activities(
     Ok(rows)
 }
 
+/// Whether a course page is KLMS's paged week format with an "All weeks" choice.
+///
+/// The `kaistweeks` format renders only the current weeks on the default course
+/// page. Its week picker links are `javascript:M.course.format.dayselect(n, course, …)`,
+/// where `n = 0` is "All", served at `course/view.php?id=<course>&section=0`.
+pub fn has_all_weeks_view(html: &str, course_id: &str) -> Result<bool, AppError> {
+    let document = Html::parse_document(html);
+    let anchors = selector("a[href*='dayselect']")?;
+    Ok(document.select(&anchors).any(|anchor| {
+        anchor.value().attr("href").is_some_and(|href| {
+            let compact: String = href.chars().filter(|c| !c.is_whitespace()).collect();
+            compact.contains(&format!("format.dayselect(0,{course_id},"))
+        })
+    }))
+}
+
 pub fn is_video_activity(activity: &Activity) -> bool {
     matches!(
         activity.kind.to_ascii_lowercase().as_str(),
@@ -306,7 +322,7 @@ fn download_url(script: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{activities, course_detail, dashboard};
+    use super::{activities, course_detail, dashboard, has_all_weeks_view};
     use crate::models::Course;
     use url::Url;
 
@@ -381,5 +397,16 @@ mod tests {
         let base = Url::parse(BASE).unwrap();
         assert!(activities("<html><body>maintenance</body></html>", &base, None).is_err());
         assert!(activities("<main class='course-content'></main>", &base, None).is_ok());
+    }
+
+    #[test]
+    fn recognizes_the_all_weeks_choice_for_this_course_only() {
+        let picker = r#"<div class="week-slider"><a href="javascript:M.course.format.dayselect(0,42,0)">All</a>
+          <a href="javascript:M.course.format.dayselect(6,42,0)">week 6</a></div>"#;
+        assert!(has_all_weeks_view(picker, "42").unwrap());
+        assert!(!has_all_weeks_view(picker, "4").unwrap());
+        let single_week = r#"<a href="javascript:M.course.format.dayselect(6,42,0)">week 6</a>"#;
+        assert!(!has_all_weeks_view(single_week, "42").unwrap());
+        assert!(!has_all_weeks_view("<main class='course-content'></main>", "42").unwrap());
     }
 }
