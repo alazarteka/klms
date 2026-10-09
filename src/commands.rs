@@ -468,8 +468,11 @@ fn course_activities(
     course: &Course,
     week: Option<u32>,
 ) -> Result<Vec<Activity>, AppError> {
-    let response = client.get(&format!("/course/view.php?id={}", course.id))?;
-    parse::activities(&response.text, base_url, week)
+    let mut rows = crate::course_pages::activities(client, base_url, &course.id)?;
+    if let Some(week) = week {
+        rows.retain(|row| row.week == Some(week));
+    }
+    Ok(rows)
 }
 
 fn activity_result(

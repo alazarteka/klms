@@ -3,6 +3,7 @@ mod cli;
 mod client;
 mod commands;
 mod corpus;
+mod course_pages;
 mod date;
 mod error;
 mod models;
