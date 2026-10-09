@@ -1,6 +1,5 @@
 use serde_json::Value;
 use std::{
-    fs,
     process::{Command, Output},
     sync::{
         Arc,
@@ -8,8 +7,6 @@ use std::{
     },
 };
 use tempfile::TempDir;
-// The shared HTTP fixture also exposes helpers used by other integration suites.
-#[allow(dead_code)]
 mod fixture;
 use fixture::server::{Response, Server};
 
@@ -31,9 +28,7 @@ fn success(output: Output) -> Value {
     serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"].clone()
 }
 fn sync(data: &TempDir, server: &Server) -> Value {
-    let state = data.path().join("state");
-    fs::create_dir_all(state.join("klms")).unwrap();
-    fs::write(state.join("klms/session.json"), r#"{"version":1,"origin":"http://127.0.0.1:0","created_at":1,"cookies":[{"name":"MoodleSession","value":"synthetic-session"}],"devices":[]}"#).unwrap();
+    let state = fixture::seed_session(&data.path().join("state"), "synthetic-session");
     success(
         Command::new(env!("CARGO_BIN_EXE_klms"))
             .env("XDG_DATA_HOME", data.path())

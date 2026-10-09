@@ -7,9 +7,7 @@ mod fixture;
 use fixture::server::{Response, Server};
 
 fn command(server: &Server, home: &TempDir) -> Command {
-    let state = home.path().join("state");
-    fs::create_dir_all(state.join("klms")).unwrap();
-    fs::write(state.join("klms/session.json"), r#"{"version":1,"origin":"http://127.0.0.1:0","created_at":1,"cookies":[{"name":"MoodleSession","value":"synthetic"}],"devices":[]}"#).unwrap();
+    let state = fixture::seed_session(&home.path().join("state"), "synthetic");
     let mut command = Command::new(env!("CARGO_BIN_EXE_klms"));
     command
         .env("HOME", home.path())
