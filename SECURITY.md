@@ -38,12 +38,13 @@ runs `cargo-deny` before compiling anything:
 
 The script downloads a pinned `cargo-deny` release and verifies its SHA-256
 before extracting or running it. `deny.toml` rejects RustSec advisories,
-yanked crates, unknown registries, repository-hosted dependencies, wildcard
+unknown registries, repository-hosted dependencies, wildcard
 requirements, and unapproved licenses, and blocks the malicious crates and
 compromised versions from the 2026-08-20 Rust supply-chain incident.
 
-All external workflow actions are pinned to full commit SHAs, and workflows use
-read-only permissions and do not persist checkout credentials. Dependabot
+All external workflow actions are pinned to full commit SHAs, and workflows default
+to read-only permissions (`contents: read`); only the release publish job
+requests `contents: write`. Workflows do not persist checkout credentials. Dependabot
 proposes updates; review build scripts, procedural macros, and publisher
 changes by hand, since a clean advisory scan does not prove code is benign.
 
