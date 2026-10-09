@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SEOUL_OFFSET: &str = "+09:00";
+const SEOUL_OFFSET: &str = "+09:00";
+const SEOUL_SECS: i64 = 9 * 3600;
 
 pub fn moodle_datetime(value: &str) -> Option<String> {
     if let Some(normalized) = korean_datetime(value) {
@@ -169,7 +170,7 @@ fn iso_datetime_to_seoul(value: &str) -> Option<String> {
         }
         (clock, sign * (hours * 3600 + minutes * 60))
     } else {
-        (time_and_zone, 9 * 3600)
+        (time_and_zone, SEOUL_SECS)
     };
 
     let mut parts = clock.split(':');
@@ -208,11 +209,11 @@ pub fn epoch_now() -> i64 {
 }
 
 pub fn seoul_today() -> String {
-    civil_from_days((epoch_now() + 9 * 60 * 60).div_euclid(86_400))
+    civil_from_days((epoch_now() + SEOUL_SECS).div_euclid(86_400))
 }
 
 pub fn epoch_to_seoul(timestamp: i64) -> Option<String> {
-    let seconds = timestamp.checked_add(9 * 60 * 60)?;
+    let seconds = timestamp.checked_add(SEOUL_SECS)?;
     let days = seconds.div_euclid(86_400);
     let day_seconds = seconds.rem_euclid(86_400);
     let hour = day_seconds / 3600;

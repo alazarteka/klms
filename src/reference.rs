@@ -4,6 +4,8 @@ use url::Url;
 
 use crate::error::AppError;
 
+const VIDEO_KINDS: [&str; 4] = ["vod", "lti", "panopto", "panoptocourseembed"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceRef {
     Course(String),
@@ -31,22 +33,11 @@ impl ResourceRef {
                 })
             }
             ["file", id] if valid_id(id) => Ok(Self::File((*id).into())),
-            ["activity", kind, id]
-                if valid_id(id)
-                    && !kind.is_empty()
-                    && kind
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
-            {
-                Ok(Self::Activity {
-                    kind: (*kind).into(),
-                    id: (*id).into(),
-                })
-            }
-            [
-                kind @ ("vod" | "lti" | "panopto" | "panoptocourseembed"),
-                id,
-            ] if valid_id(id) => Ok(Self::Video {
+            ["activity", kind, id] if valid_id(id) && valid_kind(kind) => Ok(Self::Activity {
+                kind: (*kind).into(),
+                id: (*id).into(),
+            }),
+            [kind, id] if VIDEO_KINDS.contains(kind) && valid_id(id) => Ok(Self::Video {
                 kind: (*kind).into(),
                 id: (*id).into(),
             }),
@@ -61,26 +52,20 @@ impl ResourceRef {
         if !valid_id(&id) {
             return None;
         }
-        match kind.to_ascii_lowercase().as_str() {
+        let kind = kind.to_ascii_lowercase();
+        match kind.as_str() {
             "assign" => Some(Self::Assignment(id)),
             "quiz" => Some(Self::Quiz(id)),
             "courseboard" => Some(Self::Board(id)),
             "resource" | "coursefile" => Some(Self::File(id)),
-            "vod" | "lti" | "panopto" | "panoptocourseembed" => Some(Self::Video {
-                kind: kind.to_ascii_lowercase(),
+            other if VIDEO_KINDS.contains(&other) => Some(Self::Video {
+                kind: other.into(),
                 id,
             }),
-            other
-                if !other.is_empty()
-                    && other
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
-            {
-                Some(Self::Activity {
-                    kind: other.into(),
-                    id,
-                })
-            }
+            other if valid_kind(other) => Some(Self::Activity {
+                kind: other.into(),
+                id,
+            }),
             _ => None,
         }
     }
@@ -99,8 +84,7 @@ impl ResourceRef {
             Self::Quiz(_) => Some("quiz"),
             Self::Board(_) => Some("courseboard"),
             Self::File(_) => Some("resource"),
-            Self::Activity { kind, .. } => Some(kind),
-            Self::Video { kind, .. } => Some(kind),
+            Self::Activity { kind, .. } | Self::Video { kind, .. } => Some(kind),
             Self::Course(_) | Self::BoardPost { .. } => None,
         }
     }
@@ -115,8 +99,9 @@ impl ResourceRef {
                 format!("/mod/courseboard/article.php?id={board}&bwid={post}")
             }
             Self::File(id) => format!("/mod/resource/view.php?id={id}"),
-            Self::Activity { kind, id } => format!("/mod/{kind}/view.php?id={id}"),
-            Self::Video { kind, id } => format!("/mod/{kind}/view.php?id={id}"),
+            Self::Activity { kind, id } | Self::Video { kind, id } => {
+                format!("/mod/{kind}/view.php?id={id}")
+            }
         }
     }
 
@@ -128,8 +113,9 @@ impl ResourceRef {
             Self::File(_) => kinds
                 .iter()
                 .any(|kind| matches!(*kind, "resource" | "coursefile")),
-            Self::Activity { kind, .. } => kinds.iter().any(|expected| kind == expected),
-            Self::Video { kind, .. } => kinds.iter().any(|expected| kind == expected),
+            Self::Activity { kind, .. } | Self::Video { kind, .. } => {
+                kinds.iter().any(|expected| kind == expected)
+            }
             Self::Course(_) | Self::BoardPost { .. } => false,
         }
     }
@@ -152,6 +138,13 @@ impl fmt::Display for ResourceRef {
 
 pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_kind(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn module_id(value: &str) -> Option<String> {

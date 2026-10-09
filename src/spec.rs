@@ -2,7 +2,8 @@
 //!
 //! `klms spec` prints one grammar line per leaf command; `--json` emits the
 //! full argument tree so agents can discover the interface without parsing
-//! `--help`.
+//! `--help`. `klms completions` reuses the same Clap tree to emit shell
+//! completion scripts.
 
 use clap::{Arg, ArgAction, ArgGroup, Command, CommandFactory};
 use serde::Serialize;
@@ -11,41 +12,41 @@ use serde_json::json;
 use crate::{cli::Cli, error::AppError, output::CommandResult};
 
 #[derive(Debug, Serialize)]
-pub struct Spec {
-    pub name: String,
-    pub version: String,
-    pub global_args: Vec<ArgSpec>,
-    pub commands: Vec<CommandSpec>,
+struct Spec {
+    name: String,
+    version: String,
+    global_args: Vec<ArgSpec>,
+    commands: Vec<CommandSpec>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct CommandSpec {
-    pub path: Vec<String>,
-    pub usage: String,
-    pub about: Option<String>,
-    pub args: Vec<ArgSpec>,
-    pub groups: Vec<GroupSpec>,
+struct CommandSpec {
+    path: Vec<String>,
+    usage: String,
+    about: Option<String>,
+    args: Vec<ArgSpec>,
+    groups: Vec<GroupSpec>,
 }
 
 /// An explicit argument group: `required` means at least one member must be
 /// given; `multiple` false means at most one may be.
 #[derive(Debug, Serialize)]
-pub struct GroupSpec {
-    pub name: String,
-    pub args: Vec<String>,
-    pub required: bool,
-    pub multiple: bool,
+struct GroupSpec {
+    name: String,
+    args: Vec<String>,
+    required: bool,
+    multiple: bool,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ArgSpec {
-    pub name: String,
-    pub kind: &'static str,
-    pub required: bool,
-    pub value: Option<String>,
-    pub choices: Vec<String>,
-    pub default: Option<String>,
-    pub help: Option<String>,
+struct ArgSpec {
+    name: String,
+    kind: &'static str,
+    required: bool,
+    value: Option<String>,
+    choices: Vec<String>,
+    default: Option<String>,
+    help: Option<String>,
 }
 
 pub fn run() -> Result<CommandResult, AppError> {
@@ -64,7 +65,7 @@ pub fn completions(shell: clap_complete::Shell) -> Result<CommandResult, AppErro
     crate::output::result("completions", &data, script.clone())
 }
 
-pub fn build() -> Spec {
+fn build() -> Spec {
     let mut root = Cli::command();
     root.build();
     let global_args = root
@@ -82,7 +83,7 @@ pub fn build() -> Spec {
     }
 }
 
-pub fn grammar(spec: &Spec) -> String {
+fn grammar(spec: &Spec) -> String {
     spec.commands
         .iter()
         .map(|command| command.usage.as_str())
