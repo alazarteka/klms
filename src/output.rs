@@ -56,16 +56,23 @@ pub fn result<T: Serialize>(
     })
 }
 
+/// Truncate `rows` to `limit` and return how many existed before truncation.
+pub fn truncate_to_limit<T>(rows: &mut Vec<T>, limit: usize) -> usize {
+    let available = rows.len();
+    rows.truncate(limit);
+    available
+}
+
 pub fn collection<T: Serialize>(
     command: &'static str,
-    data: &T,
+    rows: &[T],
     human: String,
-    returned: usize,
     limit: usize,
     available: usize,
     source_complete: bool,
 ) -> Result<CommandResult, AppError> {
-    let mut result = result(command, data, human)?;
+    let returned = rows.len();
+    let mut result = result(command, &rows, human)?;
     result.meta = Some(ListMeta {
         returned,
         limit,

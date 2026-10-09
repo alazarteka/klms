@@ -1,6 +1,5 @@
 use url::Url;
 
-use super::read_library_text;
 use crate::{
     cli::{
         LibraryCommand, LibraryDownloadArg, LibraryFieldArg, LibraryRelationsCommand,
@@ -11,100 +10,78 @@ use crate::{
     output::{self, CommandResult},
 };
 
+/// Fetch `limit + 1` rows to detect truncation, then render the page.
+fn paged<T: serde::Serialize>(
+    command: &'static str,
+    limit: usize,
+    coverage: (Option<i64>, Option<bool>),
+    fetch: impl FnOnce(usize) -> Result<Vec<T>, AppError>,
+    format_row: impl Fn(&T) -> String,
+) -> Result<CommandResult, AppError> {
+    let mut rows = fetch(limit.saturating_add(1))?;
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    let human = rows.iter().map(format_row).collect::<Vec<_>>().join("\n");
+    output::local_collection(
+        command,
+        &rows,
+        human,
+        rows.len(),
+        limit,
+        !truncated,
+        coverage,
+    )
+}
+
 pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError> {
     let mut corpus = crate::corpus::Corpus::open()?;
     match command {
         LibraryCommand::Status => library_status(&corpus),
         LibraryCommand::Search { query, list } => {
             let coverage = corpus.coverage()?;
-            let mut rows = corpus.search(query, list.limit.saturating_add(1))?;
-            let truncated = rows.len() > list.limit;
-            rows.truncate(list.limit);
-            let human = rows
-                .iter()
-                .map(|row| format!("{}\t{}\t{}", row.reference, row.kind, row.title))
-                .collect::<Vec<_>>()
-                .join("\n");
-            output::local_collection(
+            paged(
                 "library.search",
-                &rows,
-                human,
-                rows.len(),
                 list.limit,
-                !truncated,
                 coverage,
+                |n| corpus.search(query, n),
+                |r| format!("{}\t{}\t{}", r.reference, r.kind, r.title),
             )
         }
         LibraryCommand::Changes(list) => {
             let coverage = corpus.coverage()?;
-            let mut rows = corpus.changes(list.limit.saturating_add(1))?;
-            let truncated = rows.len() > list.limit;
-            rows.truncate(list.limit);
-            let human = rows
-                .iter()
-                .map(|r| format!("{}\t{}\t{}", r.occurred_at, r.kind, r.subject_ref))
-                .collect::<Vec<_>>()
-                .join("\n");
-            output::local_collection(
+            paged(
                 "library.changes",
-                &rows,
-                human,
-                rows.len(),
                 list.limit,
-                !truncated,
                 coverage,
+                |n| corpus.changes(n),
+                |r| format!("{}\t{}\t{}", r.occurred_at, r.kind, r.subject_ref),
             )
         }
-        LibraryCommand::Activity(args) => {
-            let mut rows =
-                corpus.activity(args.subject.as_deref(), args.list.limit.saturating_add(1))?;
-            let truncated = rows.len() > args.list.limit;
-            rows.truncate(args.list.limit);
-            let human = rows
-                .iter()
-                .map(|row| {
-                    format!(
-                        "{}\t{}\t{}\t{}",
-                        row.created_at, row.actor, row.field, row.subject_ref
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            output::local_collection(
-                "library.activity",
-                &rows,
-                human,
-                rows.len(),
-                args.list.limit,
-                !truncated,
-                (None, None),
-            )
-        }
+        LibraryCommand::Activity(args) => paged(
+            "library.activity",
+            args.list.limit,
+            (None, None),
+            |n| corpus.activity(args.subject.as_deref(), n),
+            |r| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    r.created_at, r.actor, r.field, r.subject_ref
+                )
+            },
+        ),
         LibraryCommand::Show { reference } => {
             let row = corpus.show(reference)?;
             let human = serde_json::to_string_pretty(&row)
                 .map_err(|error| AppError::internal(error.to_string()))?;
             output::result("library.show", &row, human)
         }
-        LibraryCommand::History { reference, list } => {
-            let mut rows = corpus.history(reference, list.limit.saturating_add(1))?;
-            let truncated = rows.len() > list.limit;
-            rows.truncate(list.limit);
-            let human = rows
-                .iter()
-                .map(|row| format!("{}\t{}\t{}", row.id, row.observed_at, row.digest))
-                .collect::<Vec<_>>()
-                .join("\n");
-            output::local_collection(
-                "library.history",
-                &rows,
-                human,
-                rows.len(),
-                list.limit,
-                !truncated,
-                (None, None),
-            )
-        }
+        LibraryCommand::History { reference, list } => paged(
+            "library.history",
+            list.limit,
+            (None, None),
+            |n| corpus.history(reference, n),
+            |r| format!("{}\t{}\t{}", r.id, r.observed_at, r.digest),
+        ),
         LibraryCommand::Content {
             reference,
             max_bytes,
@@ -276,4 +253,78 @@ pub(super) fn sync(
     let mut result = output::result("library.sync", &model, human)?;
     result.warnings.extend(model.failures);
     Ok(result)
+}
+
+const MAX_CURATION_TEXT: usize = 1024 * 1024;
+
+fn read_library_text(
+    value: Option<&str>,
+    path: Option<&std::path::Path>,
+) -> Result<String, AppError> {
+    let mut text = if let Some(value) = value {
+        value.to_owned()
+    } else if let Some(path) = path {
+        if path == std::path::Path::new("-") {
+            read_curation_text(std::io::stdin().lock())?
+        } else {
+            let file = std::fs::File::open(path)
+                .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?;
+            read_curation_text(file)?
+        }
+    } else {
+        unreachable!("clap requires exactly one of --value and --value-file");
+    };
+    if text.len() > MAX_CURATION_TEXT {
+        return Err(AppError::limit("curation text exceeds 1 MiB"));
+    }
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    Ok(text)
+}
+
+fn read_curation_text(reader: impl std::io::Read) -> Result<String, AppError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CURATION_TEXT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AppError::config(format!("cannot read curation text: {e}")))?;
+    if bytes.len() > MAX_CURATION_TEXT {
+        return Err(AppError::limit("curation text exceeds 1 MiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| AppError::config("curation text must be UTF-8"))
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::{read_curation_text, read_library_text};
+    use std::io::{Cursor, Read};
+
+    #[test]
+    fn curation_input_stops_at_limit_and_classifies_oversized_utf8() {
+        let bytes = "é".repeat(524_289).into_bytes();
+        let mut source = Cursor::new(bytes);
+        let error = read_curation_text(&mut source).unwrap_err();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        assert_eq!(source.position(), 1_048_577);
+        assert_eq!(
+            read_curation_text(Cursor::new("é".repeat(524_288)))
+                .unwrap()
+                .len(),
+            1_048_576
+        );
+        assert!(read_curation_text(Cursor::new([0xff])).is_err());
+        // The file route applies the same byte bound and trailing-newline rule.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("value.txt");
+        std::fs::write(&path, "value\n\n").unwrap();
+        assert_eq!(read_library_text(None, Some(&path)).unwrap(), "value");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::copy(&mut std::io::repeat(b'x').take(1_048_577), &mut file).unwrap();
+        assert_eq!(
+            read_library_text(None, Some(&path)).unwrap_err().code,
+            "LIMIT_EXCEEDED"
+        );
+    }
 }

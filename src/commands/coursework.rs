@@ -6,7 +6,7 @@ use crate::{
     client::KlmsClient,
     date,
     error::AppError,
-    models::{Assignment, FileResource, Notice, Quiz},
+    models::{FileResource, Notice},
     output::{self, CommandResult},
     parse, present,
     reference::ResourceRef,
@@ -22,18 +22,20 @@ pub(super) fn assignments(
             let resolved = resolve_course(client, base_url, course)?;
             let response = client.get(&format!("/mod/assign/index.php?id={}", resolved.id))?;
             let mut rows = parse::assignments(&response.text, &response.url, &resolved)?;
-            let available = rows.len();
-            rows.truncate(list.limit);
-            assignment_result(rows, list.limit, available)
+            let available = output::truncate_to_limit(&mut rows, list.limit);
+            let human = present::assignments(&rows, available);
+            output::collection(
+                "assignments.list",
+                &rows,
+                human,
+                list.limit,
+                available,
+                true,
+            )
         }
-        ModuleCommand::Show { target } => show_module(
-            client,
-            base_url,
-            target,
-            &["assign"],
-            "assign",
-            "assignments.show",
-        ),
+        ModuleCommand::Show { target } => {
+            show_module(client, base_url, target, &["assign"], "assignments.show")
+        }
     }
 }
 
@@ -47,12 +49,12 @@ pub(super) fn quizzes(
             let resolved = resolve_course(client, base_url, course)?;
             let response = client.get(&format!("/mod/quiz/index.php?id={}", resolved.id))?;
             let mut rows = parse::quizzes(&response.text, &response.url, &resolved)?;
-            let available = rows.len();
-            rows.truncate(list.limit);
-            quiz_result(rows, list.limit, available)
+            let available = output::truncate_to_limit(&mut rows, list.limit);
+            let human = present::quizzes(&rows, available);
+            output::collection("quizzes.list", &rows, human, list.limit, available, true)
         }
         ModuleCommand::Show { target } => {
-            show_module(client, base_url, target, &["quiz"], "quiz", "quizzes.show")
+            show_module(client, base_url, target, &["quiz"], "quizzes.show")
         }
     }
 }
@@ -68,28 +70,11 @@ pub(super) fn videos(
             let resolved = resolve_course(client, base_url, course)?;
             let mut rows = course_activities(client, base_url, &resolved, None)?;
             rows.retain(parse::is_video_activity);
-            let available = rows.len();
-            rows.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut rows, list.limit);
             activity_result("videos.list", &resolved, rows, list.limit, available)
         }
         ModuleCommand::Show { target } => {
-            let path = module_path(target, KINDS)?;
-            let response = client.get(&path)?;
-            let reference = ResourceRef::from_url(&response.url).ok_or_else(|| {
-                AppError::shape("module detail URL had no supported resource kind")
-            })?;
-            let detail_kind = reference.activity_kind().ok_or_else(|| {
-                AppError::shape("module detail URL had no supported activity kind")
-            })?;
-            if !KINDS.contains(&detail_kind) {
-                return Err(AppError::shape(
-                    "module detail redirected to an unexpected resource kind",
-                ));
-            }
-            validate_detail_identity(base_url, &path, &response.url)?;
-            let detail =
-                parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
-            output::result("videos.show", &detail, present::detail(&detail))
+            show_module(client, base_url, target, KINDS, "videos.show")
         }
     }
 }
@@ -105,14 +90,12 @@ pub(super) fn calendar(
             let page = parse::calendar_page(&response.text, base_url)?;
             let source_complete = page.complete;
             let mut rows = page.events;
-            let available = rows.len();
-            rows.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut rows, list.limit);
             let human = present::calendar(&rows, available);
             output::collection(
                 "calendar.list",
                 &rows,
                 human,
-                rows.len(),
                 list.limit,
                 available,
                 source_complete,
@@ -160,10 +143,9 @@ pub(super) fn agenda(
         })
         .collect();
     rows.sort_by(|left, right| left.starts_at.cmp(&right.starts_at));
-    let available = rows.len();
-    rows.truncate(limit);
+    let available = output::truncate_to_limit(&mut rows, limit);
     let human = present::agenda(&rows, available, &today, &through);
-    let mut result = output::collection(label, &rows, human, rows.len(), limit, available, true)?;
+    let mut result = output::collection(label, &rows, human, limit, available, true)?;
     if undated_events > 0 {
         result.warnings.push(format!(
             "{undated_events} calendar event(s) have no date and are not shown; see `klms calendar list`"
@@ -182,8 +164,7 @@ pub(super) fn boards(
             let resolved = resolve_course(client, base_url, course)?;
             let mut rows = course_activities(client, base_url, &resolved, None)?;
             rows.retain(|row| row.kind.eq_ignore_ascii_case("courseboard"));
-            let available = rows.len();
-            rows.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut rows, list.limit);
             activity_result("boards.list", &resolved, rows, list.limit, available)
         }
         BoardsCommand::Posts { board, list } => {
@@ -191,14 +172,12 @@ pub(super) fn boards(
             let response = client.get(&path)?;
             let board_id = query_value(&response.url, "id");
             let mut posts = parse::board_posts(&response.text, base_url, board_id)?;
-            let available = posts.len();
-            posts.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut posts, list.limit);
             let human = present::board_posts(&posts, available);
             output::collection(
                 "boards.posts",
                 &posts,
                 human,
-                posts.len(),
                 list.limit,
                 available,
                 !parse::has_next_page(&response.text)?,
@@ -250,14 +229,12 @@ pub(super) fn notices(
                     });
                 }
             }
-            let available = rows.len();
-            rows.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut rows, list.limit);
             let human = present::notices(&rows, available);
             output::collection(
                 "notices.list",
                 &rows,
                 human,
-                rows.len(),
                 list.limit,
                 available,
                 source_complete,
@@ -300,18 +277,9 @@ pub(super) fn files(
                     url: activity.url,
                 })
                 .collect();
-            let available = files.len();
-            files.truncate(list.limit);
+            let available = output::truncate_to_limit(&mut files, list.limit);
             let human = present::files(&files, available);
-            output::collection(
-                "files.list",
-                &files,
-                human,
-                files.len(),
-                list.limit,
-                available,
-                true,
-            )
+            output::collection("files.list", &files, human, list.limit, available, true)
         }
         FilesCommand::Download { source, out } => {
             let source = if source.starts_with("file:") {
@@ -329,7 +297,6 @@ fn show_module(
     base_url: &Url,
     target: &str,
     kinds: &[&str],
-    detail_kind: &str,
     command: &'static str,
 ) -> Result<CommandResult, AppError> {
     let path = module_path(target, kinds)?;
@@ -342,6 +309,9 @@ fn show_module(
         ));
     }
     validate_detail_identity(base_url, &path, &response.url)?;
+    let detail_kind = final_reference
+        .activity_kind()
+        .ok_or_else(|| AppError::shape("module detail URL had no supported activity kind"))?;
     let detail = parse::resource_detail(&response.text, base_url, &response.url, detail_kind)?;
     output::result(command, &detail, present::detail(&detail))
 }
@@ -415,34 +385,4 @@ fn validate_detail_identity(base_url: &Url, target: &str, final_url: &Url) -> Re
         ));
     }
     Ok(())
-}
-
-fn assignment_result(
-    rows: Vec<Assignment>,
-    limit: usize,
-    available: usize,
-) -> Result<CommandResult, AppError> {
-    let human = present::assignments(&rows, available);
-    output::collection(
-        "assignments.list",
-        &rows,
-        human,
-        rows.len(),
-        limit,
-        available,
-        true,
-    )
-}
-
-fn quiz_result(rows: Vec<Quiz>, limit: usize, available: usize) -> Result<CommandResult, AppError> {
-    let human = present::quizzes(&rows, available);
-    output::collection(
-        "quizzes.list",
-        &rows,
-        human,
-        rows.len(),
-        limit,
-        available,
-        true,
-    )
 }

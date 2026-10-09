@@ -86,47 +86,6 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
     }
 }
 
-const MAX_CURATION_TEXT: usize = 1024 * 1024;
-
-fn read_library_text(
-    value: Option<&str>,
-    path: Option<&std::path::Path>,
-) -> Result<String, AppError> {
-    let mut text = if let Some(value) = value {
-        value.to_owned()
-    } else if let Some(path) = path {
-        if path == std::path::Path::new("-") {
-            read_curation_text(std::io::stdin().lock())?
-        } else {
-            let file = std::fs::File::open(path)
-                .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?;
-            read_curation_text(file)?
-        }
-    } else {
-        unreachable!("clap requires exactly one of --value and --value-file");
-    };
-    if text.len() > MAX_CURATION_TEXT {
-        return Err(AppError::limit("curation text exceeds 1 MiB"));
-    }
-    while text.ends_with('\n') {
-        text.pop();
-    }
-    Ok(text)
-}
-
-fn read_curation_text(reader: impl std::io::Read) -> Result<String, AppError> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_CURATION_TEXT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| AppError::config(format!("cannot read curation text: {e}")))?;
-    if bytes.len() > MAX_CURATION_TEXT {
-        return Err(AppError::limit("curation text exceeds 1 MiB"));
-    }
-    String::from_utf8(bytes).map_err(|_| AppError::config("curation text must be UTF-8"))
-}
-
 fn auth_status(status: &auth::AuthStatus) -> Result<CommandResult, AppError> {
     let human = if status.configured {
         format!(
@@ -162,7 +121,6 @@ fn doctor(
     let mut session_error = None;
     let mut dashboard_url = None;
     let mut check_may_have_extended_session = false;
-    let mut failure = None;
     if let Some(cookie) = session.cookie_header.as_deref() {
         check_may_have_extended_session = true;
         match KlmsClient::new(base_url.as_str(), Some(cookie), timeout)
@@ -178,14 +136,11 @@ fn doctor(
                     "NETWORK_ERROR" => "unreachable",
                     _ => "error",
                 };
-                session_error = Some(error.clone());
-                failure = Some(error);
+                session_error = Some(error);
             }
         }
     } else {
-        let error = AppError::auth_required("no usable KLMS session was found");
-        session_error = Some(error.clone());
-        failure = Some(error);
+        session_error = Some(AppError::auth_required("no usable KLMS session was found"));
     }
     let model = Doctor {
         version: env!("CARGO_PKG_VERSION"),
@@ -196,7 +151,7 @@ fn doctor(
         dashboard_url,
         check_may_have_extended_session,
     };
-    if let Some(error) = failure {
+    if let Some(error) = model.session_error.clone() {
         let details = serde_json::to_value(&model).map_err(|encode_error| {
             AppError::internal(format!(
                 "failed to encode doctor diagnostics: {encode_error}"
@@ -204,7 +159,7 @@ fn doctor(
         })?;
         return Err(error.with_details(details));
     }
-    let mut human = format!(
+    let human = format!(
         "klms {}\nOrigin: {}\nOwned session: {}\nSession: {}",
         model.version,
         model.base_url,
@@ -215,9 +170,6 @@ fn doctor(
         },
         model.session_status
     );
-    if let Some(error) = &model.session_error {
-        human.push_str(&format!("\nCheck: {} — {}", error.code, error.message));
-    }
     let mut result = output::result("doctor", &model, human)?;
     if model.check_may_have_extended_session {
         result.warnings.push(
@@ -310,13 +262,11 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
         Command::Courses(args) => match &args.command {
             CoursesCommand::List(list) => {
                 let mut courses = dashboard_courses(client, base_url)?;
-                let available = courses.len();
-                courses.truncate(list.limit);
+                let available = output::truncate_to_limit(&mut courses, list.limit);
                 output::collection(
                     "courses.list",
                     &courses,
                     render_courses(&courses, available),
-                    courses.len(),
                     list.limit,
                     available,
                     true,
@@ -324,13 +274,11 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
             }
             CoursesCommand::Resolve { query, list } => {
                 let mut matches = matching_courses(dashboard_courses(client, base_url)?, query);
-                let available = matches.len();
-                matches.truncate(list.limit);
+                let available = output::truncate_to_limit(&mut matches, list.limit);
                 output::collection(
                     "courses.resolve",
                     &matches,
                     render_courses(&matches, available),
-                    matches.len(),
                     list.limit,
                     available,
                     true,
@@ -368,8 +316,7 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
                 if let Some(kind) = kind {
                     rows.retain(|row| row.kind.eq_ignore_ascii_case(kind));
                 }
-                let available = rows.len();
-                rows.truncate(list.limit);
+                let available = output::truncate_to_limit(&mut rows, list.limit);
                 activity_result("activities.list", &resolved, rows, list.limit, available)
             }
         },
@@ -500,7 +447,7 @@ fn activity_result(
             row.title
         ));
     }
-    output::collection(command, &rows, human, rows.len(), limit, available, true)
+    output::collection(command, &rows, human, limit, available, true)
 }
 
 fn module_path(target: &str, kinds: &[&str]) -> Result<String, AppError> {
@@ -668,37 +615,4 @@ fn duration(seconds: u64) -> String {
         (seconds % 3600) / 60,
         seconds % 60
     )
-}
-
-#[cfg(test)]
-mod input_tests {
-    use super::{read_curation_text, read_library_text};
-    use std::io::{Cursor, Read};
-
-    #[test]
-    fn curation_input_stops_at_limit_and_classifies_oversized_utf8() {
-        let bytes = "é".repeat(524_289).into_bytes();
-        let mut source = Cursor::new(bytes);
-        let error = read_curation_text(&mut source).unwrap_err();
-        assert_eq!(error.code, "LIMIT_EXCEEDED");
-        assert_eq!(source.position(), 1_048_577);
-        assert_eq!(
-            read_curation_text(Cursor::new("é".repeat(524_288)))
-                .unwrap()
-                .len(),
-            1_048_576
-        );
-        assert!(read_curation_text(Cursor::new([0xff])).is_err());
-        // The file route applies the same byte bound and trailing-newline rule.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("value.txt");
-        std::fs::write(&path, "value\n\n").unwrap();
-        assert_eq!(read_library_text(None, Some(&path)).unwrap(), "value");
-        let mut file = std::fs::File::create(&path).unwrap();
-        std::io::copy(&mut std::io::repeat(b'x').take(1_048_577), &mut file).unwrap();
-        assert_eq!(
-            read_library_text(None, Some(&path)).unwrap_err().code,
-            "LIMIT_EXCEEDED"
-        );
-    }
 }
