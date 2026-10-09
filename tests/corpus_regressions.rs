@@ -535,3 +535,37 @@ fn download_frontier_is_processed_in_representation_order() {
         .collect();
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn sync_includes_earlier_weeks_from_the_all_weeks_view() {
+    // KLMS's paged week format renders only current weeks on the default page;
+    // its picker's "All" choice (dayselect 0) is served at section=0.
+    let data = TempDir::new().unwrap();
+    let server = Server::new(|request| match request.target.as_str() {
+        "/my/" => Response::html("<a href='/course/view.php?id=42'>Compilers(CS.420_2026_2)</a>"),
+        "/course/view.php?id=42" => Response::html(
+            "<div class='week-slider'><a href='javascript:M.course.format.dayselect(0,42,0)'>All</a><a href='javascript:M.course.format.dayselect(5,42,0)'>week 5</a></div>\
+             <main class='course-content'><li class='activity modtype_resource' id='module-7'><a href='/mod/resource/view.php?id=7'><span class='instancename'>Week 5 slides</span></a></li></main>",
+        ),
+        "/course/view.php?id=42&section=0" => Response::html(
+            "<main class='course-content'>\
+             <li class='activity modtype_resource' id='module-3'><a href='/mod/resource/view.php?id=3'><span class='instancename'>Week 1 slides</span></a></li>\
+             <li class='activity modtype_resource' id='module-7'><a href='/mod/resource/view.php?id=7'><span class='instancename'>Week 5 slides</span></a></li></main>",
+        ),
+        "/mod/resource/view.php?id=3" | "/mod/resource/view.php?id=7" => {
+            Response::html("<main><h1>Slides</h1><p>no files</p></main>")
+        }
+        other => panic!("unexpected request: {other}"),
+    });
+    sync(&data, &server);
+    let connection = database(&data);
+    let mut statement = connection
+        .prepare("SELECT ref FROM resources ORDER BY ref")
+        .unwrap();
+    let refs: Vec<String> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(refs, vec!["file:3", "file:7"]);
+}

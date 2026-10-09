@@ -417,8 +417,7 @@ fn collect_course(
     course: Course,
     options: SyncOptions,
 ) -> Result<(Vec<PendingResource>, Vec<String>), AppError> {
-    let response = client.get(&format!("/course/view.php?id={}", course.id))?;
-    let activities = parse::activities(&response.text, base_url, None)?;
+    let activities = crate::course_pages::activities(client, base_url, &course.id)?;
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     for activity in activities {
