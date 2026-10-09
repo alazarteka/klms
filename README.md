@@ -34,20 +34,17 @@ export PATH="$HOME/.local/bin:$PATH"
 The archives and their checksums are also available on the
 [GitHub releases page](https://github.com/alazarteka/klms/releases).
 
-From 0.2.1 onward, check for and install updates directly:
+Check for and install updates directly:
 
 ```bash
 klms update --check
 klms update
 ```
 
-`upgrade` is an alias for `update`. The command checks the latest stable GitHub
-release and never downgrades. It updates the executable you invoked, including
-the target of a symlink, and installs its matching embedded skill. No KLMS
-sign-in is needed. Skill-path conflicts leave the previous binary intact;
-installation errors are nonzero failures. Update checks happen only when you
-ask for them. Older versions need the standalone installer once to gain this
-command.
+`upgrade` is an alias for `update`. It checks the latest stable GitHub release,
+never downgrades, updates the executable you invoked (following a symlink), and
+installs the matching embedded skill. No KLMS sign-in is needed, and nothing
+checks for updates unless you ask.
 
 ## Sign in
 
@@ -71,11 +68,9 @@ off. They are not accepted as flags or environment variables. If KAIST treats
 the client as a new device, `klms` registers it during login; there is no
 separate browser step.
 
-The saved session contains only the KLMS cookies and trusted-device identifiers
-needed for later logins. It lives at `$XDG_STATE_HOME/klms/session.json`, or
-`~/.local/state/klms/session.json` when `XDG_STATE_HOME` is unset. Passwords,
-verification codes, general KAIST SSO cookies, raw HTML, and Moodle session
-keys are never written there.
+The saved session lives at `$XDG_STATE_HOME/klms/session.json`, or
+`~/.local/state/klms/session.json` when `XDG_STATE_HOME` is unset. See
+[SECURITY.md](SECURITY.md) for exactly what it contains.
 
 Useful checks:
 
@@ -142,11 +137,8 @@ klms library changes
 klms library activity --subject file:1205160
 ```
 
-The library stores normalized observations in SQLite and exact downloaded
-bytes once in a private SHA-256 object store under the XDG data directory. It
-does not schedule itself, write to KLMS, follow authenticated third-party
-links, or infer that an unlisted course was dropped. See
-[the local-library contract](docs/LOCAL_LIBRARY.md).
+The library never syncs on its own and never writes to KLMS. See
+[docs/LOCAL_LIBRARY.md](docs/LOCAL_LIBRARY.md).
 
 ## JSON and agent use
 
@@ -157,10 +149,8 @@ klms --json today
 klms --json assignments list --course course:12345
 ```
 
-The [command contract](docs/COMMAND_CONTRACT.md) documents reference
-resolution, output schemas, retries, and safety boundaries. `klms spec` prints
-the executable command grammar, and `klms --json spec` emits the full argument
-tree for agents that want to discover the interface without parsing `--help`.
+`klms spec` prints the command grammar, and `klms --json spec` emits the full
+argument tree so agents can discover the interface without parsing `--help`.
 
 Shell completions are generated from the same declaration:
 
@@ -177,12 +167,8 @@ under `~/.local/share/klms/skills/klms` and links it from
 
 ## Build from source
 
-This project uses Rust 1.86 or newer. Dependency changes have an additional
-review gate; read [SECURITY.md](SECURITY.md) and
-[docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) before editing
-`Cargo.toml` or `Cargo.lock`.
-
-For an unchanged lockfile:
+This project uses Rust 1.86 or newer. Read [SECURITY.md](SECURITY.md) before
+changing dependencies.
 
 ```bash
 make check
@@ -192,16 +178,20 @@ make install-local
 `make install-local` builds the release binary, installs it under
 `~/.local/bin` by default, and installs the matching companion skill.
 
-The release workflow runs the tests on both supported targets, then verifies
-each packaged archive and its isolated installation. To repeat the archive
-check locally without touching your installed CLI or session:
+To check a release archive locally without touching your installed CLI or
+session (keep the matching `.sha256` file next to it):
 
 ```bash
-uv run scripts/release_smoke.py path/to/klms-v0.2.1-aarch64-apple-darwin.tar.gz
+python3 scripts/release_smoke.py path/to/klms-v0.2.1-aarch64-apple-darwin.tar.gz
 ```
 
-Keep the matching `.sha256` file next to the archive. This check is offline;
-authenticated course checks are separate.
+## Documentation
+
+- [docs/COMMAND_CONTRACT.md](docs/COMMAND_CONTRACT.md): command grammar, references, safety rules
+- [docs/JSON.md](docs/JSON.md): JSON envelopes and error codes
+- [docs/LOCAL_LIBRARY.md](docs/LOCAL_LIBRARY.md): the versioned local library
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTH_PROTOCOL.md](docs/AUTH_PROTOCOL.md), [docs/ENDPOINTS.md](docs/ENDPOINTS.md): internals
+- [SECURITY.md](SECURITY.md): security policy and verification
 
 ## License
 
