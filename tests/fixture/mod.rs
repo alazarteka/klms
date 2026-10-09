@@ -1,14 +1,14 @@
+// Each integration target uses a different subset of this shared harness.
+#![allow(dead_code)]
+
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-// Each integration target uses a different subset of this shared harness.
-#[allow(dead_code)]
 pub mod server;
 
 /// Creates `<state_root>/klms/session.json` with the given cookie value and returns `state_root`.
-#[allow(dead_code)]
 pub fn seed_session(state_root: &Path, cookie: &str) -> PathBuf {
     fs::create_dir_all(state_root.join("klms")).unwrap();
     fs::write(
