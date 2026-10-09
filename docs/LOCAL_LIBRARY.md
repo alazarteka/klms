@@ -51,9 +51,11 @@ Only `sync` loads a session. With no flags, sync records courses, manifests,
 and typed activity details. `--notices` walks bounded board pagination.
 `--files` validates file representations with HEAD. `--download changed`
 implies `--files`, conditionally fetches changed bytes, and deduplicates them
-by SHA-256. Parser caps produce incomplete observations without failing a run
-and are counted in the sync summary's `truncated` field; fetch or parse
-failures make the run incomplete.
+by SHA-256. Parser caps (100,000 text characters or 100 links) produce incomplete observations without failing a run
+and are counted in the sync summary's `truncated` field; their representations
+are never marked missing. Fetch or parse failures make the run incomplete. A
+validator refresh with unchanged bytes can append a verified-content observation
+without adding a blob or emitting `verified_content_changed`.
 
 Notice observations contain the post title, body, body links, and attachments,
 not surrounding navigation, dialogs, or view counters. Unrecognized notice
@@ -73,7 +75,7 @@ downloads anything. Read stored notice text with `klms library show REF`
 `klms library sync --course COURSE --download changed` to store bytes.
 Include `--notices` for notice attachments.
 When a notice has no downloaded bytes, its error lists up to 20 currently
-recorded file attachment references and names alongside the text-reading
+recorded file attachment references, in ascending representation-ID order, and names alongside the text-reading
 option, even when the stored text is just punctuation. After an explicit
 download sync, use an attachment reference with `content` or `export`.
 
@@ -86,11 +88,13 @@ file or a resource without recorded file candidates, inspect its stored
 metadata and observation state; local absence does not prove remote absence
 or guarantee that another sync will recover bytes.
 
-`content` returns a bounded preview. `export` verifies the digest and refuses
+`content` returns a bounded preview; a truncated UTF-8 preview drops an
+incomplete trailing code point rather than being classified as binary. `export` verifies the digest and refuses
 an existing destination. Multiple downloaded representations produce
 `CONTENT_UNAVAILABLE` with candidate references; choose a representation or
 exact `sha256:` value.
 
+Numeric references with leading zeros resolve to the same canonical identity.
 Curation subjects and relation endpoints must be courses, resources, or
 representations. A `sha256:` reference identifies immutable bytes: it can be
 inspected or exported, but cannot receive edits or serve as a relation endpoint.
@@ -98,6 +102,8 @@ inspected or exported, but cannot receive edits or serve as a relation endpoint.
 `edit --field summary` binds the assertion to the current source digest.
 Retraction never deletes its assertion or relation. Effective fields use the
 highest active revision and include assertion provenance.
+
+The SQLite schema uses `user_version = 1`.
 
 Local collection `complete` means the local limit did not truncate results.
 `source_complete` describes the latest global sync, while `fresh_through` is
