@@ -51,8 +51,14 @@ codes are accepted for courses only when they resolve unambiguously. Read `ok`,
 the process exit status, `warnings`, and collection `meta`. For library
 queries, `complete` is local pagination completeness; `source_complete`
 independently reports remote coverage and may be null when unknown. Do not
-claim remote exhaustiveness unless `source_complete` is true. JSON schema
-details live in the repository's `docs/JSON.md`.
+claim remote exhaustiveness unless `source_complete` is true.
+
+Every `--json` result is one envelope: success is `{schema_version, ok:true,
+command, data, warnings, meta}` on stdout, and failure is `{schema_version,
+ok:false, error:{code, message, hint, retryable}}` on stderr. Check
+`schema_version` and the installed binary version (`klms --version`) before
+parsing; the machine contract is experimental during 0.x. Collection `meta` reports `returned`, `limit`,
+`complete`, and `next_cursor`; library results also report `source_complete`.
 
 The local library is the durable route for work across sessions. Sync only
 when a human or agent decides current observations are needed; there is no
