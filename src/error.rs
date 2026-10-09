@@ -3,7 +3,7 @@ use std::fmt;
 use serde::Serialize;
 use serde_json::Value;
 
-pub const AUTH_RECOVERY_HINT: &str = "Run `klms auth login` to sign in again. `klms auth extend` only extends a session that is still valid.";
+const AUTH_RECOVERY_HINT: &str = "Run `klms auth login` to sign in again. `klms auth extend` only extends a session that is still valid.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError {

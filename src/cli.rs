@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const LIST_HELP: &str = "Examples:\n  klms courses list\n  klms --json courses list";
+const FILE_PREVIEW_HELP: &str = "Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -150,7 +151,7 @@ pub enum LibraryCommand {
     },
     /// Preview downloaded file bytes (UTF-8 text when available).
     #[command(
-        after_help = "Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links."
+        after_help = FILE_PREVIEW_HELP
     )]
     Content {
         #[arg(value_name = "REF")]
@@ -160,7 +161,7 @@ pub enum LibraryCommand {
     },
     /// Export downloaded file bytes without overwriting.
     #[command(
-        after_help = "Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links."
+        after_help = FILE_PREVIEW_HELP
     )]
     Export {
         #[arg(value_name = "REF")]

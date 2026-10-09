@@ -39,9 +39,7 @@ fn install_files(paths: &Paths) -> Result<(), AppError> {
     ensure_directory(&paths.payload_dir)?;
     write_atomic(&paths.payload_file, EMBEDDED_SKILL.as_bytes())?;
     ensure_directory(&paths.link_parent)?;
-    install_link(&paths.link, &paths.payload_dir)?;
-
-    Ok(())
+    install_link(&paths.link, &paths.payload_dir)
 }
 
 pub fn status() -> Result<output::CommandResult, AppError> {
@@ -222,28 +220,30 @@ fn with_install_at<T>(
         Err(error) => return Err(io_error("read", &paths.payload_file, error)),
     };
     let link_existed = fs::symlink_metadata(&paths.link).is_ok();
-    let result = install_files(&paths).and_then(|_| commit());
-    if let Err(error) = result {
-        let rollback = (|| {
-            if !link_existed && fs::symlink_metadata(&paths.link).is_ok() {
-                fs::remove_file(&paths.link).map_err(|e| io_error("restore", &paths.link, e))?;
+    match install_files(&paths).and_then(|()| commit()) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let rollback = (|| {
+                if !link_existed && fs::symlink_metadata(&paths.link).is_ok() {
+                    fs::remove_file(&paths.link)
+                        .map_err(|e| io_error("restore", &paths.link, e))?;
+                }
+                match previous {
+                    Some(bytes) => write_atomic(&paths.payload_file, &bytes)?,
+                    None if paths.payload_file.exists() => fs::remove_file(&paths.payload_file)
+                        .map_err(|e| io_error("restore", &paths.payload_file, e))?,
+                    None => (),
+                }
+                Ok::<(), AppError>(())
+            })();
+            match rollback {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(AppError::config(format!(
+                    "{error}; skill rollback also failed: {rollback}"
+                ))),
             }
-            match previous {
-                Some(bytes) => write_atomic(&paths.payload_file, &bytes)?,
-                None if paths.payload_file.exists() => fs::remove_file(&paths.payload_file)
-                    .map_err(|e| io_error("restore", &paths.payload_file, e))?,
-                None => (),
-            }
-            Ok::<(), AppError>(())
-        })();
-        return match rollback {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(AppError::config(format!(
-                "{error}; skill rollback also failed: {rollback}"
-            ))),
-        };
+        }
     }
-    result
 }
 
 fn preflight(paths: &Paths) -> Result<(), AppError> {
