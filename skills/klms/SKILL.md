@@ -74,7 +74,9 @@ Check the original process before retrying the same command once it has stopped.
 Do not infer liveness or rewrite history from this status. Partial syncs still
 exit 0: inspect `data.status`, `failures`, `truncated`, and `warnings`.
 
-No-longer-observed notice links are absent from current search, but their
+The first resync after upgrading older observations can record normalization
+changes; preserve those historical records rather than deleting apparent
+duplicates. No-longer-observed notice links are absent from current search, but their
 history and curation remain accessible by reference.
 
 Keep source and effective values distinct. To curate, first inspect the
