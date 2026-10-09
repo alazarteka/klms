@@ -70,12 +70,12 @@ impl KlmsClient {
         timeout_seconds: u64,
     ) -> Result<Self, AppError> {
         let base_url = validate_base_url(base)?;
-        let expected_origin = origin(&base_url);
+        let expected_origin = base_url.origin();
         let policy = Policy::custom(move |attempt: Attempt<'_>| {
             if attempt.previous().len() >= 5 {
                 return attempt.error("too many redirects");
             }
-            if origin(attempt.url()) != expected_origin {
+            if attempt.url().origin() != expected_origin {
                 return attempt.error("cross-origin redirect refused");
             }
             if !attempt.url().username().is_empty() || attempt.url().password().is_some() {
@@ -117,13 +117,7 @@ impl KlmsClient {
     pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let mut response = self.send_get(path)?;
         let final_url = response.url().clone();
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > max_bytes)
-        {
+        if declared_length(&response).is_some_and(|length| length > max_bytes as u64) {
             return Err(AppError::limit(format!(
                 "KLMS response exceeded the {max_bytes} byte limit"
             )));
@@ -222,13 +216,9 @@ impl KlmsClient {
         let mut response = self.send_get(path)?;
         let final_url = response.url().clone();
         let content_type = content_type(&response);
-        let bytes = read_prefix(&mut response, max_bytes)?;
+        let mut bytes = read_prefix(&mut response, max_bytes)?;
         let truncated = bytes.len() > max_bytes;
-        let bytes = if truncated {
-            bytes[..max_bytes].to_vec()
-        } else {
-            bytes
-        };
+        bytes.truncate(max_bytes);
         check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
         Ok(PreviewResponse {
             url: final_url,
@@ -247,13 +237,7 @@ impl KlmsClient {
         let mut response = self.send_get(path)?;
         let metadata = remote_metadata(&response);
         let final_url = response.url().clone();
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > max_bytes)
-        {
+        if declared_length(&response).is_some_and(|length| length > max_bytes as u64) {
             return Err(AppError::limit(format!(
                 "KLMS download exceeded the {max_bytes} byte limit"
             )));
@@ -316,7 +300,7 @@ impl KlmsClient {
             .base_url
             .join(path)
             .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
-        if origin(&url) != origin(&self.base_url) {
+        if url.origin() != self.base_url.origin() {
             return Err(AppError::config("cross-origin request path refused"));
         }
         if !url.username().is_empty() || url.password().is_some() {
@@ -360,13 +344,7 @@ impl KlmsClient {
                 "/lib/ajax/service.php",
             ));
         }
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > MAX_BODY_BYTES)
-        {
+        if declared_length(&response).is_some_and(|length| length > MAX_BODY_BYTES as u64) {
             return Err(AppError::limit(
                 "KLMS AJAX response exceeded the 8 MiB limit",
             ));
@@ -422,11 +400,7 @@ fn remote_metadata(response: &reqwest::blocking::Response) -> RemoteMetadata {
         status: response.status().as_u16(),
         etag: string_header(ETAG),
         last_modified: string_header(LAST_MODIFIED),
-        content_length: response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok()),
+        content_length: declared_length(response),
         content_type: content_type(response),
         content_range: string_header(CONTENT_RANGE),
     }
@@ -479,6 +453,14 @@ fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+fn declared_length(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 /// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
@@ -552,14 +534,6 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
     }
     url.set_path("/");
     Ok(url)
-}
-
-fn origin(url: &Url) -> (String, Option<String>, Option<u16>) {
-    (
-        url.scheme().into(),
-        url.host_str().map(str::to_owned),
-        url.port_or_known_default(),
-    )
 }
 
 fn looks_logged_out(url: &Url, html: &str) -> bool {

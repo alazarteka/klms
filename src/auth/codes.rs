@@ -2,10 +2,9 @@ use crate::error::AppError;
 
 pub fn password_primary(code: &str) -> Result<PrimaryNext, AppError> {
     match code {
-        "SS0001" => Ok(PrimaryNext::Link),
+        "SS0001" | "SS0007" => Ok(PrimaryNext::Link),
         "SS0098" => Ok(PrimaryNext::SecondFactor),
         "SS0099" => Ok(PrimaryNext::Device),
-        "SS0007" => Ok(PrimaryNext::Duplicate),
         "SS0004" | "SS0005" | "SS0006" => Err(AppError::auth_required(
             "KAIST requires a password update before this account can sign in",
         )),
@@ -24,11 +23,10 @@ pub fn password_primary(code: &str) -> Result<PrimaryNext, AppError> {
     }
 }
 
-pub fn otp(code: &str) -> Result<PrimaryNext, AppError> {
+pub fn otp(code: &str) -> Result<Next, AppError> {
     match code {
-        "SS0001" => Ok(PrimaryNext::Link),
-        "SS0099" => Ok(PrimaryNext::Device),
-        "SS0007" => Ok(PrimaryNext::Duplicate),
+        "SS0001" | "SS0007" => Ok(Next::Link),
+        "SS0099" => Ok(Next::Device),
         "E001" => Err(AppError::auth(
             "The verification code is incorrect",
             "Retry login and enter the newest six-digit code.",
@@ -76,11 +74,10 @@ pub fn easy_poll(code: &str) -> Result<EasyPoll, AppError> {
     }
 }
 
-pub fn policy(code: &str) -> Result<PrimaryNext, AppError> {
+pub fn policy(code: &str) -> Result<Next, AppError> {
     match code {
-        "SS0001" | "" => Ok(PrimaryNext::Link),
-        "SS0099" => Ok(PrimaryNext::Device),
-        "SS0007" => Ok(PrimaryNext::Duplicate),
+        "SS0001" | "SS0007" | "" => Ok(Next::Link),
+        "SS0099" => Ok(Next::Device),
         "SS0004" | "SS0005" | "SS0006" => Err(AppError::auth_required(
             "KAIST requires a password update before this account can sign in",
         )),
@@ -96,7 +93,12 @@ pub enum PrimaryNext {
     Link,
     SecondFactor,
     Device,
-    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Link,
+    Device,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

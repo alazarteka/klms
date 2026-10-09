@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 use crate::error::AppError;
 
 use super::{
-    codes::{self, EasyPoll, PrimaryNext},
+    codes::{self, EasyPoll, Next, PrimaryNext},
     crypto::encrypt_user_data,
     model::{LoginMethod, SecondFactor, StoredCookie},
     prompt::AuthPrompt,
@@ -86,7 +86,6 @@ fn password_login(
         PrimaryNext::Link => link(transport),
         PrimaryNext::SecondFactor => second_factor(transport, factor, prompt),
         PrimaryNext::Device => register_device(transport),
-        PrimaryNext::Duplicate => link(transport),
     }
 }
 
@@ -139,11 +138,14 @@ fn second_factor(
         &[("crtfc_no", otp.to_string())],
     )?;
     match codes::otp(result_code(&response)?)? {
-        PrimaryNext::Link | PrimaryNext::Duplicate => link(transport),
-        PrimaryNext::Device => register_device(transport),
-        PrimaryNext::SecondFactor => unreachable!(),
+        Next::Link => link(transport),
+        Next::Device => register_device(transport),
     }
 }
+
+// 60 polls x 3 s = the "three minutes" quoted to the user.
+const EASY_POLLS: u32 = 60;
+const EASY_POLL_SECS: u64 = 3;
 
 fn easy_login(
     transport: &mut SsoTransport,
@@ -188,7 +190,7 @@ fn easy_login(
         prompt.notice("Approve the Easy Login request in the KAIST app within three minutes.");
     }
     let mut approved = false;
-    for _ in 0..60 {
+    for _ in 0..EASY_POLLS {
         let response =
             transport.post_form_json(transport.sso_url("/auth/twofactor/mfa/auth")?, &[])?;
         match codes::easy_poll(result_code(&response)?)? {
@@ -196,7 +198,7 @@ fn easy_login(
                 approved = true;
                 break;
             }
-            EasyPoll::Pending => thread::sleep(Duration::from_secs(3)),
+            EasyPoll::Pending => thread::sleep(Duration::from_secs(EASY_POLL_SECS)),
         }
     }
     if !approved {
@@ -221,9 +223,8 @@ fn easy_login(
         &form,
     )?;
     match codes::policy(result_code(&response)?)? {
-        PrimaryNext::Link | PrimaryNext::Duplicate => link(transport),
-        PrimaryNext::Device => register_device(transport),
-        PrimaryNext::SecondFactor => unreachable!(),
+        Next::Link => link(transport),
+        Next::Device => register_device(transport),
     }
 }
 
@@ -238,16 +239,7 @@ fn login_key(transport: &mut SsoTransport) -> Result<Zeroizing<String>, AppError
 }
 
 fn link(transport: &mut SsoTransport) -> Result<(), AppError> {
-    let klms_origin = format!(
-        "{}://{}{}",
-        transport.klms().scheme(),
-        transport.klms().host_str().unwrap_or_default(),
-        transport
-            .klms()
-            .port()
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default()
-    );
+    let klms_origin = transport.klms().origin().ascii_serialization();
     let (url, html) = transport.post_form_follow(
         transport.sso_url("/auth/user/login/link")?,
         &[
