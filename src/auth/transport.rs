@@ -50,7 +50,7 @@ impl SsoTransport {
     }
 
     pub fn is_klms_origin(&self, url: &Url) -> bool {
-        origin(url) == origin(&self.klms)
+        url.origin() == self.klms.origin()
     }
 
     pub fn get_text(&mut self, url: Url) -> Result<(Url, String), AppError> {
@@ -185,7 +185,7 @@ impl SsoTransport {
     }
 
     fn ensure_allowed(&self, url: &Url) -> Result<(), AppError> {
-        if origin(url) != origin(&self.klms) && origin(url) != origin(&self.sso) {
+        if url.origin() != self.klms.origin() && url.origin() != self.sso.origin() {
             return Err(AppError::auth_protocol(
                 "KAIST SSO attempted a redirect to an untrusted origin",
             ));
@@ -211,14 +211,6 @@ fn validate_pair(klms: &Url, sso: &Url) -> Result<(), AppError> {
         ));
     }
     Ok(())
-}
-
-fn origin(url: &Url) -> (String, String, u16) {
-    (
-        url.scheme().into(),
-        url.host_str().unwrap_or_default().into(),
-        url.port_or_known_default().unwrap_or(0),
-    )
 }
 
 #[cfg(test)]

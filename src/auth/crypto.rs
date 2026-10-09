@@ -7,7 +7,7 @@ use crate::error::AppError;
 type SeedCbc = cbc::Encryptor<SEED>;
 
 pub fn encrypt_user_data(login_key: &str, json: &[u8]) -> Result<String, AppError> {
-    if login_key.len() < 96 {
+    if login_key.len() < 96 || !login_key.is_ascii() {
         return Err(AppError::auth_protocol(
             "KAIST SSO returned a malformed login key",
         ));
@@ -71,6 +71,17 @@ mod tests {
         assert_eq!(
             encrypt_user_data(key, b"{}").unwrap(),
             "d558576b3e0adc65644f932e64d5a1e1"
+        );
+    }
+
+    #[test]
+    fn non_ascii_login_key_is_an_error_not_a_panic() {
+        // 63 ASCII bytes, then a 2-byte char straddling byte 64, padded past 96.
+        let key = format!("{}é{}", "0".repeat(63), "0".repeat(40));
+        assert!(key.len() >= 96 && !key.is_char_boundary(64));
+        assert_eq!(
+            encrypt_user_data(&key, b"{}").unwrap_err().code,
+            "AUTH_PROTOCOL_CHANGED"
         );
     }
 }

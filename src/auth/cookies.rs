@@ -12,7 +12,7 @@ struct Cookie {
     domain: String,
     path: String,
     secure: bool,
-    source_origin: String,
+    source_origin: url::Origin,
 }
 
 #[derive(Debug, Default)]
@@ -23,8 +23,6 @@ pub struct TransientCookies {
 
 impl TransientCookies {
     pub fn capture(&mut self, url: &Url, headers: &HeaderMap) -> Result<(), AppError> {
-        url.host_str()
-            .ok_or_else(|| AppError::auth_protocol("SSO response URL has no host"))?;
         for value in headers.get_all(reqwest::header::SET_COOKIE) {
             let value = value
                 .to_str()
@@ -82,7 +80,7 @@ impl TransientCookies {
                 domain,
                 path,
                 secure,
-                source_origin: origin(url),
+                source_origin: url.origin(),
             });
         }
         Ok(())
@@ -109,7 +107,7 @@ impl TransientCookies {
             .cookies
             .iter()
             .filter(|cookie| {
-                cookie.source_origin == origin(klms)
+                cookie.source_origin == klms.origin()
                     && cookie.path == "/"
                     && (!cookie.secure || klms.scheme() == "https")
             })
@@ -179,15 +177,6 @@ fn valid_value(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| (0x20..0x7f).contains(&byte) && byte != b';')
-}
-
-fn origin(url: &Url) -> String {
-    format!(
-        "{}://{}:{}",
-        url.scheme(),
-        url.host_str().unwrap_or_default(),
-        url.port_or_known_default().unwrap_or(0)
-    )
 }
 
 #[cfg(test)]
