@@ -494,12 +494,12 @@ pub struct AuthLoginArgs {
 
     /// KAIST sign-in method (default: the remembered one, else easy).
     #[arg(long, value_enum)]
-    pub method: Option<AuthMethodArg>,
+    pub method: Option<crate::auth::LoginMethod>,
 
     /// Where password login sends its six-digit code (default: the remembered
     /// one, else email). Applies only to password login.
     #[arg(long, value_enum)]
-    pub second_factor: Option<AuthSecondFactorArg>,
+    pub second_factor: Option<crate::auth::SecondFactor>,
 
     /// Remember the password after a successful password login.
     ///
@@ -525,18 +525,6 @@ pub struct AuthLoginArgs {
         conflicts_with_all = ["user", "method", "second_factor", "remember_password", "insecure_storage"]
     )]
     pub code: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum AuthMethodArg {
-    Easy,
-    Password,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum AuthSecondFactorArg {
-    Email,
-    Sms,
 }
 
 #[derive(Debug, Subcommand)]
