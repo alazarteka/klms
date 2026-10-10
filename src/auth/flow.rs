@@ -1,48 +1,201 @@
-use std::{thread, time::Duration};
+//! The KAIST SSO conversation: prompts, result-code tables, the SEED-CBC
+//! login payload and the password / second-factor / Easy Login steps.
 
-use crate::url::Url;
+use std::{
+    io::{self, Write},
+    thread,
+    time::Duration,
+};
+
+use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::AnsiX923};
+use kisaseed::SEED;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::error::AppError;
+use crate::{error::AppError, url::Url};
 
 use super::{
-    codes::{self, EasyPoll, Next, PrimaryNext},
-    cookies::TransientCookies,
-    crypto::encrypt_user_data,
-    model::{LoginMethod, SecondFactor, StoredCookie},
-    pending::PendingLogin,
-    prompt::AuthPrompt,
+    LoginMethod, SecondFactor,
+    store::{PendingLogin, StoredCookie},
     transport::SsoTransport,
 };
 
 const AGENT_ID: &str = "kaist-prod-klms";
+const LINK_URL: &str = "/user/login/link";
+// 60 polls x 3 s = the "three minutes" quoted to the user.
+const EASY_POLLS: u32 = 60;
+const EASY_POLL_SECS: u64 = 3;
+
+// ---- prompts ----
+
+pub trait AuthPrompt {
+    fn identifier(&mut self) -> Result<String, AppError>;
+    fn password(&mut self) -> Result<Zeroizing<String>, AppError>;
+    fn otp(&mut self, channel: &str) -> Result<Zeroizing<String>, AppError>;
+}
+
+pub struct TerminalPrompt;
+
+impl AuthPrompt for TerminalPrompt {
+    fn identifier(&mut self) -> Result<String, AppError> {
+        eprint!("KAIST ID or email: ");
+        io::stderr().flush().ok();
+        let mut value = String::new();
+        io::stdin()
+            .read_line(&mut value)
+            .map_err(|error| AppError::config(format!("cannot read login identifier: {error}")))?;
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return Err(AppError::usage("login identifier cannot be empty"));
+        }
+        Ok(value)
+    }
+
+    fn password(&mut self) -> Result<Zeroizing<String>, AppError> {
+        rpassword::prompt_password("KAIST password: ")
+            .map(Zeroizing::new)
+            .map_err(|error| {
+                AppError::config(format!("cannot read password from terminal: {error}"))
+            })
+    }
+
+    fn otp(&mut self, channel: &str) -> Result<Zeroizing<String>, AppError> {
+        rpassword::prompt_password(format!("Six-digit code sent by {channel}: "))
+            .map(Zeroizing::new)
+            .map_err(|error| AppError::config(format!("cannot read verification code: {error}")))
+    }
+}
+
+// ---- result codes ----
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Password,
+    Otp,
+    Policy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    Link,
+    Device,
+    SecondFactor,
+}
+
+/// What KAIST's result `code` means at this `stage`; unknown codes are a
+/// protocol change.
+fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
+    use Stage::{Otp, Password, Policy};
+    let again = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
+    match (stage, code) {
+        (_, "SS0001" | "SS0007") | (Policy, "") => Ok(Next::Link),
+        (_, "SS0099") => Ok(Next::Device),
+        (Password, "SS0098") => Ok(Next::SecondFactor),
+        (Password | Policy, "SS0004" | "SS0005" | "SS0006") => Err(AppError::auth_required(
+            "KAIST requires a password update before this account can sign in",
+        )),
+        (Password, "EAU001") => again(
+            "KAIST rejected the login identifier or password",
+            "Check the credentials and retry `klms auth login --method password`.",
+        ),
+        (Password, "EAU005" | "EAU006" | "EAU007") => again(
+            "KAIST temporarily locked password login after repeated failures",
+            "Wait for the lockout to expire, then retry.",
+        ),
+        (Otp, "E001") => again(
+            "The verification code is incorrect",
+            "Retry login and enter the newest six-digit code.",
+        ),
+        (Otp, "E002") => again(
+            "The verification code expired",
+            "Retry login to request a new code.",
+        ),
+        (Otp, "E003") => again(
+            "Too many verification attempts",
+            "Retry login to request a new code.",
+        ),
+        (_, "ES0017") | (Password | Policy, "EAU016" | "EAU017" | "EAU018") => {
+            let what = match stage {
+                Password => "login",
+                Otp => "verification",
+                Policy => "login policy",
+            };
+            Err(AppError::auth_protocol(format!(
+                "KAIST rejected the {what} transaction"
+            )))
+        }
+        _ => Err(AppError::auth_protocol(format!(
+            "KAIST SSO returned unknown result code {code:?}"
+        ))),
+    }
+}
+
+/// `Ok(true)` once the Easy Login request is approved, `Ok(false)` while pending.
+fn easy_approved(code: &str) -> Result<bool, AppError> {
+    let blocked = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
+    match code {
+        "" | "SS0001" => Ok(true),
+        "ESY020" => Ok(false),
+        "ESY021" => blocked(
+            "Easy Login is temporarily blocked",
+            "Wait and retry after the block expires.",
+        ),
+        "ESY022" => blocked(
+            "Easy Login is blocked for this account",
+            "Use password login or contact KAIST support.",
+        ),
+        "ESY023" => blocked(
+            "Easy Login was cancelled",
+            "Run `klms auth login --method easy` to start again.",
+        ),
+        "ESY024" => blocked(
+            "Easy Login verification did not match",
+            "Start a new Easy Login request.",
+        ),
+        "E004" => blocked("Easy Login expired", "Start a new Easy Login request."),
+        other => Err(AppError::auth_protocol(format!(
+            "KAIST SSO returned unknown result code {other:?}"
+        ))),
+    }
+}
+
+// ---- login payload encryption ----
+
+fn encrypt_user_data(login_key: &str, json: &[u8]) -> Result<String, AppError> {
+    let malformed = || AppError::auth_protocol("KAIST SSO returned malformed hexadecimal data");
+    let unhex = |hex: &str| -> Result<Vec<u8>, AppError> {
+        let nibble = |byte: &u8| (*byte as char).to_digit(16).map(|digit| digit as u8);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| Some(nibble(&pair[0])? << 4 | nibble(&pair[1])?))
+            .collect::<Option<_>>()
+            .ok_or_else(malformed)
+    };
+    if login_key.len() < 96 || !login_key.is_ascii() {
+        return Err(AppError::auth_protocol(
+            "KAIST SSO returned a malformed login key",
+        ));
+    }
+    let key = Zeroizing::new(unhex(&login_key[..64])?);
+    let iv = Zeroizing::new(unhex(&login_key[64..96])?);
+    // CryptoJS accepts a 256-bit parsed key, but KISA SEED is a 128-bit cipher.
+    // Its implementation consumes the first 128 bits, matching the live site.
+    let cipher = cbc::Encryptor::<SEED>::new_from_slices(&key[..16], &iv)
+        .map_err(|_| AppError::auth_protocol("KAIST SSO returned an invalid login key"))?;
+    let encrypted = cipher.encrypt_padded_vec_mut::<AnsiX923>(json);
+    Ok(encrypted.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+// ---- the conversation ----
 
 pub struct CompletedLogin {
     pub cookies: Vec<StoredCookie>,
     pub devices: Vec<String>,
 }
 
-/// What to do once KAIST has sent the second-factor code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OtpMode {
-    /// Ask the prompt for the code and finish in this process.
-    Prompt,
-    /// Stop after the code is sent and return the state needed to resume.
-    Defer,
-}
-
 pub enum Outcome {
     Complete(CompletedLogin),
     CodeRequired(PendingLogin),
-}
-
-enum PasswordStep {
-    Complete,
-    CodeSent {
-        channel: &'static str,
-        factor: SecondFactor,
-    },
 }
 
 /// Everything one login attempt needs besides its prompt.
@@ -53,10 +206,22 @@ pub struct Attempt<'a> {
     pub method: LoginMethod,
     pub factor: Option<SecondFactor>,
     pub previous_devices: &'a [String],
-    pub otp_mode: OtpMode,
+    /// Stop after sending a second-factor code instead of prompting for it.
+    pub defer_code: bool,
+    /// Answers already known (`--user`, a remembered identifier or password);
+    /// the prompt is asked for the rest.
+    pub username: Option<String>,
+    pub password: Option<Zeroizing<String>>,
 }
 
-pub fn begin(attempt: &Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Outcome, AppError> {
+pub struct Begun {
+    pub outcome: Outcome,
+    /// The identifier and (password method) password that KAIST accepted.
+    pub username: String,
+    pub password: Option<Zeroizing<String>>,
+}
+
+pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun, AppError> {
     let Attempt {
         klms,
         sso,
@@ -64,37 +229,71 @@ pub fn begin(attempt: &Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Outc
         method,
         factor,
         previous_devices,
-        otp_mode,
-    } = *attempt;
+        defer_code,
+        username,
+        password,
+    } = attempt;
     let mut transport = SsoTransport::new(klms.clone(), sso.clone(), timeout)?;
-    let entry = login_entry(&transport)?;
-    transport.get_text(entry)?;
-    let identifier = Zeroizing::new(prompt.identifier()?);
-    match method {
-        LoginMethod::Password => {
-            let step = password_login(
-                &mut transport,
-                &identifier,
-                factor.unwrap_or(SecondFactor::Email),
-                previous_devices,
-                prompt,
-                otp_mode,
-            )?;
-            if let PasswordStep::CodeSent { channel, factor } = step {
-                return Ok(Outcome::CodeRequired(PendingLogin::new(
-                    klms,
-                    &identifier,
-                    factor.as_str(),
-                    channel,
-                    transport.document_url(),
-                    previous_devices.to_vec(),
-                    transport.cookies.snapshot(),
-                )));
+    let mut entry = transport.url("/auth/kaist/user/login/view")?;
+    let target = klms.as_str();
+    entry
+        .query_pairs_mut()
+        .append_pair("agt_id", AGENT_ID)
+        .append_pair("agt_url", target)
+        .append_pair("add_param_url", target);
+    transport.get(entry.as_str())?;
+    let username = match username {
+        Some(username) => username,
+        None => prompt.identifier()?,
+    };
+    let mut password_used = None;
+    let mut pending = None;
+    if method == LoginMethod::Easy {
+        easy_login(&mut transport, &username, previous_devices)?;
+    } else {
+        let password = match password {
+            Some(password) => password,
+            None => prompt.password()?,
+        };
+        if password.is_empty() {
+            return Err(AppError::usage("password cannot be empty"));
+        }
+        let factor = factor.unwrap_or(SecondFactor::Email);
+        let payload = json!({
+            "login_id": username,
+            "login_pwd": password.as_str(),
+            "agt_id": AGENT_ID,
+            "linkUrl": LINK_URL,
+            "device_cd": previous_devices,
+        });
+        let response = auth_request(&mut transport, &payload, "/auth/user/login/auth")?;
+        match next(Stage::Password, result_code(&response)?)? {
+            Next::Link => link(&mut transport)?,
+            Next::Device => register_device(&mut transport)?,
+            Next::SecondFactor => {
+                if second_factor(&mut transport, factor, prompt, defer_code)? {
+                    pending = Some(PendingLogin::new(
+                        klms,
+                        &username,
+                        factor,
+                        transport.document_url(),
+                        previous_devices,
+                        &transport.cookies,
+                    ));
+                }
             }
         }
-        LoginMethod::Easy => easy_login(&mut transport, &identifier, previous_devices, prompt)?,
+        password_used = Some(password);
     }
-    finish(&transport, previous_devices).map(Outcome::Complete)
+    let outcome = match pending {
+        Some(pending) => Outcome::CodeRequired(pending),
+        None => Outcome::Complete(finish(&transport, previous_devices)?),
+    };
+    Ok(Begun {
+        outcome,
+        username,
+        password: password_used,
+    })
 }
 
 /// Finish a login whose code was requested by an earlier process.
@@ -106,7 +305,7 @@ pub fn resume(
     code: &str,
 ) -> Result<CompletedLogin, AppError> {
     let mut transport = SsoTransport::new(klms.clone(), sso.clone(), timeout)?;
-    transport.cookies = TransientCookies::restore(&pending.jar)?;
+    transport.cookies = pending.jar.clone().checked()?;
     if let Some(document) = &pending.document_url {
         let url = Url::parse(document)
             .map_err(|_| AppError::config("saved login state has an invalid document URL"))?;
@@ -116,113 +315,99 @@ pub fn resume(
     finish(&transport, &pending.previous_devices)
 }
 
-fn finish(
-    transport: &SsoTransport,
-    previous_devices: &[String],
-) -> Result<CompletedLogin, AppError> {
+fn finish(transport: &SsoTransport, previous: &[String]) -> Result<CompletedLogin, AppError> {
     let cookies = transport.cookies.klms_cookies(transport.klms());
-    let mut devices = previous_devices.to_vec();
-    devices.extend(transport.cookies.device_values());
-    devices.sort();
-    devices.dedup();
     if cookies.is_empty() {
         return Err(AppError::auth_protocol(
             "KAIST SSO did not establish a KLMS session",
         ));
     }
+    let mut devices = previous.to_vec();
+    devices.extend(transport.cookies.device_values());
+    devices.sort();
+    devices.dedup();
     Ok(CompletedLogin { cookies, devices })
 }
 
-fn password_login(
+/// Encrypt `payload` with a fresh login key and POST it to `path`.
+fn auth_request(
     transport: &mut SsoTransport,
-    identifier: &str,
-    factor: SecondFactor,
-    devices: &[String],
-    prompt: &mut impl AuthPrompt,
-    otp_mode: OtpMode,
-) -> Result<PasswordStep, AppError> {
-    let password = prompt.password()?;
-    if password.is_empty() {
-        return Err(AppError::usage("password cannot be empty"));
-    }
-    let key = login_key(transport)?;
-    let payload = Zeroizing::new(
-        serde_json::to_vec(&json!({
-            "login_id": identifier,
-            "login_pwd": password.as_str(),
-            "agt_id": AGENT_ID,
-            "linkUrl": "/user/login/link",
-            "device_cd": devices,
-        }))
-        .map_err(|error| AppError::internal(format!("failed to encode login request: {error}")))?,
-    );
+    payload: &Value,
+    path: &str,
+) -> Result<Value, AppError> {
+    let init = transport.ajax("/auth/user/login/init", &[])?;
+    let key = init
+        .get("result_data")
+        .or_else(|| init.get("resultData"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::auth_protocol("KAIST SSO login init omitted its key"))?;
+    let key = Zeroizing::new(key.to_owned());
+    let payload =
+        Zeroizing::new(serde_json::to_vec(payload).map_err(|error| {
+            AppError::internal(format!("failed to encode login request: {error}"))
+        })?);
     let encrypted = Zeroizing::new(encrypt_user_data(&key, &payload)?);
-    let url = transport.sso_url("/auth/user/login/auth")?;
-    let response = transport.post_form_json(url, &[("user_data", encrypted.to_string())])?;
-    match codes::password_primary(result_code(&response)?)? {
-        PrimaryNext::Link => link(transport).map(|()| PasswordStep::Complete),
-        PrimaryNext::SecondFactor => second_factor(transport, factor, prompt, otp_mode),
-        PrimaryNext::Device => register_device(transport).map(|()| PasswordStep::Complete),
-    }
+    transport.ajax(path, &[("user_data", encrypted.as_str())])
 }
 
+/// Ask KAIST to send the code. `Ok(true)` means it was sent and (with
+/// `defer_code`) is still to be entered by a later `--code` run.
 fn second_factor(
     transport: &mut SsoTransport,
     factor: SecondFactor,
     prompt: &mut impl AuthPrompt,
-    otp_mode: OtpMode,
-) -> Result<PasswordStep, AppError> {
-    let view = transport.sso_url("/auth/kaist/user/login/second/view")?;
-    transport.post_form_follow(
-        view,
-        &[
-            ("user_gubun", "user".into()),
-            ("linkUrl", "/user/login/link".into()),
-        ],
-    )?;
+    defer_code: bool,
+) -> Result<bool, AppError> {
+    let form = [("user_gubun", "user"), ("linkUrl", LINK_URL)];
+    transport.post("/auth/kaist/user/login/second/view", &form)?;
     let (endpoint, channel) = match factor {
         SecondFactor::Email => ("/auth/kaist/user/login/second/ajaxSendMail", "email"),
         SecondFactor::Sms => ("/auth/kaist/user/login/second/ajaxSendSms", "SMS"),
     };
-    let response = transport.post_form_json(transport.sso_url(endpoint)?, &[])?;
-    let code = result_code(&response)?;
-    if code != "SS0001" {
-        return match code {
-            "ES0003" => Err(AppError::auth(
+    let response = transport.ajax(endpoint, &[])?;
+    let refused = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
+    match result_code(&response)? {
+        "SS0001" => {}
+        "ES0003" => {
+            return refused(
                 "KAIST has no usable destination for that verification method",
                 "Retry with the other `--second-factor` value.",
-            )),
-            "ES0018" => Err(AppError::auth(
+            );
+        }
+        "ES0018" => {
+            return refused(
                 "KAIST verification requests are temporarily limited",
                 "Wait, then retry login.",
-            )),
-            "EMS_FAIL" | "UMS_FAIL" | "EMS_ERR_CONNECT" | "UMS_ERR_CONNECT" => Err(
-                AppError::network("KAIST could not deliver the verification code"),
-            ),
-            other => Err(AppError::auth_protocol(format!(
+            );
+        }
+        "EMS_FAIL" | "UMS_FAIL" | "EMS_ERR_CONNECT" | "UMS_ERR_CONNECT" => {
+            return Err(AppError::network(
+                "KAIST could not deliver the verification code",
+            ));
+        }
+        other => {
+            return Err(AppError::auth_protocol(format!(
                 "KAIST returned unknown verification-send code {other:?}"
-            ))),
-        };
+            )));
+        }
     }
-    if otp_mode == OtpMode::Defer {
-        return Ok(PasswordStep::CodeSent { channel, factor });
+    if defer_code {
+        return Ok(true);
     }
-    prompt.notice("KAIST sent a verification code. It expires in three minutes.");
+    eprintln!("KAIST sent a verification code. It expires in three minutes.");
     let otp = prompt.otp(channel)?;
     verify_code(transport, &otp)?;
-    Ok(PasswordStep::Complete)
+    Ok(false)
 }
 
 /// Check a six-digit code with KAIST and finish the link/device step.
 fn verify_code(transport: &mut SsoTransport, otp: &str) -> Result<(), AppError> {
     check_code_format(otp)?;
-    let response = transport.post_form_json(
-        transport.sso_url("/auth/kaist/user/login/second/ajaxValidCrtfcNo")?,
-        &[("crtfc_no", otp.to_owned())],
-    )?;
-    match codes::otp(result_code(&response)?)? {
-        Next::Link => link(transport),
+    let path = "/auth/kaist/user/login/second/ajaxValidCrtfcNo";
+    let response = transport.ajax(path, &[("crtfc_no", otp)])?;
+    match next(Stage::Otp, result_code(&response)?)? {
         Next::Device => register_device(transport),
+        _ => link(transport),
     }
 }
 
@@ -235,27 +420,13 @@ pub fn check_code_format(otp: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-// 60 polls x 3 s = the "three minutes" quoted to the user.
-const EASY_POLLS: u32 = 60;
-const EASY_POLL_SECS: u64 = 3;
-
 fn easy_login(
     transport: &mut SsoTransport,
-    identifier: &str,
+    username: &str,
     previous_devices: &[String],
-    prompt: &mut impl AuthPrompt,
 ) -> Result<(), AppError> {
-    let key = login_key(transport)?;
-    let payload = Zeroizing::new(
-        serde_json::to_vec(&json!({"login_id": identifier, "agt_id": AGENT_ID})).map_err(
-            |error| AppError::internal(format!("failed to encode Easy Login request: {error}")),
-        )?,
-    );
-    let encrypted = Zeroizing::new(encrypt_user_data(&key, &payload)?);
-    let response = transport.post_form_json(
-        transport.sso_url("/auth/twofactor/mfa/init")?,
-        &[("user_data", encrypted.to_string())],
-    )?;
+    let payload = json!({"login_id": username, "agt_id": AGENT_ID});
+    let response = auth_request(transport, &payload, "/auth/twofactor/mfa/init")?;
     let code = result_code(&response)?;
     if code == "ESY008" {
         return Err(AppError::auth(
@@ -263,35 +434,31 @@ fn easy_login(
             "Use `klms auth login --method password`.",
         ));
     }
-    if !code.is_empty() && code != "SS0001" {
+    if !matches!(code, "" | "SS0001") {
         return Err(AppError::auth_protocol(format!(
             "KAIST returned unknown Easy Login init code {code:?}"
         )));
     }
-    let (_, challenge_html) = transport.post_form_follow(
-        transport.sso_url("/auth/twofactor/mfa/login2Factor")?,
-        &[("linkUrl", "/user/login/link".into())],
-    )?;
-    if let Some(display) =
-        crate::parse::easy_login_code(&challenge_html).or_else(|| display_code(&response))
-    {
-        prompt.notice(&format!(
-            "Approve Easy Login in the KAIST app. Confirmation code: {display}"
-        ));
-    } else {
-        prompt.notice("Approve the Easy Login request in the KAIST app within three minutes.");
+    let (_, challenge) =
+        transport.post("/auth/twofactor/mfa/login2Factor", &[("linkUrl", LINK_URL)])?;
+    let display = crate::parse::easy_login_code(&challenge).or_else(|| {
+        ["display_code", "displayCode", "auth_no", "authNo"]
+            .iter()
+            .find_map(|key| response.get(key).and_then(Value::as_str))
+            .map(str::to_owned)
+    });
+    match display {
+        Some(code) => eprintln!("Approve Easy Login in the KAIST app. Confirmation code: {code}"),
+        None => eprintln!("Approve the Easy Login request in the KAIST app within three minutes."),
     }
     let mut approved = false;
     for _ in 0..EASY_POLLS {
-        let response =
-            transport.post_form_json(transport.sso_url("/auth/twofactor/mfa/auth")?, &[])?;
-        match codes::easy_poll(result_code(&response)?)? {
-            EasyPoll::Approved => {
-                approved = true;
-                break;
-            }
-            EasyPoll::Pending => thread::sleep(Duration::from_secs(EASY_POLL_SECS)),
+        let response = transport.ajax("/auth/twofactor/mfa/auth", &[])?;
+        approved = easy_approved(result_code(&response)?)?;
+        if approved {
+            break;
         }
+        thread::sleep(Duration::from_secs(EASY_POLL_SECS));
     }
     if !approved {
         return Err(AppError::auth(
@@ -299,48 +466,29 @@ fn easy_login(
             "Run `klms auth login --method easy` to start again.",
         ));
     }
-    let mut form = previous_devices
+    let devices = transport.cookies.device_values();
+    let form: Vec<_> = previous_devices
         .iter()
-        .map(|value| ("device", value.clone()))
-        .collect::<Vec<_>>();
-    form.extend(
-        transport
-            .cookies
-            .device_values()
-            .into_iter()
-            .map(|value| ("device", value)),
-    );
-    let response = transport.post_form_json(
-        transport.sso_url("/auth/kaist/user/login/check/policy")?,
-        &form,
-    )?;
-    match codes::policy(result_code(&response)?)? {
-        Next::Link => link(transport),
+        .chain(&devices)
+        .map(|device| ("device", device.as_str()))
+        .collect();
+    let response = transport.ajax("/auth/kaist/user/login/check/policy", &form)?;
+    match next(Stage::Policy, result_code(&response)?)? {
         Next::Device => register_device(transport),
+        _ => link(transport),
     }
 }
 
-fn login_key(transport: &mut SsoTransport) -> Result<Zeroizing<String>, AppError> {
-    let response = transport.post_form_json(transport.sso_url("/auth/user/login/init")?, &[])?;
-    let key = response
-        .get("result_data")
-        .or_else(|| response.get("resultData"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::auth_protocol("KAIST SSO login init omitted its key"))?;
-    Ok(Zeroizing::new(key.to_owned()))
-}
-
 fn link(transport: &mut SsoTransport) -> Result<(), AppError> {
-    let klms_origin = transport.klms().origin().ascii_serialization();
-    let (url, html) = transport.post_form_follow(
-        transport.sso_url("/auth/user/login/link")?,
-        &[
-            ("agt_id", AGENT_ID.into()),
-            ("agt_url", klms_origin.clone()),
-            ("add_param_url", format!("{klms_origin}/")),
-            ("linkUrl", "/user/login/link".into()),
-        ],
-    )?;
+    let origin = transport.klms().origin().ascii_serialization();
+    let home = format!("{origin}/");
+    let form = [
+        ("agt_id", AGENT_ID),
+        ("agt_url", origin.as_str()),
+        ("add_param_url", home.as_str()),
+        ("linkUrl", LINK_URL),
+    ];
+    let (url, html) = transport.post("/auth/user/login/link", &form)?;
     if transport.is_klms_origin(&url) {
         return Ok(());
     }
@@ -352,12 +500,12 @@ fn link(transport: &mut SsoTransport) -> Result<(), AppError> {
         )));
     }
     let handoff = crate::parse::auth_handoff_form(&html, &url, transport.klms())?;
-    let form = handoff
+    let form: Vec<_> = handoff
         .fields
         .iter()
-        .map(|(name, value)| (name.as_str(), value.clone()))
-        .collect::<Vec<_>>();
-    let (url, _) = transport.post_form_follow(handoff.action, &form)?;
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let (url, _) = transport.post(handoff.action.as_str(), &form)?;
     if !transport.is_klms_origin(&url) {
         return Err(AppError::auth_protocol(
             "KAIST SSO handoff did not establish a KLMS session",
@@ -366,63 +514,46 @@ fn link(transport: &mut SsoTransport) -> Result<(), AppError> {
     Ok(())
 }
 
-fn login_entry(transport: &SsoTransport) -> Result<Url, AppError> {
-    let mut url = transport.sso_url("/auth/kaist/user/login/view")?;
-    let target = transport.klms().as_str();
-    url.query_pairs_mut()
-        .append_pair("agt_id", AGENT_ID)
-        .append_pair("agt_url", target)
-        .append_pair("add_param_url", target);
-    Ok(url)
-}
-
 fn result_code(value: &Value) -> Result<&str, AppError> {
-    value
-        .get("result_code")
-        .or_else(|| value.get("resultCode"))
-        .or_else(|| value.get("errorCode"))
-        .or_else(|| value.get("error_code"))
-        .or_else(|| value.get("code"))
-        .and_then(Value::as_str)
-        .or_else(|| value.as_bool().and_then(|ok| ok.then_some("")))
-        .or_else(|| {
-            value
-                .get("result")
-                .and_then(Value::as_bool)
-                .and_then(|ok| ok.then_some(""))
-        })
-        .or_else(|| value.get("result_data").is_some().then_some(""))
-        .ok_or_else(|| {
-            let keys = value
-                .as_object()
-                .map(|object| object.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            AppError::auth_protocol(format!(
-                "KAIST SSO response omitted its result code (fields: {keys:?})"
-            ))
-        })
-}
-
-fn display_code(value: &Value) -> Option<String> {
-    ["display_code", "displayCode", "auth_no", "authNo"]
-        .iter()
-        .find_map(|key| value.get(key).and_then(Value::as_str))
-        .map(str::to_owned)
+    [
+        "result_code",
+        "resultCode",
+        "errorCode",
+        "error_code",
+        "code",
+    ]
+    .iter()
+    .find_map(|key| value.get(key).and_then(Value::as_str))
+    .or_else(|| value.as_bool().and_then(|ok| ok.then_some("")))
+    .or_else(|| {
+        let ok = value.get("result").and_then(Value::as_bool);
+        (ok == Some(true) || value.get("result_data").is_some()).then_some("")
+    })
+    .ok_or_else(|| {
+        let keys = value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        AppError::auth_protocol(format!(
+            "KAIST SSO response omitted its result code (fields: {keys:?})"
+        ))
+    })
 }
 
 fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
-    let (_, html) = transport.get_text(transport.sso_url("/auth/kaist/user/device/view")?)?;
-    let shape = crate::parse::auth_policy_shape(&html)?;
     const REGISTER: &str = "/auth/kaist/user/device/ajaxRegist";
     const COMPLETE: &str = "/auth/kaist/user/device/login";
-    if !shape.actions.iter().any(|action| action == REGISTER)
-        || !shape.actions.iter().any(|action| action == COMPLETE)
+    let (_, html) = transport.get("/auth/kaist/user/device/view")?;
+    let shape = crate::parse::auth_policy_shape(&html)?;
+    if ![REGISTER, COMPLETE]
+        .iter()
+        .all(|wanted| shape.actions.iter().any(|action| action == wanted))
     {
         return Err(AppError::auth_protocol(
             "KAIST device-registration page omitted its expected actions",
         ));
     }
-    let response = transport.post_form_json(transport.sso_url(REGISTER)?, &[])?;
+    let response = transport.ajax(REGISTER, &[])?;
     let code = result_code(&response)?;
     if !matches!(code, "" | "SS0001") {
         return Err(AppError::auth_protocol(format!(
@@ -437,297 +568,80 @@ fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
             AppError::auth_protocol("KAIST device registration omitted its identifier")
         })?;
     transport.cookies.remember_device(device)?;
-    let (url, _) = transport.get_text(transport.sso_url(COMPLETE)?)?;
-    if !transport.is_klms_origin(&url) {
-        if url.path() == "/auth/user/login/link" {
-            return link(transport);
-        }
-        return Err(AppError::auth_protocol(format!(
-            "KAIST device completion ended at {}{}",
-            url.host_str().unwrap_or("unknown-host"),
-            url.path()
-        )));
+    let (url, _) = transport.get(COMPLETE)?;
+    if transport.is_klms_origin(&url) {
+        return Ok(());
     }
-    Ok(())
+    if url.path() == "/auth/user/login/link" {
+        return link(transport);
+    }
+    Err(AppError::auth_protocol(format!(
+        "KAIST device completion ended at {}{}",
+        url.host_str().unwrap_or("unknown-host"),
+        url.path()
+    )))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        thread,
-    };
-
-    use zeroize::Zeroizing;
-
     use super::*;
 
-    struct FakePrompt;
-
-    impl AuthPrompt for FakePrompt {
-        fn identifier(&mut self) -> Result<String, AppError> {
-            Ok("student".into())
-        }
-        fn password(&mut self) -> Result<Zeroizing<String>, AppError> {
-            Ok(Zeroizing::new("password".into()))
-        }
-        fn otp(&mut self, _channel: &str) -> Result<Zeroizing<String>, AppError> {
-            Ok(Zeroizing::new("123456".into()))
-        }
-        fn notice(&mut self, _message: &str) {}
-    }
-
-    /// Reads one complete request (headers and Content-Length body), however
-    /// the client splits it across writes.
-    fn read_request(stream: &mut std::net::TcpStream) -> String {
-        let mut raw = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        loop {
-            let read = stream.read(&mut chunk).unwrap();
-            assert!(read > 0, "incomplete request");
-            raw.extend_from_slice(&chunk[..read]);
-            let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
-                continue;
-            };
-            let head = String::from_utf8_lossy(&raw[..at]).to_ascii_lowercase();
-            let length = head
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length:")?.trim().parse().ok())
-                .unwrap_or(0);
-            if raw.len() >= at + 4 + length {
-                return String::from_utf8_lossy(&raw).into_owned();
-            }
-        }
-    }
-
-    fn complete(outcome: Result<Outcome, AppError>) -> CompletedLogin {
-        match outcome.unwrap() {
-            Outcome::Complete(completed) => completed,
-            Outcome::CodeRequired(_) => panic!("expected a completed login"),
-        }
-    }
-
     #[test]
-    fn password_email_flow_crosses_only_sso_and_klms_origins() {
-        let sso_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let klms_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let sso_address = sso_listener.local_addr().unwrap();
-        let klms_address = klms_listener.local_addr().unwrap();
-        let sso = thread::spawn(move || {
-            let responses = [
-                (
-                    "200 OK",
-                    "text/html",
-                    "login".to_owned(),
-                    Some("sso-session=one; Path=/"),
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48)),
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    r#"{"result_code":"SS0098"}"#.into(),
-                    None,
-                ),
-                ("200 OK", "text/html", "second".into(), None),
-                (
-                    "200 OK",
-                    "application/json",
-                    r#"{"errorCode":"SS0001"}"#.into(),
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    r#"{"result_code":"SS0001"}"#.into(),
-                    None,
-                ),
-                ("302 Found", "text/plain", String::new(), None),
-            ];
-            for (index, (status, content_type, body, cookie)) in responses.into_iter().enumerate() {
-                let (mut stream, _) = sso_listener.accept().unwrap();
-                let request = read_request(&mut stream);
-                if (1..=2).contains(&index) || (4..=5).contains(&index) {
-                    assert!(
-                        request
-                            .to_ascii_lowercase()
-                            .contains("x-requested-with: xmlhttprequest")
-                    );
-                }
-                let mut extra = String::new();
-                if let Some(cookie) = cookie {
-                    extra.push_str(&format!("Set-Cookie: {cookie}\r\n"));
-                }
-                if index == 6 {
-                    extra.push_str(&format!("Location: http://{klms_address}/\r\n"));
-                }
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
-        });
-        let klms = thread::spawn(move || {
-            let (mut stream, _) = klms_listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            assert!(request.starts_with("GET / HTTP/1.1"));
-            write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: MoodleSession=owned; Path=/; HttpOnly\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
-        });
-
-        let completed = complete(begin(
-            &Attempt {
-                klms: &Url::parse(&format!("http://{klms_address}/")).unwrap(),
-                sso: &Url::parse(&format!("http://{sso_address}/")).unwrap(),
-                timeout: 5,
-                method: LoginMethod::Password,
-                factor: Some(SecondFactor::Email),
-                previous_devices: &[],
-                otp_mode: OtpMode::Prompt,
-            },
-            &mut FakePrompt,
-        ));
-        sso.join().unwrap();
-        klms.join().unwrap();
+    fn result_codes_map_per_stage_and_unknown_ones_are_protocol_changes() {
+        use Stage::{Otp, Password, Policy};
+        for (stage, code, expected) in [
+            (Password, "SS0001", Next::Link),
+            (Password, "SS0098", Next::SecondFactor),
+            (Password, "SS0099", Next::Device),
+            (Otp, "SS0007", Next::Link),
+            (Policy, "", Next::Link),
+        ] {
+            assert_eq!(next(stage, code).unwrap(), expected, "{code}");
+        }
+        for (stage, code, error) in [
+            (Password, "SS0004", "AUTH_REQUIRED"),
+            (Password, "EAU001", "AUTH_REQUIRED"),
+            (Password, "EAU016", "AUTH_PROTOCOL_CHANGED"),
+            (Otp, "E001", "AUTH_REQUIRED"),
+            (Otp, "ES0017", "AUTH_PROTOCOL_CHANGED"),
+            (Otp, "SS0098", "AUTH_PROTOCOL_CHANGED"),
+            (Policy, "SS0005", "AUTH_REQUIRED"),
+            (Password, "NEW_CODE", "AUTH_PROTOCOL_CHANGED"),
+            (Otp, "NEW_CODE", "AUTH_PROTOCOL_CHANGED"),
+        ] {
+            assert_eq!(next(stage, code).unwrap_err().code, error, "{code}");
+        }
+        assert!(easy_approved("SS0001").unwrap() && !easy_approved("ESY020").unwrap());
+        assert_eq!(easy_approved("ESY021").unwrap_err().code, "AUTH_REQUIRED");
         assert_eq!(
-            completed.cookies,
-            vec![StoredCookie {
-                name: "MoodleSession".into(),
-                value: "owned".into()
-            }]
+            easy_approved("NEW_CODE").unwrap_err().code,
+            "AUTH_PROTOCOL_CHANGED"
         );
     }
 
     #[test]
-    fn password_flow_registers_first_device_and_submits_klms_handoff() {
-        let sso_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let klms_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let sso_address = sso_listener.local_addr().unwrap();
-        let klms_address = klms_listener.local_addr().unwrap();
-        let sso_origin = format!("http://{sso_address}");
-        let sso = thread::spawn(move || {
-            let handoff = format!(
-                r#"<form action="http://{klms_address}/login/ssologin.php" method="post"><input type="hidden" name="ticket" value="opaque"></form>"#
-            );
-            let responses = [
-                (
-                    "200 OK",
-                    "text/html",
-                    "login".to_owned(),
-                    Some("sso-session=one; Path=/"),
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    format!(r#"{{"result_data":"{}"}}"#, "00".repeat(48)),
-                    None,
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    r#"{"result_code":"SS0099"}"#.into(),
-                    None,
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "text/html",
-                    r#"<script>fetch('/auth/kaist/user/device/ajaxRegist'); location.href='/auth/kaist/user/device/login';</script>"#.into(),
-                    None,
-                    None,
-                ),
-                (
-                    "200 OK",
-                    "application/json",
-                    r#"{"code":"","device_cd":"trusted-device"}"#.into(),
-                    None,
-                    None,
-                ),
-                (
-                    "302 Found",
-                    "text/plain",
-                    String::new(),
-                    None,
-                    Some("/auth/user/login/link"),
-                ),
-                (
-                    "200 OK",
-                    "text/html",
-                    "link".into(),
-                    None,
-                    None,
-                ),
-                ("200 OK", "text/html", handoff, None, None),
-            ];
-            for (index, (status, content_type, body, cookie, location)) in
-                responses.into_iter().enumerate()
-            {
-                let (mut stream, _) = sso_listener.accept().unwrap();
-                let request = read_request(&mut stream);
-                if matches!(index, 1 | 2 | 4) {
-                    assert!(
-                        request
-                            .to_ascii_lowercase()
-                            .contains("x-requested-with: xmlhttprequest")
-                    );
-                }
-                if index == 4 {
-                    let lower = request.to_ascii_lowercase();
-                    assert!(lower.contains("referer: "));
-                    assert!(lower.contains("/auth/kaist/user/device/view"));
-                    assert!(lower.contains(&format!("origin: {sso_origin}").to_ascii_lowercase()));
-                }
-                let mut extra = String::new();
-                if let Some(cookie) = cookie {
-                    extra.push_str(&format!("Set-Cookie: {cookie}\r\n"));
-                }
-                if let Some(location) = location {
-                    extra.push_str(&format!("Location: {location}\r\n"));
-                }
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
-        });
-        let klms = thread::spawn(move || {
-            let (mut stream, _) = klms_listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            assert!(request.starts_with("POST /login/ssologin.php HTTP/1.1"));
-            assert!(request.contains("ticket=opaque"));
-            write!(stream, "HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: MoodleSession=owned; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-
-            let (mut stream, _) = klms_listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            assert!(request.starts_with("GET / HTTP/1.1"));
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-            )
-            .unwrap();
-        });
-
-        let completed = complete(begin(
-            &Attempt {
-                klms: &Url::parse(&format!("http://{klms_address}/")).unwrap(),
-                sso: &Url::parse(&format!("http://{sso_address}/")).unwrap(),
-                timeout: 5,
-                method: LoginMethod::Password,
-                factor: Some(SecondFactor::Email),
-                previous_devices: &[],
-                otp_mode: OtpMode::Prompt,
-            },
-            &mut FakePrompt,
-        ));
-        sso.join().unwrap();
-        klms.join().unwrap();
-        assert_eq!(completed.devices, vec!["trusted-device"]);
+    fn seed_cbc_vector_and_malformed_keys() {
+        let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f101112131415161718191a1b1c1d1e1f";
+        // Cross-checked against OpenSSL's legacy-provider SEED-CBC output.
         assert_eq!(
-            completed.cookies,
-            vec![StoredCookie {
-                name: "MoodleSession".into(),
-                value: "owned".into()
-            }]
+            encrypt_user_data(key, b"{}").unwrap(),
+            "d558576b3e0adc65644f932e64d5a1e1"
         );
+        // 63 ASCII bytes, then a 2-byte char straddling byte 64, padded past
+        // 96: an error, not a panic. Non-hex digits are rejected too.
+        let straddling = format!("{}é{}", "0".repeat(63), "0".repeat(40));
+        assert!(straddling.len() >= 96 && !straddling.is_char_boundary(64));
+        for bad in [straddling, "+f".repeat(48), "zz".repeat(48)] {
+            let error = encrypt_user_data(&bad, b"{}").unwrap_err();
+            assert_eq!(error.code, "AUTH_PROTOCOL_CHANGED", "{bad}");
+        }
+    }
+
+    #[test]
+    fn code_format_is_six_digits() {
+        assert!(check_code_format("012345").is_ok());
+        for bad in ["12ab", "1234567", "", "12 456"] {
+            assert_eq!(check_code_format(bad).unwrap_err().code, "USAGE", "{bad}");
+        }
     }
 }

@@ -1,21 +1,24 @@
+//! The HTTP side of a login: only KLMS and SSO origins are ever contacted,
+//! redirects are followed by hand, and cookies live in a per-login jar.
+
 use std::{io::Read, time::Duration};
 
-use crate::url::Url;
 use serde_json::Value;
 use ureq::Agent;
 
 use crate::{
     error::AppError,
     http::{self, Failure, Follow, Method, Payload, Response},
+    url::Url,
 };
 
-use super::cookies::TransientCookies;
+use super::cookies::Jar;
 
 const MAX_BODY: usize = 1024 * 1024;
 
 pub struct SsoTransport {
     client: Agent,
-    pub cookies: TransientCookies,
+    pub cookies: Jar,
     klms: Url,
     sso: Url,
     document_url: Option<Url>,
@@ -23,20 +26,32 @@ pub struct SsoTransport {
 
 impl SsoTransport {
     pub fn new(klms: Url, sso: Url, timeout: u64) -> Result<Self, AppError> {
-        validate_pair(&klms, &sso)?;
-        let client = http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8)));
+        let production = klms.scheme() == "https"
+            && klms.host_str() == Some("klms.kaist.ac.kr")
+            && sso.scheme() == "https"
+            && sso.host_str() == Some("sso.kaist.ac.kr");
+        let loopback = [&klms, &sso].iter().all(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+        });
+        if !production && !loopback {
+            return Err(AppError::config(
+                "native login permits only KAIST production origins or loopback test origins",
+            ));
+        }
         Ok(Self {
-            client,
-            cookies: TransientCookies::default(),
+            client: http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8))),
+            cookies: Jar::default(),
             klms,
             sso,
             document_url: None,
         })
     }
 
-    pub fn sso_url(&self, path: &str) -> Result<Url, AppError> {
-        self.join(&self.sso, path)
+    pub fn klms(&self) -> &Url {
+        &self.klms
     }
+
     pub fn document_url(&self) -> Option<&Url> {
         self.document_url.as_ref()
     }
@@ -47,136 +62,118 @@ impl SsoTransport {
         Ok(())
     }
 
-    pub fn klms(&self) -> &Url {
-        &self.klms
-    }
-
     pub fn is_klms_origin(&self, url: &Url) -> bool {
         url.origin() == self.klms.origin()
     }
 
-    pub fn get_text(&mut self, url: Url) -> Result<(Url, String), AppError> {
-        let response = self.send_follow(Method::GET, url, None)?;
-        self.document_url = Some(response.url().clone());
-        self.text(response)
-    }
-
-    pub fn post_form_json(&mut self, url: Url, form: &[(&str, String)]) -> Result<Value, AppError> {
-        let response = self.send_single(url, form)?;
-        let (_, text) = self.text(response)?;
-        serde_json::from_str(&text)
-            .map_err(|_| AppError::auth_protocol("KAIST SSO returned invalid JSON"))
-    }
-
-    pub fn post_form_follow(
-        &mut self,
-        url: Url,
-        form: &[(&str, String)],
-    ) -> Result<(Url, String), AppError> {
-        let response = self.send_follow(Method::POST, url, Some(form))?;
-        self.document_url = Some(response.url().clone());
-        self.text(response)
-    }
-
-    fn send_follow(
-        &mut self,
-        method: Method,
-        url: Url,
-        form: Option<&[(&str, String)]>,
-    ) -> Result<Response, AppError> {
-        ensure_allowed(&self.klms, &self.sso, &url)?;
-        let mut policy = SsoPolicy {
-            cookies: &mut self.cookies,
-            document_url: self.document_url.as_ref(),
-            klms: &self.klms,
-            sso: &self.sso,
-            ajax: false,
-        };
-        http::follow(
-            &self.client,
-            Follow {
-                method,
-                url,
-                payload: form.map(form_payload),
-                max_redirects: 8,
-                strict: true,
-            },
-            &mut policy,
-        )
-        .map_err(|failure| match failure {
-            Failure::Transport(message) => {
-                AppError::network(format!("KAIST SSO request failed: {message}"))
-            }
-            Failure::Refused(error) => error,
-            Failure::MissingLocation => {
-                AppError::auth_protocol("KAIST SSO returned a redirect without Location")
-            }
-            Failure::InvalidLocation => {
-                AppError::auth_protocol("KAIST SSO returned an invalid redirect")
-            }
-            Failure::TooManyRedirects => {
-                AppError::auth_protocol("KAIST SSO exceeded the redirect limit")
-            }
-        })
-    }
-
-    /// An AJAX form POST whose redirects are returned, not followed.
-    fn send_single(&mut self, url: Url, form: &[(&str, String)]) -> Result<Response, AppError> {
-        ensure_allowed(&self.klms, &self.sso, &url)?;
-        let mut policy = SsoPolicy {
-            cookies: &mut self.cookies,
-            document_url: self.document_url.as_ref(),
-            klms: &self.klms,
-            sso: &self.sso,
-            ajax: true,
-        };
-        let headers = http::Policy::headers(&mut policy, &Method::POST, &url);
-        let response = http::send_once(
-            &self.client,
-            Method::POST,
-            &url,
-            &headers,
-            Some(&form_payload(form)),
-        )
-        .map_err(|failure| match failure {
-            Failure::Transport(message) => {
-                AppError::network(format!("KAIST SSO request failed: {message}"))
-            }
-            Failure::Refused(error) => error,
-            Failure::MissingLocation | Failure::InvalidLocation | Failure::TooManyRedirects => {
-                AppError::internal("unexpected redirect failure on a single SSO request")
-            }
-        })?;
-        http::Policy::inspect(&mut policy, &response)?;
-        Ok(response)
-    }
-
-    fn text(&self, response: Response) -> Result<(Url, String), AppError> {
-        if response
-            .content_length()
-            .is_some_and(|len| len > MAX_BODY as u64)
-        {
-            return Err(AppError::limit("KAIST SSO response exceeded 1 MiB"));
-        }
-        let url = response.url().clone();
-        let mut bytes = Vec::new();
-        response
-            .take(MAX_BODY as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| AppError::network(format!("failed to read SSO response: {error}")))?;
-        if bytes.len() > MAX_BODY {
-            return Err(AppError::limit("KAIST SSO response exceeded 1 MiB"));
-        }
-        Ok((url, String::from_utf8_lossy(&bytes).into_owned()))
-    }
-
-    fn join(&self, base: &Url, path: &str) -> Result<Url, AppError> {
-        let url = base
-            .join(path)
-            .map_err(|_| AppError::internal("invalid built-in SSO path"))?;
+    /// Resolve `reference` against the SSO origin; only trusted origins pass.
+    pub fn url(&self, reference: &str) -> Result<Url, AppError> {
+        let url = self
+            .sso
+            .join(reference)
+            .map_err(|_| AppError::internal("invalid SSO URL"))?;
         ensure_allowed(&self.klms, &self.sso, &url)?;
         Ok(url)
     }
+
+    pub fn get(&mut self, reference: &str) -> Result<(Url, String), AppError> {
+        self.fetch(Method::GET, reference, None, false)
+    }
+
+    pub fn post(
+        &mut self,
+        reference: &str,
+        form: &[(&str, &str)],
+    ) -> Result<(Url, String), AppError> {
+        self.fetch(Method::POST, reference, Some(form), false)
+    }
+
+    /// An AJAX form POST answered with JSON; its redirects are not followed.
+    pub fn ajax(&mut self, reference: &str, form: &[(&str, &str)]) -> Result<Value, AppError> {
+        let (_, body) = self.fetch(Method::POST, reference, Some(form), true)?;
+        serde_json::from_str(&body)
+            .map_err(|_| AppError::auth_protocol("KAIST SSO returned invalid JSON"))
+    }
+
+    fn fetch(
+        &mut self,
+        method: Method,
+        reference: &str,
+        form: Option<&[(&str, &str)]>,
+        ajax: bool,
+    ) -> Result<(Url, String), AppError> {
+        let url = self.url(reference)?;
+        let payload = form.map(|form| Payload {
+            content_type: "application/x-www-form-urlencoded",
+            bytes: crate::url::form_urlencode(form.iter().copied()).into_bytes(),
+        });
+        let mut policy = SsoPolicy {
+            cookies: &mut self.cookies,
+            document_url: self.document_url.as_ref(),
+            klms: &self.klms,
+            sso: &self.sso,
+            ajax,
+        };
+        let response = if ajax {
+            let headers = http::Policy::headers(&mut policy, &method, &url);
+            let response = http::send_once(&self.client, method, &url, &headers, payload.as_ref())
+                .map_err(failure)?;
+            http::Policy::inspect(&mut policy, &response)?;
+            response
+        } else {
+            let request = Follow {
+                method,
+                url,
+                payload,
+                max_redirects: 8,
+                strict: true,
+            };
+            http::follow(&self.client, request, &mut policy).map_err(failure)?
+        };
+        if !ajax {
+            self.document_url = Some(response.url().clone());
+        }
+        text(response)
+    }
+}
+
+fn failure(failure: Failure) -> AppError {
+    match failure {
+        Failure::Transport(message) => {
+            AppError::network(format!("KAIST SSO request failed: {message}"))
+        }
+        Failure::Refused(error) => error,
+        Failure::MissingLocation => {
+            AppError::auth_protocol("KAIST SSO returned a redirect without Location")
+        }
+        Failure::InvalidLocation => {
+            AppError::auth_protocol("KAIST SSO returned an invalid redirect")
+        }
+        Failure::TooManyRedirects => {
+            AppError::auth_protocol("KAIST SSO exceeded the redirect limit")
+        }
+    }
+}
+
+/// The response URL and its body, capped at 1 MiB.
+fn text(response: Response) -> Result<(Url, String), AppError> {
+    let too_big = || AppError::limit("KAIST SSO response exceeded 1 MiB");
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_BODY as u64)
+    {
+        return Err(too_big());
+    }
+    let url = response.url().clone();
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_BODY as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::network(format!("failed to read SSO response: {error}")))?;
+    if bytes.len() > MAX_BODY {
+        return Err(too_big());
+    }
+    Ok((url, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 fn ensure_allowed(klms: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
@@ -191,19 +188,10 @@ fn ensure_allowed(klms: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
     Ok(())
 }
 
-fn form_payload(form: &[(&str, String)]) -> Payload {
-    let bytes = crate::url::form_urlencode(form.iter().map(|(key, value)| (*key, value.as_str())))
-        .into_bytes();
-    Payload {
-        content_type: "application/x-www-form-urlencoded",
-        bytes,
-    }
-}
-
 /// Per-hop SSO rules: trusted origins only, Referer/Origin from the current
 /// document, cookies recomputed per URL and captured from every response.
 struct SsoPolicy<'a> {
-    cookies: &'a mut TransientCookies,
+    cookies: &'a mut Jar,
     document_url: Option<&'a Url>,
     klms: &'a Url,
     sso: &'a Url,
@@ -217,12 +205,8 @@ impl http::Policy for SsoPolicy<'_> {
             headers.push(("referer", referer.as_str().to_owned()));
         }
         if *method == Method::POST {
-            let origin = self
-                .document_url
-                .unwrap_or(url)
-                .origin()
-                .ascii_serialization();
-            headers.push(("origin", origin));
+            let origin = self.document_url.unwrap_or(url).origin();
+            headers.push(("origin", origin.ascii_serialization()));
         }
         if let Some(cookie) = self.cookies.header(url) {
             headers.push(("cookie", cookie));
@@ -249,26 +233,11 @@ impl http::Policy for SsoPolicy<'_> {
     }
 }
 
-fn validate_pair(klms: &Url, sso: &Url) -> Result<(), AppError> {
-    let production = klms.scheme() == "https"
-        && klms.host_str() == Some("klms.kaist.ac.kr")
-        && sso.scheme() == "https"
-        && sso.host_str() == Some("sso.kaist.ac.kr");
-    let loopback = [klms, sso].iter().all(|url| {
-        url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-    });
-    if !production && !loopback {
-        return Err(AppError::config(
-            "native login permits only KAIST production origins or loopback test origins",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{io::Write, net::TcpListener, thread};
+
+    use super::*;
 
     #[test]
     fn bounds_sso_response_without_content_length_before_eof() {
@@ -298,7 +267,7 @@ mod tests {
             let _ = stream.read(&mut request);
         });
         let mut transport = SsoTransport::new(url.clone(), url.clone(), 2).unwrap();
-        let error = transport.get_text(url).unwrap_err();
+        let error = transport.get(url.as_str()).unwrap_err();
         assert_eq!(error.code, "LIMIT_EXCEEDED");
         server.join().unwrap();
     }
