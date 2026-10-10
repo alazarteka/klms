@@ -14,6 +14,7 @@ mod http;
 mod models;
 mod output;
 mod parse;
+mod private_fs;
 mod reference;
 mod safe_url;
 mod spec;

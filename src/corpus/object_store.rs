@@ -7,7 +7,10 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use super::{private_dir, private_file_options};
-use crate::error::AppError;
+use crate::{
+    error::AppError,
+    private_fs::{PublishError, publish_new},
+};
 
 fn io(context: &str) -> impl Fn(std::io::Error) -> AppError + '_ {
     move |error| AppError::library_io(format!("cannot {context}: {error}"))
@@ -40,26 +43,20 @@ pub fn store(root: &Path, bytes: &[u8]) -> Result<String, AppError> {
         Err(_) => {}
     }
     let temporary = directory.join(format!(".{sha256}.{}.tmp", std::process::id()));
-    let mut file = private_file_options()
-        .create_new(true)
-        .open(&temporary)
-        .map_err(io("create object"))?;
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io("write object")(error));
+    let (_, linked) =
+        publish_new(&temporary, &destination, |file| file.write_all(bytes)).map_err(|error| {
+            match error {
+                PublishError::Create(error) => io("create object")(error),
+                PublishError::Fill(error) | PublishError::Sync(error) => io("write object")(error),
+                PublishError::Link(error) => io("publish object")(error),
+            }
+        })?;
+    if linked.existed && !matches!(intact(), Ok(true)) {
+        return Err(AppError::corpus_corrupt("object destination collision"));
     }
-    let published = match fs::hard_link(&temporary, &destination) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => match intact() {
-            Ok(true) => Ok(()),
-            _ => Err(AppError::corpus_corrupt("object destination collision")),
-        },
-        Err(error) => Err(io("publish object")(error)),
-    };
-    let removed = fs::remove_file(&temporary);
-    published?;
-    removed.map_err(io("remove temporary file"))?;
-    Ok(sha256)
+    linked
+        .leftover
+        .map_or(Ok(sha256), |error| Err(io("remove temporary file")(error)))
 }
 
 pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf, AppError> {
