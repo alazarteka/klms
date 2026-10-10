@@ -3,24 +3,24 @@ use std::{
     time::Duration,
 };
 
-use reqwest::{
-    blocking::Client,
-    header::{
-        CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG, HeaderValue, IF_MODIFIED_SINCE,
-        IF_NONE_MATCH, LAST_MODIFIED,
-    },
-    redirect::{Attempt, Policy},
-};
 use url::Url;
 
-use crate::error::AppError;
+use crate::{
+    error::AppError,
+    http::{self, Failure, Follow, HeaderValue, Method, Payload, Response, StatusCode},
+};
+
+pub type Client = ureq::Agent;
+
+/// Redirects any KLMS or release request may follow.
+const MAX_REDIRECTS: usize = 5;
 
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct KlmsClient {
     base_url: Url,
     http: Client,
-    cookie: HeaderValue,
+    cookie: String,
 }
 
 pub struct HtmlResponse {
@@ -70,31 +70,15 @@ impl KlmsClient {
         timeout_seconds: u64,
     ) -> Result<Self, AppError> {
         let base_url = validate_base_url(base)?;
-        let expected_origin = base_url.origin();
-        let policy = Policy::custom(move |attempt: Attempt<'_>| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("too many redirects");
-            }
-            if attempt.url().origin() != expected_origin {
-                return attempt.error("cross-origin redirect refused");
-            }
-            if !attempt.url().username().is_empty() || attempt.url().password().is_some() {
-                return attempt.error("URL userinfo refused");
-            }
-            attempt.follow()
-        });
-        let http = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .connect_timeout(Duration::from_secs(8))
-            .redirect(policy)
-            .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| {
-                AppError::internal(format!("failed to create HTTP client: {error}"))
-            })?;
-        let cookie = HeaderValue::from_str(cookie_header.unwrap_or("")).map_err(|_| {
+        let http = http::agent(
+            Duration::from_secs(timeout_seconds),
+            Some(Duration::from_secs(8)),
+        );
+        let cookie = cookie_header.unwrap_or("");
+        HeaderValue::from_str(cookie).map_err(|_| {
             AppError::config("storage state contains a cookie value invalid for HTTP headers")
         })?;
+        let cookie = cookie.to_owned();
         Ok(Self {
             base_url,
             http,
@@ -133,18 +117,9 @@ impl KlmsClient {
 
     pub fn head(&self, path: &str) -> Result<RemoteMetadata, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.head(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        let response = request.send().map_err(|error| {
-            AppError::network(format!("KLMS HEAD failed: {}", error.without_url()))
-        })?;
-        if !response.status().is_success() {
-            return Err(AppError::http(
-                response.status().as_u16(),
-                response.url().path(),
-            ));
+        let response = self.fetch(Method::HEAD, url, None, Vec::new(), "KLMS HEAD failed")?;
+        if !(200..300).contains(&response.status()) {
+            return Err(AppError::http(response.status(), response.url().path()));
         }
         Ok(remote_metadata(&response))
     }
@@ -157,42 +132,33 @@ impl KlmsClient {
         max_bytes: usize,
     ) -> Result<ConditionalResponse, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.get(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
+        let mut extra = Vec::new();
         if let Some(value) = etag {
-            request = request.header(
-                IF_NONE_MATCH,
-                HeaderValue::from_str(value)
-                    .map_err(|_| AppError::config("stored ETag is invalid for an HTTP header"))?,
-            );
+            HeaderValue::from_str(value)
+                .map_err(|_| AppError::config("stored ETag is invalid for an HTTP header"))?;
+            extra.push(("if-none-match", value.to_owned()));
         }
         if let Some(value) = last_modified {
-            request = request.header(
-                IF_MODIFIED_SINCE,
-                HeaderValue::from_str(value).map_err(|_| {
-                    AppError::config("stored Last-Modified is invalid for an HTTP header")
-                })?,
-            );
+            HeaderValue::from_str(value).map_err(|_| {
+                AppError::config("stored Last-Modified is invalid for an HTTP header")
+            })?;
+            extra.push(("if-modified-since", value.to_owned()));
         }
-        let mut response = request.send().map_err(|error| {
-            AppError::network(format!(
-                "conditional KLMS request failed: {}",
-                error.without_url()
-            ))
-        })?;
+        let mut response = self.fetch(
+            Method::GET,
+            url,
+            None,
+            extra,
+            "conditional KLMS request failed",
+        )?;
         let metadata = remote_metadata(&response);
-        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        if response.status() == StatusCode::NOT_MODIFIED.as_u16() {
             return Ok(ConditionalResponse {
                 metadata,
                 bytes: None,
             });
         }
-        if !matches!(
-            response.status(),
-            reqwest::StatusCode::OK | reqwest::StatusCode::PARTIAL_CONTENT
-        ) {
+        if !matches!(response.status(), 200 | 206) {
             return Err(AppError::http(metadata.status, metadata.url.path()));
         }
         if metadata
@@ -278,21 +244,52 @@ impl KlmsClient {
         })
     }
 
-    fn send_get(&self, path: &str) -> Result<reqwest::blocking::Response, AppError> {
+    fn send_get(&self, path: &str) -> Result<Response, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.get(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        let response = request.send().map_err(|error| {
-            AppError::network(format!("KLMS request failed: {}", error.without_url()))
-        })?;
-        let status = response.status();
-        let final_url = response.url().clone();
-        if !status.is_success() {
-            return Err(AppError::http(status.as_u16(), final_url.path()));
+        let response = self.fetch(Method::GET, url, None, Vec::new(), "KLMS request failed")?;
+        if !(200..300).contains(&response.status()) {
+            return Err(AppError::http(response.status(), response.url().path()));
         }
         Ok(response)
+    }
+
+    /// One request with same-origin, userinfo-free redirect following. The
+    /// cookie header accompanies every hop because every hop is same-origin.
+    fn fetch(
+        &self,
+        method: Method,
+        url: Url,
+        payload: Option<Payload>,
+        extra: Vec<(&'static str, String)>,
+        context: &str,
+    ) -> Result<Response, AppError> {
+        let mut policy = KlmsPolicy {
+            origin: self.base_url.origin(),
+            headers: extra,
+        };
+        if !self.cookie.is_empty() {
+            policy.headers.push(("cookie", self.cookie.clone()));
+        }
+        http::follow(
+            &self.http,
+            Follow {
+                method,
+                url,
+                payload,
+                max_redirects: MAX_REDIRECTS,
+                strict: false,
+            },
+            &mut policy,
+        )
+        .map_err(|failure| {
+            let detail = match failure {
+                Failure::Transport(message) => message,
+                Failure::Refused(error) => error.message,
+                Failure::TooManyRedirects => "too many redirects".into(),
+                Failure::MissingLocation | Failure::InvalidLocation => "invalid redirect".into(),
+            };
+            AppError::network(format!("{context}: {detail}"))
+        })
     }
 
     fn resolve(&self, path: &str) -> Result<Url, AppError> {
@@ -327,22 +324,18 @@ impl KlmsClient {
         let body = serde_json::to_vec(&payload).map_err(|error| {
             AppError::internal(format!("failed to encode AJAX request: {error}"))
         })?;
-        let mut response = self
-            .http
-            .post(url)
-            .header(COOKIE, self.cookie.clone())
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .map_err(|error| {
-                AppError::network(format!("KLMS AJAX request failed: {}", error.without_url()))
-            })?;
-        if !response.status().is_success() {
-            return Err(AppError::http(
-                response.status().as_u16(),
-                "/lib/ajax/service.php",
-            ));
+        let mut response = self.fetch(
+            Method::POST,
+            url,
+            Some(Payload {
+                content_type: "application/json",
+                bytes: body,
+            }),
+            vec![("x-requested-with", "XMLHttpRequest".to_owned())],
+            "KLMS AJAX request failed",
+        )?;
+        if !(200..300).contains(&response.status()) {
+            return Err(AppError::http(response.status(), "/lib/ajax/service.php"));
         }
         if declared_length(&response).is_some_and(|length| length > MAX_BODY_BYTES as u64) {
             return Err(AppError::limit(
@@ -387,22 +380,16 @@ impl KlmsClient {
     }
 }
 
-fn remote_metadata(response: &reqwest::blocking::Response) -> RemoteMetadata {
-    let string_header = |name| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
+fn remote_metadata(response: &Response) -> RemoteMetadata {
+    let string_header = |name| response.header(name).map(str::to_owned);
     RemoteMetadata {
         url: response.url().clone(),
-        status: response.status().as_u16(),
-        etag: string_header(ETAG),
-        last_modified: string_header(LAST_MODIFIED),
+        status: response.status(),
+        etag: string_header("etag"),
+        last_modified: string_header("last-modified"),
         content_length: declared_length(response),
         content_type: content_type(response),
-        content_range: string_header(CONTENT_RANGE),
+        content_range: string_header("content-range"),
     }
 }
 
@@ -415,7 +402,7 @@ fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Res
             "KLMS response Content-Length did not match the received bytes",
         ));
     }
-    if metadata.status != reqwest::StatusCode::PARTIAL_CONTENT.as_u16() {
+    if metadata.status != StatusCode::PARTIAL_CONTENT.as_u16() {
         return Ok(());
     }
     let Some(value) = metadata.content_range.as_deref() else {
@@ -447,27 +434,16 @@ fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Res
     Ok(())
 }
 
-fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
-    response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
+fn content_type(response: &Response) -> Option<String> {
+    response.header("content-type").map(str::to_owned)
 }
 
-fn declared_length(response: &reqwest::blocking::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
+fn declared_length(response: &Response) -> Option<u64> {
+    response.content_length()
 }
 
 /// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
-fn read_prefix(
-    response: &mut reqwest::blocking::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, AppError> {
+fn read_prefix(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
     let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
     response
         .by_ref()
@@ -477,10 +453,7 @@ fn read_prefix(
     Ok(body)
 }
 
-fn read_bounded(
-    response: &mut reqwest::blocking::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, AppError> {
+fn read_bounded(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
     let body = read_prefix(response, max_bytes)?;
     if body.len() > max_bytes {
         return Err(AppError::limit(format!(
@@ -547,31 +520,56 @@ fn looks_logged_out(url: &Url, html: &str) -> bool {
 /// Separate unauthenticated transport for explicit release checks/downloads.
 /// KLMS cookies and origin policy never enter this client.
 pub fn release_client(timeout: u64) -> Result<Client, AppError> {
-    Client::builder()
-        .timeout(Duration::from_secs(timeout.clamp(1, 300)))
-        .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("too many release redirects")
-            } else if attempt.url().scheme() == "https" {
-                attempt.follow()
-            } else {
-                attempt.error("release download requires HTTPS")
-            }
-        }))
-        .build()
-        .map_err(|e| AppError::network(e.to_string()))
+    Ok(http::agent(
+        Duration::from_secs(timeout.clamp(1, 300)),
+        None,
+    ))
+}
+
+struct ReleasePolicy;
+
+impl http::Policy for ReleasePolicy {
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.scheme() == "https" {
+            Ok(())
+        } else {
+            Err(AppError::network("release download requires HTTPS"))
+        }
+    }
 }
 
 pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, AppError> {
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| AppError::network(e.to_string()))?;
-    if response.status() != reqwest::StatusCode::OK {
+    let url = Url::parse(url).map_err(|e| AppError::network(e.to_string()))?;
+    let response = http::follow(
+        client,
+        Follow {
+            method: Method::GET,
+            url,
+            payload: None,
+            max_redirects: MAX_REDIRECTS,
+            strict: false,
+        },
+        &mut ReleasePolicy,
+    )
+    .map_err(|failure| match failure {
+        Failure::Transport(message) => AppError::network(message),
+        Failure::Refused(error) => error,
+        Failure::TooManyRedirects => AppError::network("too many release redirects"),
+        Failure::MissingLocation | Failure::InvalidLocation => {
+            AppError::network("invalid release redirect")
+        }
+    })?;
+    if response.status() != StatusCode::OK.as_u16() {
+        let status = StatusCode::from_u16(response.status()).map_or_else(
+            |_| response.status().to_string(),
+            |status| status.to_string(),
+        );
         return Err(AppError::network(format!(
-            "release request returned HTTP {}",
-            response.status()
+            "release request returned HTTP {status}"
         )));
     }
     let expected = response.content_length();
@@ -587,6 +585,27 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
         return Err(AppError::network("incomplete release response"));
     }
     Ok(bytes)
+}
+
+struct KlmsPolicy {
+    origin: url::Origin,
+    headers: Vec<(&'static str, String)>,
+}
+
+impl http::Policy for KlmsPolicy {
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        self.headers.clone()
+    }
+
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.origin() != self.origin {
+            return Err(AppError::network("cross-origin redirect refused"));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::network("URL userinfo refused"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -656,5 +675,66 @@ mod tests {
         let response = client.get_conditional("/file", None, None, 8).unwrap();
         assert_eq!(response.bytes.as_deref(), Some(&b"new"[..]));
         server.join().unwrap();
+    }
+
+    fn serve_once(
+        responses: Vec<String>,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut seen = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let length = stream.read(&mut request).unwrap();
+                seen.push(String::from_utf8_lossy(&request[..length]).to_ascii_lowercase());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn follows_same_origin_redirects_with_the_cookie_and_reports_the_final_url() {
+        let (address, server) = serve_once(vec![
+            "HTTP/1.1 302 Found\r\nLocation: /final?x=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into(),
+        ]);
+        let client =
+            KlmsClient::new(&format!("http://{address}"), Some("MoodleSession=a"), 5).unwrap();
+        let response = client.get_bytes("/start", 16).unwrap();
+        assert_eq!(response.bytes, b"ok");
+        assert_eq!(response.url.path(), "/final");
+        let seen = server.join().unwrap();
+        assert!(
+            seen.iter()
+                .all(|request| request.contains("cookie: moodlesession=a"))
+        );
+        assert!(seen[1].starts_with("get /final?x=1 "));
+    }
+
+    #[test]
+    fn refuses_cross_origin_redirects_before_sending_the_cookie() {
+        let (address, server) = serve_once(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:1/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        ]);
+        let client =
+            KlmsClient::new(&format!("http://{address}"), Some("MoodleSession=a"), 5).unwrap();
+        let error = client.get_bytes("/start", 16).err().unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(error.message.contains("cross-origin redirect refused"));
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn head_stops_after_the_cap_on_endless_redirects() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (address, server) = serve_once(vec![redirect.to_owned(); 6]);
+        let client = KlmsClient::new(&format!("http://{address}"), None, 5).unwrap();
+        let error = client.head("/loop").unwrap_err();
+        assert!(error.message.contains("too many redirects"));
+        assert_eq!(server.join().unwrap().len(), 6);
     }
 }

@@ -67,10 +67,7 @@ fn test_update(
     home: &Path,
 ) -> Result<output::CommandResult, AppError> {
     run_with_source(
-        &Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap(),
+        &crate::client::release_client(5).unwrap(),
         check,
         &ReleaseSource {
             metadata_url: format!("{}/latest", server.url()),

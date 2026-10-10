@@ -478,6 +478,29 @@ mod tests {
         fn notice(&mut self, _message: &str) {}
     }
 
+    /// Reads one complete request (headers and Content-Length body), however
+    /// the client splits it across writes.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "incomplete request");
+            raw.extend_from_slice(&chunk[..read]);
+            let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&raw[..at]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:")?.trim().parse().ok())
+                .unwrap_or(0);
+            if raw.len() >= at + 4 + length {
+                return String::from_utf8_lossy(&raw).into_owned();
+            }
+        }
+    }
+
     fn complete(outcome: Result<Outcome, AppError>) -> CompletedLogin {
         match outcome.unwrap() {
             Outcome::Complete(completed) => completed,
@@ -528,9 +551,7 @@ mod tests {
             ];
             for (index, (status, content_type, body, cookie)) in responses.into_iter().enumerate() {
                 let (mut stream, _) = sso_listener.accept().unwrap();
-                let mut request = [0_u8; 16 * 1024];
-                let length = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..length]);
+                let request = read_request(&mut stream);
                 if (1..=2).contains(&index) || (4..=5).contains(&index) {
                     assert!(
                         request
@@ -550,9 +571,8 @@ mod tests {
         });
         let klms = thread::spawn(move || {
             let (mut stream, _) = klms_listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let length = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET / HTTP/1.1"));
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("GET / HTTP/1.1"));
             write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: MoodleSession=owned; Path=/; HttpOnly\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
         });
 
@@ -646,9 +666,7 @@ mod tests {
                 responses.into_iter().enumerate()
             {
                 let (mut stream, _) = sso_listener.accept().unwrap();
-                let mut request = [0_u8; 16 * 1024];
-                let length = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..length]);
+                let request = read_request(&mut stream);
                 if matches!(index, 1 | 2 | 4) {
                     assert!(
                         request
@@ -674,17 +692,14 @@ mod tests {
         });
         let klms = thread::spawn(move || {
             let (mut stream, _) = klms_listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let length = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..length]);
+            let request = read_request(&mut stream);
             assert!(request.starts_with("POST /login/ssologin.php HTTP/1.1"));
             assert!(request.contains("ticket=opaque"));
             write!(stream, "HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: MoodleSession=owned; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
 
             let (mut stream, _) = klms_listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let length = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET / HTTP/1.1"));
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("GET / HTTP/1.1"));
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"

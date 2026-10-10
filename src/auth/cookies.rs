@@ -1,8 +1,9 @@
-use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::AppError;
+
+use crate::http::{HeaderMap, SET_COOKIE};
 
 use super::{cookie_rules, model::StoredCookie};
 
@@ -24,7 +25,7 @@ pub struct TransientCookies {
 
 impl TransientCookies {
     pub fn capture(&mut self, url: &Url, headers: &HeaderMap) -> Result<(), AppError> {
-        for value in headers.get_all(reqwest::header::SET_COOKIE) {
+        for value in headers.get_all(SET_COOKIE) {
             let value = value
                 .to_str()
                 .map_err(|_| AppError::auth_protocol("SSO returned a non-text cookie"))?;
@@ -252,7 +253,7 @@ fn path_matches(request: &str, cookie: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
+    use crate::http::{HeaderMap, HeaderValue, SET_COOKIE};
 
     #[test]
     fn persists_only_cookies_issued_by_klms() {

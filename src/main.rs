@@ -6,6 +6,7 @@ mod corpus;
 mod course_pages;
 mod date;
 mod error;
+mod http;
 mod models;
 mod output;
 mod parse;
