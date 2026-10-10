@@ -174,6 +174,11 @@ impl Url {
         Some(&self.host)
     }
 
+    /// Plain-HTTP loopback origin, the only non-HTTPS origin ever accepted.
+    pub fn is_http_loopback(&self) -> bool {
+        self.scheme == "http" && matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    }
+
     pub fn port_or_known_default(&self) -> Option<u16> {
         self.port.or_else(|| default_port(&self.scheme))
     }

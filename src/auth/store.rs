@@ -248,11 +248,8 @@ pub fn origin(url: &Url) -> String {
 
 /// Loopback test servers may move between ports; real origins must match.
 fn origin_matches(stored: &str, current: &Url) -> bool {
-    let loopback = |url: &Url| {
-        url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-    };
     stored == origin(current)
-        || Url::parse(stored).is_ok_and(|url| loopback(&url) && loopback(current))
+        || Url::parse(stored).is_ok_and(|url| url.is_http_loopback() && current.is_http_loopback())
 }
 
 // ---- remembered login ----
@@ -262,12 +259,24 @@ pub struct Identity {
     pub version: u32,
     pub username: String,
     pub method: LoginMethod,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// An unrecognized value (older or hand-edited file) loads as `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_factor"
+    )]
     pub second_factor: Option<SecondFactor>,
     /// `keychain`, `secret-service` or `plaintext-file`; absent when no
     /// password is remembered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_backend: Option<String>,
+}
+
+fn lenient_factor<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SecondFactor>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|text| serde_json::from_value(serde_json::Value::String(text)).ok()))
 }
 
 impl Identity {
@@ -483,6 +492,14 @@ mod tests {
             assert_eq!(error.code, "CONFIG_ERROR");
             assert!(error.hint.unwrap().contains("auth forget"));
         }
+        // An unknown second factor loads as none, so older files keep working.
+        fs::write(
+            &path,
+            r#"{"version":1,"username":"a","method":"password","second_factor":"fax"}"#,
+        )
+        .unwrap();
+        let loaded = load_identity(&path).unwrap().unwrap();
+        assert_eq!(loaded.second_factor, None);
         assert!(validate_username("a@kaist.ac.kr").is_ok());
         for bad in ["", " ", " a", "a\n", "a\u{0}b"] {
             assert!(validate_username(bad).is_err(), "{bad:?}");

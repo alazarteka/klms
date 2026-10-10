@@ -30,10 +30,7 @@ impl SsoTransport {
             && klms.host_str() == Some("klms.kaist.ac.kr")
             && sso.scheme() == "https"
             && sso.host_str() == Some("sso.kaist.ac.kr");
-        let loopback = [&klms, &sso].iter().all(|url| {
-            url.scheme() == "http"
-                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
-        });
+        let loopback = klms.is_http_loopback() && sso.is_http_loopback();
         if !production && !loopback {
             return Err(AppError::config(
                 "native login permits only KAIST production origins or loopback test origins",

@@ -444,8 +444,7 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
             "KLMS base URL must not contain credentials, query, or fragment",
         ));
     }
-    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+    if url.scheme() != "https" && !url.is_http_loopback() {
         return Err(AppError::config(
             "KLMS base URL must use HTTPS (HTTP is loopback-only)",
         ));
@@ -579,6 +578,8 @@ mod tests {
     fn accepts_https_and_loopback_http_only() {
         assert!(validate_base_url("https://klms.kaist.ac.kr").is_ok());
         assert!(validate_base_url("http://127.0.0.1:9999").is_ok());
+        assert!(validate_base_url("http://[::1]:9").is_ok());
+        assert!(validate_base_url("http://[::2]:9").is_err());
         assert!(validate_base_url("http://example.com").is_err());
         assert!(validate_base_url("https://user@example.com").is_err());
     }

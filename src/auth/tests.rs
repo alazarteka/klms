@@ -232,6 +232,16 @@ impl Fixture {
         defer: bool,
         options: &LoginOptions,
     ) -> Result<CommandResult, AppError> {
+        self.login_as(interactive, defer, options, Terminal(self.asked.clone()))
+    }
+
+    fn login_as(
+        &self,
+        interactive: bool,
+        defer: bool,
+        options: &LoginOptions,
+        prompt: impl AuthPrompt,
+    ) -> Result<CommandResult, AppError> {
         self.asked.borrow_mut().clear();
         let env = Env {
             dirs: &self.dirs,
@@ -243,7 +253,7 @@ impl Fixture {
             defer_code: defer,
             json: defer,
         };
-        login_with(&env, options, Terminal(self.asked.clone()))
+        login_with(&env, options, prompt)
     }
 
     fn asked(&self) -> Vec<&'static str> {
@@ -309,6 +319,26 @@ fn remember_password_stores_identity_and_secret_after_success() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn a_prompted_identifier_is_validated_before_it_is_remembered() {
+    struct BadId;
+    impl AuthPrompt for BadId {
+        fn identifier(&mut self) -> Result<String, AppError> {
+            Ok("stu\u{1}dent".into())
+        }
+        fn password(&mut self) -> Result<Zeroizing<String>, AppError> {
+            Ok(Zeroizing::new("s3cret".into()))
+        }
+        fn otp(&mut self, _channel: &str) -> Result<Zeroizing<String>, AppError> {
+            Ok(Zeroizing::new("123456".into()))
+        }
+    }
+    let fx = Fixture::new();
+    let error = failure(fx.login_as(true, false, &remember(), BadId));
+    assert_eq!(error.code, "USAGE");
+    assert!(fx.identity().is_none() && !fx.dirs.session().exists());
 }
 
 #[test]
