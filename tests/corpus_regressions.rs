@@ -518,8 +518,11 @@ fn download_frontier_is_processed_in_representation_order() {
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .map(|row| {
-            let url = url::Url::parse(&row.unwrap()).unwrap();
-            format!("HEAD {} HTTP/1.1", url.path())
+            let url = row.unwrap();
+            let after_scheme = url.split_once("://").unwrap().1;
+            let target = &after_scheme[after_scheme.find('/').unwrap()..];
+            let path = target.split(['?', '#']).next().unwrap();
+            format!("HEAD {path} HTTP/1.1")
         })
         .collect();
     assert!(expected.len() >= 3);

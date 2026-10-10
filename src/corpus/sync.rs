@@ -1,5 +1,6 @@
 use super::{Corpus, SyncSummary, object_store, query::refresh_subject};
 use crate::date::epoch_now as now;
+use crate::url::Url;
 use crate::{
     client::{KlmsClient, RemoteMetadata},
     error::AppError,
@@ -10,7 +11,6 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use url::Url;
 const MAX_DOWNLOAD: usize = 128 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub struct SyncOptions {

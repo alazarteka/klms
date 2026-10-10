@@ -1,8 +1,8 @@
 use std::{io::Read, time::Duration};
 
+use crate::url::Url;
 use serde_json::Value;
 use ureq::Agent;
-use url::Url;
 
 use crate::{
     error::AppError,
@@ -192,9 +192,7 @@ fn ensure_allowed(klms: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
 }
 
 fn form_payload(form: &[(&str, String)]) -> Payload {
-    let bytes = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(form.iter().map(|(key, value)| (*key, value.as_str())))
-        .finish()
+    let bytes = crate::url::form_urlencode(form.iter().map(|(key, value)| (*key, value.as_str())))
         .into_bytes();
     Payload {
         content_type: "application/x-www-form-urlencoded",

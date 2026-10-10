@@ -1,6 +1,6 @@
+use crate::url::Url;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashSet;
-use url::Url;
 
 use super::shared::{
     NEXT_PAGE_SELECTORS, first_text, has_next_link, link_items_in, query_id, selector, visible_text,
@@ -206,7 +206,7 @@ fn strip_embedded_active_markup(mut text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{next_page_url, resource_detail, sesskey};
-    use url::Url;
+    use crate::url::Url;
 
     #[test]
     fn extracts_session_key_without_exposing_it_elsewhere() {

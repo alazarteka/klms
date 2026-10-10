@@ -8,8 +8,8 @@
 
 use std::path::Path;
 
+use crate::url::Url;
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 use crate::{date::epoch_now, error::AppError};
 

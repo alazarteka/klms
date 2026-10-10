@@ -1,6 +1,6 @@
 use std::fmt;
 
-use url::Url;
+use crate::url::Url;
 
 use crate::error::AppError;
 
@@ -157,7 +157,7 @@ fn module_id(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::ResourceRef;
-    use url::Url;
+    use crate::url::Url;
 
     #[test]
     fn canonical_refs_round_trip_to_paths() {

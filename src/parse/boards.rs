@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::url::Url;
 use scraper::{ElementRef, Html};
-use url::Url;
 
 use super::shared::{has_any, query_id, selector, text};
 use crate::{
@@ -91,7 +91,7 @@ pub fn board_posts(
 #[cfg(test)]
 mod tests {
     use super::board_posts;
-    use url::Url;
+    use crate::url::Url;
 
     #[test]
     fn malformed_board_ids_cannot_produce_typed_references() {

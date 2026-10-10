@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use url::Url;
+use crate::url::Url;
 
 use crate::{
     error::AppError,
@@ -588,7 +588,7 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
 }
 
 struct KlmsPolicy {
-    origin: url::Origin,
+    origin: crate::url::Origin,
     headers: Vec<(&'static str, String)>,
 }
 

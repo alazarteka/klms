@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use url::Url;
+use crate::url::Url;
 
 use crate::{client::KlmsClient, error::AppError, models::Activity, parse};
 

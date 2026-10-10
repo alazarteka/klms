@@ -14,7 +14,7 @@ mod transport;
 
 use std::io::IsTerminal;
 
-use url::Url;
+use crate::url::Url;
 use zeroize::Zeroizing;
 
 use crate::{

@@ -1,4 +1,4 @@
-use url::Url;
+use crate::url::Url;
 
 use super::{activity_result, course_activities, module_path, query_value, resolve_course};
 use crate::{

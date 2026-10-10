@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::url::Url;
 use scraper::{ElementRef, Html};
-use url::Url;
 
 use super::shared::{
     first_text, has_any, link_items, module_kind, selected_value, selector, text, week_number,
@@ -318,7 +318,7 @@ fn download_url(script: &str) -> Option<String> {
 mod tests {
     use super::{activities, course_detail, dashboard, has_all_weeks_view};
     use crate::models::Course;
-    use url::Url;
+    use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 

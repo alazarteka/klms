@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::url::Url;
 use scraper::{ElementRef, Html, Selector};
-use url::Url;
 
 use crate::{error::AppError, models::LinkItem, reference::valid_id, safe_url};
 
