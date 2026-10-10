@@ -244,6 +244,18 @@ impl Url {
     }
 
     /// The path's `/`-separated segments, without the leading slash.
+    /// The first query parameter called `name`, decoded.
+    pub fn query_value(&self, name: &str) -> Option<String> {
+        self.query_pairs()
+            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+    }
+
+    /// The segment after `/mod/` in the path (the Moodle module type).
+    pub fn module_kind(&self) -> Option<&str> {
+        let mut segments = self.path_segments()?.skip_while(|part| *part != "mod");
+        segments.nth(1)
+    }
+
     pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
         Some(self.path.strip_prefix('/')?.split('/'))
     }
@@ -541,6 +553,16 @@ mod tests {
         for bad in ["///h.test/p", "javascript:alert(1)", "mailto:a@b.test"] {
             assert!(url(base).join(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn query_value_and_module_kind_read_moodle_links() {
+        let link = url("https://a.test/mod/quiz/view.php?x=1&id=%37&id=8");
+        assert_eq!(link.query_value("id").as_deref(), Some("7"));
+        assert_eq!(link.query_value("nope"), None);
+        assert_eq!(link.module_kind(), Some("quiz"));
+        assert_eq!(url("https://a.test/mod").module_kind(), None);
+        assert_eq!(url("https://a.test/course/view.php").module_kind(), None);
     }
 
     #[test]

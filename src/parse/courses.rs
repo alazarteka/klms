@@ -4,8 +4,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    all, first_text, has_any, href_url, link_items, module_kind, query_id, sel, selected_value,
-    text, week_number,
+    all, first_text, has_any, href_url, link_items, query_id, sel, selected_value, text,
+    week_number,
 };
 use crate::{
     date,
@@ -180,7 +180,7 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
             .value()
             .classes()
             .find_map(|class| class.strip_prefix("modtype_").map(str::to_owned))
-            .or_else(|| url.as_ref().and_then(module_kind))
+            .or_else(|| url.as_ref()?.module_kind().map(str::to_owned))
             .unwrap_or_else(|| "activity".into());
         let section = module
             .ancestors()
@@ -194,9 +194,8 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
         if !seen.insert(key) {
             continue;
         }
-        let reference =
-            ResourceRef::from_activity(&kind, id.as_deref(), url.as_ref().map(Url::as_str))
-                .map(|reference| reference.to_string());
+        let reference = ResourceRef::from_activity(&kind, id.as_deref(), url.as_ref())
+            .map(|reference| reference.to_string());
         rows.push(Activity {
             id,
             reference,
