@@ -699,6 +699,30 @@ fn top_level_help_exposes_the_agent_resource_surface() {
     }
 }
 
+#[test]
+fn long_help_is_self_documenting_for_agents() {
+    let output = binary().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for needle in [
+        "Exit codes:",
+        "54 CURATION_CONFLICT",
+        "Reference formats",
+        "board-post:BOARD:POST",
+        "ok:true",
+        "read-only",
+    ] {
+        assert!(help.contains(needle), "missing {needle} in --help");
+    }
+    let output = binary()
+        .args(["library", "edit", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("effective._provenance"));
+    assert!(help.contains("CURATION_CONFLICT"));
+}
+
 #[cfg(unix)]
 #[test]
 fn skill_install_materializes_embedded_payload_and_discovery_link() {

@@ -15,6 +15,8 @@ use crate::{cli::Cli, error::AppError, output::CommandResult};
 struct Spec {
     name: String,
     version: String,
+    /// Top-level long help: workflow, JSON/exit-code contract, ref formats.
+    overview: Option<String>,
     global_args: Vec<ArgSpec>,
     commands: Vec<CommandSpec>,
 }
@@ -24,6 +26,8 @@ struct CommandSpec {
     path: Vec<String>,
     usage: String,
     about: Option<String>,
+    /// Extended description and examples (the command's `--help` footer).
+    details: Option<String>,
     args: Vec<ArgSpec>,
     groups: Vec<GroupSpec>,
 }
@@ -78,6 +82,7 @@ fn build() -> Spec {
     Spec {
         name: root.get_name().to_owned(),
         version: root.get_version().unwrap_or_default().to_owned(),
+        overview: root.get_after_long_help().map(ToString::to_string),
         global_args,
         commands,
     }
@@ -113,6 +118,7 @@ fn collect(command: &Command, path: Vec<String>, out: &mut Vec<CommandSpec>) {
             usage: usage(&path, &args, &groups),
             path,
             about: command.get_about().map(ToString::to_string),
+            details: details(command),
             args,
             groups,
         });
@@ -123,6 +129,18 @@ fn collect(command: &Command, path: Vec<String>, out: &mut Vec<CommandSpec>) {
         sub_path.push(sub.get_name().to_owned());
         collect(sub, sub_path, out);
     }
+}
+
+fn details(command: &Command) -> Option<String> {
+    let parts: Vec<String> = [
+        command.get_long_about(),
+        command.get_after_long_help().or(command.get_after_help()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(ToString::to_string)
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn visible(arg: &Arg) -> bool {
