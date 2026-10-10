@@ -239,6 +239,21 @@ fn two_step_password_login_end_to_end() {
     let url = server.url();
     let pending = home.state().join("pending-login.json");
 
+    // A bare human-readable login announces the remembered identity and
+    // stops at the same pending code.
+    let bare = home.run(&["--base-url", &url, "auth", "login"]);
+    assert_eq!(bare.status.code(), Some(12));
+    assert!(bare.stdout.is_empty());
+    let bare_stderr = String::from_utf8(bare.stderr).unwrap();
+    for expected in [
+        "Signing in as student (password)",
+        "error [CODE_REQUIRED]",
+        "klms auth login --code CODE",
+    ] {
+        assert!(bare_stderr.contains(expected), "{bare_stderr}");
+    }
+    assert!(!bare_stderr.contains("s3cret"));
+
     let first = home.login(&url, &[]);
     let stderr = String::from_utf8_lossy(&first.stderr).into_owned();
     assert_eq!(first.status.code(), Some(12), "{stderr}");
@@ -284,22 +299,4 @@ fn two_step_password_login_end_to_end() {
     assert_eq!(third.status.code(), Some(10));
     let message = &json(&third.stderr)["error"]["message"];
     assert!(message.as_str().unwrap().contains("no login is waiting"));
-}
-
-#[test]
-fn bare_login_announces_the_remembered_identity_on_stderr() {
-    let home = Home::new();
-    home.seed(true);
-    let server = Server::new(|request| sso_router(&request.target));
-    let output = home.run(&["--base-url", &server.url(), "auth", "login"]);
-    assert_eq!(output.status.code(), Some(12));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("Signing in as student (password)"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("error [CODE_REQUIRED]"));
-    assert!(stderr.contains("klms auth login --code CODE"));
-    assert!(!stderr.contains("s3cret"));
 }
