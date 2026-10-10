@@ -4,11 +4,6 @@ use scraper::Html;
 use super::shared::sel;
 use crate::error::AppError;
 
-#[derive(Debug)]
-pub struct AuthPolicyShape {
-    pub actions: Vec<String>,
-}
-
 pub struct AuthHandoffForm {
     pub action: Url,
     pub fields: Vec<(String, String)>,
@@ -62,7 +57,7 @@ fn valid_field_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-pub fn auth_policy_shape(html: &str) -> Result<AuthPolicyShape, AppError> {
+pub fn auth_policy_shape(html: &str) -> Vec<String> {
     let document = Html::parse_document(html);
     let mut actions: Vec<String> = document
         .select(&sel("button[onclick], a[href]"))
@@ -79,7 +74,7 @@ pub fn auth_policy_shape(html: &str) -> Result<AuthPolicyShape, AppError> {
     }
     actions.sort();
     actions.dedup();
-    Ok(AuthPolicyShape { actions })
+    actions
 }
 
 pub fn easy_login_code(html: &str) -> Option<String> {
@@ -127,8 +122,7 @@ mod tests {
     #[test]
     fn extracts_structure_without_values_or_visible_text() {
         let html = r#"<form action="/auth/device/save"><input name="device_name" value="secret"><button onclick="post('/auth/device/check')">Save</button></form>"#;
-        let shape = auth_policy_shape(html).unwrap();
-        assert_eq!(shape.actions, ["/auth/device/check"]);
+        assert_eq!(auth_policy_shape(html), ["/auth/device/check"]);
     }
 
     #[test]

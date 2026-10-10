@@ -13,7 +13,7 @@ pub fn activities(
 ) -> Result<Vec<Activity>, AppError> {
     let first = client.get(&format!("/course/view.php?id={course_id}"))?;
     let mut rows = parse::activities(&first.text, base_url, None)?;
-    if parse::has_all_weeks_view(&first.text, course_id)? {
+    if parse::has_all_weeks_view(&first.text, course_id) {
         let all = client.get(&format!("/course/view.php?id={course_id}&section=0"))?;
         let key = |row: &Activity| {
             row.id

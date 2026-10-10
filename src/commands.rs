@@ -204,7 +204,7 @@ impl Ctx<'_> {
                 CoursesCommand::Show { course } => {
                     let resolved = self.resolve_course(course)?;
                     let response = client.get(&format!("/course/view.php?id={}", resolved.id))?;
-                    let model = parse::course_detail(&response.text, base, resolved)?;
+                    let model = parse::course_detail(&response.text, base, resolved);
                     let professors = match model.professors.is_empty() {
                         true => "unknown".into(),
                         false => model.professors.join(", "),
@@ -299,7 +299,7 @@ impl Ctx<'_> {
                     let response = client.get(&module_path(board, &["courseboard"])?)?;
                     let board_id = response.url.query_value("id");
                     let posts = parse::board_posts(&response.text, base, board_id)?;
-                    let complete = !parse::has_next_page(&response.text)?;
+                    let complete = !parse::has_next_page(&response.text);
                     listing(
                         "boards.posts",
                         posts,
@@ -624,7 +624,7 @@ impl Ctx<'_> {
                 ));
             };
             let response = self.client.get(&ResourceRef::parse(&board_ref)?.path())?;
-            source_complete &= !parse::has_next_page(&response.text)?;
+            source_complete &= !parse::has_next_page(&response.text);
             let board_id = response.url.query_value("id");
             for post in parse::board_posts(&response.text, self.base, board_id)? {
                 let Some(reference) = post.reference else {
