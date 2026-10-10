@@ -74,8 +74,23 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
         LibraryCommand::Content {
             reference,
             max_bytes,
-        } => library_content(&corpus, reference, *max_bytes),
-        LibraryCommand::Export { reference, out } => library_export(&corpus, reference, out),
+        } => {
+            let model = corpus.preview(reference, *max_bytes)?;
+            let human = model
+                .text
+                .clone()
+                .unwrap_or_else(|| "Binary content is available through `library export`.".into());
+            output::result("library.content", &model, human)
+        }
+        LibraryCommand::Export { reference, out } => {
+            let bytes = corpus.export(reference, out)?;
+            let model = serde_json::json!({"ref":reference,"path":out,"byte_length":bytes});
+            output::result(
+                "library.export",
+                &model,
+                format!("Exported {} bytes to {}", bytes, out.display()),
+            )
+        }
         LibraryCommand::Edit(args) => {
             let value = read_library_text(args.value.as_deref(), args.value_file.as_deref())?;
             let field = args.field.to_possible_value().expect("no hidden fields");
@@ -181,32 +196,6 @@ fn library_status(corpus: &Corpus) -> Result<CommandResult, AppError> {
     Ok(result)
 }
 
-fn library_content(
-    corpus: &Corpus,
-    reference: &str,
-    max: usize,
-) -> Result<CommandResult, AppError> {
-    let model = corpus.preview(reference, max)?;
-    let human = model
-        .text
-        .clone()
-        .unwrap_or_else(|| "Binary content is available through `library export`.".into());
-    output::result("library.content", &model, human)
-}
-fn library_export(
-    corpus: &Corpus,
-    reference: &str,
-    out: &std::path::Path,
-) -> Result<CommandResult, AppError> {
-    let bytes = corpus.export(reference, out)?;
-    let model = serde_json::json!({"ref":reference,"path":out,"byte_length":bytes});
-    output::result(
-        "library.export",
-        &model,
-        format!("Exported {} bytes to {}", bytes, out.display()),
-    )
-}
-
 pub(super) fn sync(
     client: &KlmsClient,
     base_url: &Url,
@@ -247,10 +236,7 @@ fn read_library_text(
     path: Option<&std::path::Path>,
 ) -> Result<String, AppError> {
     let mut text = match (value, path) {
-        (Some(value), _) if value.len() > MAX_CURATION_TEXT => {
-            return Err(AppError::limit("curation text exceeds 1 MiB"));
-        }
-        (Some(value), _) => value.to_owned(),
+        (Some(value), _) => read_curation_text(value.as_bytes())?,
         (None, Some(path)) if path == std::path::Path::new("-") => {
             read_curation_text(std::io::stdin().lock())?
         }
