@@ -15,7 +15,7 @@ use ureq::{
 
 use crate::error::AppError;
 
-pub use ureq::http::{HeaderMap, HeaderValue, Method, StatusCode, header::SET_COOKIE};
+pub use ureq::http::{HeaderMap, HeaderValue, Method, header::SET_COOKIE};
 
 pub const USER_AGENT: &str = concat!("klms/", env!("CARGO_PKG_VERSION"));
 
@@ -102,6 +102,22 @@ pub fn send_once(
     send_until(agent, method, url, headers, payload, None)
 }
 
+fn run<B: ureq::AsSendBody>(
+    agent: &Agent,
+    request: http::Request<B>,
+    remaining: Option<Duration>,
+) -> Result<http::Response<ureq::Body>, ureq::Error> {
+    match remaining {
+        Some(left) => agent.run(
+            agent
+                .configure_request(request)
+                .timeout_global(Some(left))
+                .build(),
+        ),
+        None => agent.run(request),
+    }
+}
+
 /// [`send_once`] bounded by `deadline` instead of the agent's per-request
 /// timeout, so a redirect chain shares one overall time budget.
 fn send_until(
@@ -112,16 +128,13 @@ fn send_until(
     payload: Option<&Payload>,
     deadline: Option<Instant>,
 ) -> Result<Response, Failure> {
-    let remaining = match deadline {
-        Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
-            Some(left) if !left.is_zero() => Some(left),
-            _ => {
-                return Err(Failure::Transport(
-                    "timeout: request deadline elapsed".into(),
-                ));
-            }
-        },
-        None => None,
+    let remaining = match deadline.map(|d| d.checked_duration_since(Instant::now())) {
+        Some(None | Some(Duration::ZERO)) => {
+            return Err(Failure::Transport(
+                "timeout: request deadline elapsed".into(),
+            ));
+        }
+        other => other.flatten(),
     };
     let transport = |message: String| Failure::Transport(message.replace(url.as_str(), "<url>"));
     let mut builder = http::Request::builder().method(method).uri(url.as_str());
@@ -129,37 +142,17 @@ fn send_until(
         builder = builder.header(*name, value.as_str());
     }
     let result = match payload {
-        Some(payload) => {
-            let request = builder
-                .header("content-type", payload.content_type)
-                .body(payload.bytes.clone())
-                .map_err(|error| transport(error.to_string()))?;
-            match remaining {
-                Some(left) => agent.run(
-                    agent
-                        .configure_request(request)
-                        .timeout_global(Some(left))
-                        .build(),
-                ),
-                None => agent.run(request),
-            }
-        }
-        None => {
-            let request = builder
-                .body(())
-                .map_err(|error| transport(error.to_string()))?;
-            match remaining {
-                Some(left) => agent.run(
-                    agent
-                        .configure_request(request)
-                        .timeout_global(Some(left))
-                        .build(),
-                ),
-                None => agent.run(request),
-            }
-        }
+        Some(payload) => builder
+            .header("content-type", payload.content_type)
+            .body(payload.bytes.clone())
+            .map(|request| run(agent, request, remaining)),
+        None => builder
+            .body(())
+            .map(|request| run(agent, request, remaining)),
     };
-    let response = result.map_err(|error| transport(error.to_string()))?;
+    let response = result
+        .map_err(|error| transport(error.to_string()))?
+        .map_err(|error| transport(error.to_string()))?;
     let (parts, body) = response.into_parts();
     Ok(Response {
         url: url.clone(),
