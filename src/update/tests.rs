@@ -59,7 +59,6 @@ fn test_update(
             downloads_url: server.url(),
             current_version: current.into(),
             destination: home.join("klms"),
-            home: Some(home.to_owned()),
         },
     )
 }
@@ -82,13 +81,12 @@ fn check_and_no_downgrade_only_fetch_metadata() {
             fs::read(home.path().join("klms")).unwrap(),
             b"old executable"
         );
-        assert!(!home.path().join("data").exists());
     }
 }
 
 // This candidate records the subprocess protocol; actual binary installation
 // is exercised by tests/update_contract.rs using Cargo's real CLI executable.
-fn protocol_archive(root: &Path, candidate_version: &str, fail: bool) -> Vec<u8> {
+fn protocol_archive(root: &Path, args_file: &Path, candidate_version: &str, fail: bool) -> Vec<u8> {
     let package = format!(
         "klms-v{}-{}",
         env!("CARGO_PKG_VERSION"),
@@ -101,13 +99,14 @@ if [ "$1" = '--version' ]; then
     printf 'klms {candidate_version}\n'
     exit 0
 fi
-printf '%s\n' "$@" > "$HOME/candidate-args"
+printf '%s\n' "$@" > '{args_file}'
 if [ '{fail}' = 'true' ]; then
     printf '%s\n' '{{"error":{{"message":"fixture install failure"}}}}' >&2
     exit 1
 fi
 exit 0
-"#
+"#,
+        args_file = args_file.display()
     );
     fs::write(root.join(&package).join("klms"), candidate).unwrap();
     let output = Command::new("tar")
@@ -163,9 +162,15 @@ fn legacy_skill_removal_touches_only_klms_managed_paths() {
 fn verified_candidate_receives_install_destination_and_failure_is_propagated() {
     for fail in [false, true] {
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive = protocol_archive(archive_dir.path(), env!("CARGO_PKG_VERSION"), fail);
-        let server = release_server(archive, true, "200 OK");
         let home = tempfile::tempdir().unwrap();
+        let args_file = home.path().join("candidate-args");
+        let archive = protocol_archive(
+            archive_dir.path(),
+            &args_file,
+            env!("CARGO_PKG_VERSION"),
+            fail,
+        );
+        let server = release_server(archive, true, "200 OK");
         let result = test_update(&server, "0.2.0", false, home.path());
         if fail {
             assert_eq!(
@@ -177,7 +182,7 @@ fn verified_candidate_receives_install_destination_and_failure_is_propagated() {
         }
         // Validate the candidate's CLI contract, not the sender's flag order.
         use clap::Parser;
-        let arguments = fs::read_to_string(home.path().join("candidate-args")).unwrap();
+        let arguments = fs::read_to_string(&args_file).unwrap();
         let cli = crate::cli::Cli::try_parse_from(std::iter::once("klms").chain(arguments.lines()))
             .unwrap();
         assert!(cli.json);
@@ -196,12 +201,13 @@ fn failed_download_checksum_or_version_never_invokes_install() {
         (true, "200 OK", "99.0.0"),
     ] {
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive = protocol_archive(archive_dir.path(), candidate_version, false);
-        let server = release_server(archive, checksum_ok, status);
         let home = tempfile::tempdir().unwrap();
+        let args_file = home.path().join("candidate-args");
+        let archive = protocol_archive(archive_dir.path(), &args_file, candidate_version, false);
+        let server = release_server(archive, checksum_ok, status);
         fs::write(home.path().join("klms"), b"old executable").unwrap();
         assert!(test_update(&server, "0.2.0", false, home.path()).is_err());
-        assert!(!home.path().join("candidate-args").exists());
+        assert!(!args_file.exists());
         assert_eq!(
             fs::read(home.path().join("klms")).unwrap(),
             b"old executable"
