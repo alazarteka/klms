@@ -5,9 +5,7 @@ mod schema;
 mod sync;
 
 use std::{
-    env, fmt, fs,
-    fs::OpenOptions,
-    io,
+    env, fmt, fs, io,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -17,6 +15,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::{
     error::AppError,
+    private_fs::private_file_options,
     reference::{ResourceRef, valid_id},
 };
 
@@ -208,14 +207,6 @@ fn private_dir(path: &Path) -> Result<(), AppError> {
         Err(error) => return Err(io_error("inspect", path, error)),
     }
     chmod(path, 0o700)
-}
-
-fn private_file_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
 }
 
 fn chmod(path: &Path, mode: u32) -> Result<(), AppError> {
