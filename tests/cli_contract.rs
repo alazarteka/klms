@@ -489,6 +489,49 @@ fn board_post_identity_is_consistent_across_list_and_detail() {
 }
 
 #[test]
+fn help_is_the_agent_manual() {
+    let help = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_klms"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let top = help(&["--help"]);
+    for needle in [
+        "auth",
+        "today",
+        "upcoming",
+        "courses",
+        "activities",
+        "assignments",
+        "quizzes",
+        "calendar",
+        "boards",
+        "notices",
+        "files",
+        "videos",
+        "grades",
+        "attendance",
+        "request",
+        "library",
+        "Exit codes:",
+        "54 CURATION_CONFLICT",
+        "12 CODE_REQUIRED",
+        "board-post:BOARD:POST",
+        "ok:true",
+        "read-only",
+    ] {
+        assert!(top.contains(needle), "--help lacks {needle}");
+    }
+    let edit = help(&["library", "edit", "--help"]);
+    assert!(edit.contains("effective._provenance") && edit.contains("CURATION_CONFLICT"));
+    let login = help(&["auth", "login", "--help"]);
+    assert!(login.contains("--code") && login.contains("--remember-password"));
+}
+
+#[test]
 fn spec_and_completions_describe_the_command_surface() {
     let env = Env::new();
     assert!(

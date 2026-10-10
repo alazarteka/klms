@@ -262,10 +262,10 @@ impl Corpus {
                     "SELECT json_object('resource_ref',r.ref,'remote_state',p.remote_state,
                         'source',json_object('url',p.url,'filename',o.filename,
                           'mime',p.observed_mime,'observed_at',o.observed_at),
-                        'content',(SELECT json_object('sha256_ref','sha256:'||sha256,
+                        'content',json((SELECT json_object('sha256_ref','sha256:'||sha256,
                             'byte_length',byte_length,'mime',mime,'observed_at',observed_at)
                            FROM content_observations
-                          WHERE representation_id=p.id ORDER BY id DESC LIMIT 1)),
+                          WHERE representation_id=p.id ORDER BY id DESC LIMIT 1))),
                         {REPRESENTATION_DIGEST}
                        FROM representations p JOIN resources r ON r.id=p.resource_id
                        LEFT JOIN representation_observations o ON o.id={}
