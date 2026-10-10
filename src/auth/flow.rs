@@ -16,7 +16,7 @@ use crate::{error::AppError, url::Url};
 
 use super::{
     LoginMethod, SecondFactor,
-    store::{PendingLogin, StoredCookie},
+    store::{PendingLogin, StoredCookie, validate_username},
     transport::SsoTransport,
 };
 
@@ -244,7 +244,11 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
     transport.get(entry.as_str())?;
     let username = match username {
         Some(username) => username,
-        None => prompt.identifier()?,
+        None => {
+            let typed = prompt.identifier()?;
+            validate_username(&typed)?;
+            typed
+        }
     };
     let mut password_used = None;
     let mut pending = None;
