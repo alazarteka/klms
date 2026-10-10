@@ -204,6 +204,14 @@ fn previously_observed_file_without_bytes_directs_to_parent_not_download_retry()
     let env = Env::at(&server);
     env.sync("");
     let file = rep(&env.data("library show file:7"), "/lecture.txt");
+    for reference in ["file:7", file.as_str()] {
+        let error = byte_errors(&env, reference);
+        has(&error["message"], "metadata");
+        has(
+            &error["hint"],
+            "library sync --course course:42 --download changed",
+        );
+    }
     gone.set(1);
     env.sync("");
     let shown = env.data(&format!("library show {}", file));
@@ -432,48 +440,6 @@ fn parent_notice_byte_errors_offer_text_and_only_present_file_candidates() {
             assert_eq!(server.requests().len(), before);
         }
     }
-}
-
-#[test]
-fn notice_text_and_metadata_only_files_have_actionable_content_errors() {
-    let server = lib_server(|r, _| match r.target.as_str() {
-        "/course/view.php?id=42" => html(course(&[
-            ("resource", 7, "Lecture One"),
-            ("courseboard", 9, "Notices"),
-        ])),
-        "/mod/courseboard/view.php?id=9" => html(NOTICE_LIST),
-        ARTICLE => html(article(
-            "Hello",
-            "<a href='/pluginfile.php/notice'>Notice attachment</a>",
-            "Stored notice text",
-        )),
-        _ => None,
-    });
-    let env = Env::at(&server);
-    env.sync("--notices");
-    let shown = env.data("library show board-post:9:10");
-    assert_eq!(shown["source"]["text"], "Stored notice text");
-    let attachment = rep(&shown, "/pluginfile.php/notice");
-    let file_ref = rep(&env.data("library show file:7"), "/lecture.txt");
-    let before = server.requests().len();
-    let (_, notice) = env.fail("library content board-post:9:10");
-    let hint = notice["hint"].as_str().unwrap();
-    assert!(
-        hint.contains("klms library show board-post:9:10") && hint.contains("data.source.text"),
-        "{hint}"
-    );
-    for reference in ["file:7", &file_ref] {
-        let (_, error) = env.fail(&format!("library content {}", reference));
-        has(&error["message"], "metadata");
-        let hint = error["hint"].as_str().unwrap();
-        assert!(
-            hint.contains("library sync --course course:42 --download changed"),
-            "{hint}"
-        );
-    }
-    let (_, error) = env.fail(&format!("library content {}", attachment));
-    has(&error["hint"], NOTICE_SYNC_HINT);
-    assert_eq!(server.requests().len(), before, "hints must not download");
 }
 
 #[test]
