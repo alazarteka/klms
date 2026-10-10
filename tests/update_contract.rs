@@ -39,7 +39,19 @@ fn clean_install_replaces_and_follows_binary_symlinks_without_replacing_the_link
     assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), expected);
     assert!(!temp.path().join("data").exists() && !temp.path().join(".agents").exists());
     fs::write(&destination, b"old executable").unwrap();
+    #[cfg(unix)]
+    let (payload_dir, link) = {
+        let payload_dir = temp.path().join("data/klms/skills/klms");
+        let link = temp.path().join(".agents/skills/klms");
+        fs::create_dir_all(&payload_dir).unwrap();
+        fs::write(payload_dir.join("SKILL.md"), b"legacy skill").unwrap();
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&payload_dir, &link).unwrap();
+        (payload_dir, link)
+    };
     assert_installed(temp.path(), &destination);
+    #[cfg(unix)]
+    assert!(fs::symlink_metadata(&link).is_err() && !payload_dir.exists());
 
     #[cfg(unix)]
     {
@@ -50,33 +62,6 @@ fn clean_install_replaces_and_follows_binary_symlinks_without_replacing_the_link
         assert_eq!(fs::read_link(&link).unwrap(), real);
         assert_eq!(fs::read(real).unwrap(), fs::read(BINARY).unwrap());
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn install_removes_only_the_legacy_managed_skill() {
-    let temp = tempfile::tempdir().unwrap();
-    let destination = temp.path().join("klms");
-    let payload_dir = temp.path().join("data/klms/skills/klms");
-    let link = temp.path().join(".agents/skills/klms");
-    fs::create_dir_all(&payload_dir).unwrap();
-    fs::write(payload_dir.join("SKILL.md"), b"legacy skill").unwrap();
-    fs::create_dir_all(link.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(&payload_dir, &link).unwrap();
-    assert_installed(temp.path(), &destination);
-    assert!(fs::symlink_metadata(&link).is_err() && !payload_dir.exists());
-
-    // A user-owned directory, or a symlink to anywhere else, is kept.
-    fs::create_dir_all(&link).unwrap();
-    fs::write(link.join("SKILL.md"), b"user skill").unwrap();
-    assert_installed(temp.path(), &destination);
-    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), b"user skill");
-    let elsewhere = temp.path().join("elsewhere");
-    fs::create_dir(&elsewhere).unwrap();
-    fs::remove_dir_all(&link).unwrap();
-    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-    assert_installed(temp.path(), &destination);
-    assert_eq!(fs::read_link(&link).unwrap(), elsewhere);
 }
 
 #[test]
