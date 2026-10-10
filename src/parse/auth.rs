@@ -1,12 +1,8 @@
-use scraper::{Html, Selector};
-use url::Url;
+use crate::url::Url;
+use scraper::Html;
 
+use super::shared::sel;
 use crate::error::AppError;
-
-#[derive(Debug)]
-pub struct AuthPolicyShape {
-    pub actions: Vec<String>,
-}
 
 pub struct AuthHandoffForm {
     pub action: Url,
@@ -19,22 +15,19 @@ pub fn auth_handoff_form(
     klms: &Url,
 ) -> Result<AuthHandoffForm, AppError> {
     let document = Html::parse_document(html);
-    let forms = Selector::parse("form[action]").expect("valid selector");
-    let inputs = Selector::parse("input[name]").expect("valid selector");
-    for form in document.select(&forms) {
-        let Some(action) = form.value().attr("action") else {
+    let inputs = sel("input[name]");
+    for form in document.select(&sel("form[action]")) {
+        let Some(action) = form
+            .value()
+            .attr("action")
+            .and_then(|action| document_url.join(action).ok())
+        else {
             continue;
         };
-        let Ok(action) = document_url.join(action) else {
-            continue;
-        };
-        if action.scheme() != klms.scheme()
-            || action.host_str() != klms.host_str()
-            || action.port_or_known_default() != klms.port_or_known_default()
-        {
+        if action.origin() != klms.origin() {
             continue;
         }
-        let fields = form
+        let fields: Vec<_> = form
             .select(&inputs)
             .filter_map(|input| {
                 let name = input.value().attr("name")?;
@@ -43,7 +36,7 @@ pub fn auth_handoff_form(
                     .then(|| (name.to_owned(), value.to_owned()))
             })
             .take(32)
-            .collect::<Vec<_>>();
+            .collect();
         if fields.is_empty() {
             return Err(AppError::auth_protocol(
                 "KAIST SSO handoff form contained no fields",
@@ -64,54 +57,47 @@ fn valid_field_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-pub fn auth_policy_shape(html: &str) -> Result<AuthPolicyShape, AppError> {
+pub fn auth_policy_shape(html: &str) -> Vec<String> {
     let document = Html::parse_document(html);
-    let action_selector = Selector::parse("button[onclick], a[href]").expect("valid selector");
-    let mut actions = document
-        .select(&action_selector)
+    let mut actions: Vec<String> = document
+        .select(&sel("button[onclick], a[href]"))
         .flat_map(|element| {
-            [
-                element.value().attr("onclick"),
-                element.value().attr("href"),
-            ]
-            .into_iter()
-            .flatten()
+            ["onclick", "href"]
+                .into_iter()
+                .filter_map(|attr| element.value().attr(attr))
+                .filter_map(|value| auth_paths(value).into_iter().next())
+                .collect::<Vec<_>>()
         })
-        .filter_map(auth_path)
-        .collect::<Vec<_>>();
-    for script in document.select(&Selector::parse("script:not([src])").expect("valid selector")) {
-        let text = script.text().collect::<String>();
-        actions.extend(auth_paths(&text));
+        .collect();
+    for script in document.select(&sel("script:not([src])")) {
+        actions.extend(auth_paths(&script.text().collect::<String>()));
     }
     actions.sort();
     actions.dedup();
-    Ok(AuthPolicyShape { actions })
+    actions
 }
 
 pub fn easy_login_code(html: &str) -> Option<String> {
     let document = Html::parse_document(html);
-    let accessible = Selector::parse(".auth_number .sr-only").expect("valid selector");
-    if let Some(code) = document
-        .select(&accessible)
+    document
+        .select(&sel(".auth_number .sr-only"))
         .map(|element| element.text().collect::<String>())
-        .find(|text| digits_only(text).is_some())
-    {
-        return digits_only(code);
-    }
-    let visible = Selector::parse(".auth_number .nember_wrap span").expect("valid selector");
-    let code = document
-        .select(&visible)
-        .flat_map(|element| element.text())
-        .collect::<String>();
-    digits_only(code)
+        .find_map(digits_only)
+        .or_else(|| {
+            let visible: String = document
+                .select(&sel(".auth_number .nember_wrap span"))
+                .flat_map(|element| element.text())
+                .collect();
+            digits_only(visible)
+        })
 }
 
 fn digits_only(value: impl AsRef<str>) -> Option<String> {
-    let digits = value
+    let digits: String = value
         .as_ref()
         .chars()
-        .filter(|character| character.is_ascii_digit())
-        .collect::<String>();
+        .filter(char::is_ascii_digit)
+        .collect();
     (!digits.is_empty() && digits.len() <= 8).then_some(digits)
 }
 
@@ -121,19 +107,12 @@ fn auth_paths(text: &str) -> Vec<String> {
     while let Some(index) = rest.find("/auth/") {
         rest = &rest[index..];
         let end = rest
-            .find(|character: char| {
-                character.is_ascii_whitespace()
-                    || matches!(character, '\'' | '"' | '`' | '<' | '>' | ')' | '}' | ']')
-            })
+            .find(|c: char| c.is_ascii_whitespace() || "'\"`<>)}]".contains(c))
             .unwrap_or(rest.len());
         paths.push(rest[..end].trim_end_matches([';', ',']).to_owned());
         rest = &rest[end..];
     }
     paths
-}
-
-fn auth_path(text: &str) -> Option<String> {
-    auth_paths(text).into_iter().next()
 }
 
 #[cfg(test)]
@@ -143,8 +122,7 @@ mod tests {
     #[test]
     fn extracts_structure_without_values_or_visible_text() {
         let html = r#"<form action="/auth/device/save"><input name="device_name" value="secret"><button onclick="post('/auth/device/check')">Save</button></form>"#;
-        let shape = auth_policy_shape(html).unwrap();
-        assert_eq!(shape.actions, ["/auth/device/check"]);
+        assert_eq!(auth_policy_shape(html), ["/auth/device/check"]);
     }
 
     #[test]

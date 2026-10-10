@@ -6,6 +6,28 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+const BINARY: &str = env!("CARGO_BIN_EXE_klms");
+const MOCK_CURL: &str = r#"#!/bin/sh
+set -eu
+out=''
+last=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) last="$1"; shift ;;
+  esac
+done
+base="https://github.com/alazarteka/klms/releases"
+case "$last" in
+  "$base/latest") printf '%s/tag/%s' "$base" "$KLMS_FIXTURE_TAG" ;;
+  "$base/download/$KLMS_FIXTURE_TAG/$KLMS_FIXTURE_ARCHIVE")
+    cp "$KLMS_FIXTURE_ROOT/$KLMS_FIXTURE_ARCHIVE" "$out" ;;
+  "$base/download/$KLMS_FIXTURE_TAG/$KLMS_FIXTURE_ARCHIVE.sha256")
+    cp "$KLMS_FIXTURE_ROOT/$KLMS_FIXTURE_ARCHIVE.sha256" "$out" ;;
+  *) echo "unexpected installer URL: $last" >&2; exit 91 ;;
+esac
+"#;
+
 struct InstallFixture {
     root: TempDir,
     destination: PathBuf,
@@ -25,55 +47,22 @@ impl InstallFixture {
         let package = format!("klms-{tag}-{target}");
         let archive = format!("{package}.tar.gz");
         fs::create_dir(root.path().join(&package)).unwrap();
-        fs::copy(
-            env!("CARGO_BIN_EXE_klms"),
-            root.path().join(&package).join("klms"),
-        )
-        .unwrap();
-        assert!(
-            Command::new("tar")
-                .args(["-czf", &archive, &package])
-                .current_dir(root.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        let digest = Sha256::digest(fs::read(root.path().join(&archive)).unwrap())
+        fs::copy(BINARY, root.path().join(&package).join("klms")).unwrap();
+        let tar = Command::new("tar")
+            .args(["-czf", &archive, &package])
+            .current_dir(root.path())
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let digest: String = Sha256::digest(fs::read(root.path().join(&archive)).unwrap())
             .iter()
             .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        fs::write(
-            root.path().join(format!("{archive}.sha256")),
-            format!("{digest}  {archive}\n"),
-        )
-        .unwrap();
-        let mock_bin = root.path().join("mock-bin");
-        fs::create_dir(&mock_bin).unwrap();
-        let curl = mock_bin.join("curl");
-        fs::write(
-            &curl,
-            r#"#!/bin/sh
-set -eu
-out=''
-last=''
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -o) out="$2"; shift 2 ;;
-    *) last="$1"; shift ;;
-  esac
-done
-base="https://github.com/alazarteka/klms/releases"
-case "$last" in
-  "$base/latest") printf '%s/tag/%s' "$base" "$KLMS_FIXTURE_TAG" ;;
-  "$base/download/$KLMS_FIXTURE_TAG/$KLMS_FIXTURE_ARCHIVE")
-    cp "$KLMS_FIXTURE_ROOT/$KLMS_FIXTURE_ARCHIVE" "$out" ;;
-  "$base/download/$KLMS_FIXTURE_TAG/$KLMS_FIXTURE_ARCHIVE.sha256")
-    cp "$KLMS_FIXTURE_ROOT/$KLMS_FIXTURE_ARCHIVE.sha256" "$out" ;;
-  *) echo "unexpected installer URL: $last" >&2; exit 91 ;;
-esac
-"#,
-        )
-        .unwrap();
+            .collect();
+        let checksum = root.path().join(format!("{archive}.sha256"));
+        fs::write(checksum, format!("{digest}  {archive}\n")).unwrap();
+        let curl = root.path().join("mock-bin/curl");
+        fs::create_dir(curl.parent().unwrap()).unwrap();
+        fs::write(&curl, MOCK_CURL).unwrap();
         fs::set_permissions(curl, fs::Permissions::from_mode(0o755)).unwrap();
         let destination = root.path().join("custom binary directory/klms");
         Self {
@@ -85,14 +74,13 @@ esac
     }
 
     fn run(&self) -> std::process::Output {
-        let path = std::env::join_paths(std::iter::once(self.root.path().join("mock-bin")).chain(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-        ))
-        .unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mock = self.root.path().join("mock-bin");
+        let paths = std::iter::once(mock).chain(std::env::split_paths(&path));
         Command::new("bash")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh"))
             .current_dir(self.root.path())
-            .env("PATH", path)
+            .env("PATH", std::env::join_paths(paths).unwrap())
             // These are the test process's application directories, not real user state.
             .env("HOME", self.root.path().join("test-home"))
             .env("XDG_DATA_HOME", self.root.path().join("test-data"))
@@ -105,53 +93,32 @@ esac
             .unwrap()
     }
 
-    fn payload(&self) -> PathBuf {
-        self.root.path().join("test-data/klms/skills/klms/SKILL.md")
+    fn run_ok(&self) {
+        let result = self.run();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }
 
 #[test]
-fn bootstrap_installs_and_replaces_binary_with_matching_skill() {
+fn bootstrap_installs_and_replaces_binary() {
     let fixture = InstallFixture::new();
-    let first = fixture.run();
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
+    fixture.run_ok();
     let version = Command::new(&fixture.destination)
         .arg("--version")
         .output()
         .unwrap();
     assert!(version.status.success());
-    assert_eq!(
-        String::from_utf8(version.stdout).unwrap().trim(),
-        format!("klms {}", env!("CARGO_PKG_VERSION"))
-    );
-    assert_eq!(
-        fs::read(fixture.payload()).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
-    );
-    assert_eq!(
-        fs::read_link(fixture.root.path().join("test-home/.agents/skills/klms")).unwrap(),
-        fixture.payload().parent().unwrap()
-    );
-
+    let expected = format!("klms {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), expected);
     fs::write(&fixture.destination, b"old executable bytes").unwrap();
-    fs::write(fixture.payload(), b"old embedded skill").unwrap();
-    let second = fixture.run();
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
+    fixture.run_ok();
     assert_eq!(
         fs::read(&fixture.destination).unwrap(),
-        fs::read(env!("CARGO_BIN_EXE_klms")).unwrap()
-    );
-    assert_eq!(
-        fs::read(fixture.payload()).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
+        fs::read(BINARY).unwrap()
     );
 }
 
@@ -160,11 +127,12 @@ fn bootstrap_checksum_failure_preserves_existing_install() {
     let fixture = InstallFixture::new();
     fs::create_dir_all(fixture.destination.parent().unwrap()).unwrap();
     fs::write(&fixture.destination, b"old executable").unwrap();
+    let checksum = fixture
+        .root
+        .path()
+        .join(format!("{}.sha256", fixture.archive));
     fs::write(
-        fixture
-            .root
-            .path()
-            .join(format!("{}.sha256", fixture.archive)),
+        checksum,
         format!("{}  {}\n", "0".repeat(64), fixture.archive),
     )
     .unwrap();
@@ -172,23 +140,4 @@ fn bootstrap_checksum_failure_preserves_existing_install() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("checksum"));
     assert_eq!(fs::read(&fixture.destination).unwrap(), b"old executable");
-    assert!(!fixture.payload().exists());
-}
-
-#[test]
-fn bootstrap_skill_conflict_preserves_binary_and_skill() {
-    let fixture = InstallFixture::new();
-    fs::create_dir_all(fixture.destination.parent().unwrap()).unwrap();
-    fs::write(&fixture.destination, b"old executable").unwrap();
-    let conflict = fixture.root.path().join("test-home/.agents/skills/klms");
-    fs::create_dir_all(&conflict).unwrap();
-    fs::write(conflict.join("SKILL.md"), b"user-managed skill").unwrap();
-    let result = fixture.run();
-    assert!(!result.status.success());
-    assert_eq!(fs::read(&fixture.destination).unwrap(), b"old executable");
-    assert_eq!(
-        fs::read(conflict.join("SKILL.md")).unwrap(),
-        b"user-managed skill"
-    );
-    assert!(!fixture.payload().exists());
 }

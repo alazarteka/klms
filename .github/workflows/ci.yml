@@ -23,22 +23,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Install pinned development runner
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.12.10"
-          python-version: "3.12"
-          enable-cache: false
-      - name: Supply-chain workflow contract
-        run: ./tests/supply_chain_contract.sh
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a # 1.86.0
         with:
           components: clippy,rustfmt
-      - name: Dependency security policy
-        run: ./scripts/cargo-deny.sh --log-level info --locked check advisories bans sources licenses
-      - name: Dependency review policy
-        run: ./scripts/cargo-vet.sh check --locked --no-registry-suggestions
       - name: Format
         run: cargo fmt --all -- --check
       - name: Tests

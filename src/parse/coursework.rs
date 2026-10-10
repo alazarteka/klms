@@ -1,8 +1,10 @@
+use crate::url::Url;
 use scraper::Html;
-use url::Url;
 
-use super::shared::{header_name, indexed_rows, selector, semantic_table, text, week_number};
+use super::detail::preview_from_document;
+use super::shared::{IndexedRow, find_table, indexed_rows, query_id, row_cells, sel, week_number};
 use crate::{
+    date,
     error::AppError,
     models::{Assignment, Course, Quiz, Report},
     reference::ResourceRef,
@@ -14,193 +16,166 @@ pub fn assignments(
     page_url: &Url,
     course: &Course,
 ) -> Result<Vec<Assignment>, AppError> {
-    let document = Html::parse_document(html);
-    let table = semantic_table(&document, &["week", "name", "due date"])?;
-    let Some(table) = table else {
-        if explicit_empty(&document, "assignment") {
-            return Ok(Vec::new());
-        }
-        return Err(AppError::shape(
-            "assignment index contained no recognizable assignment table",
-        ));
-    };
-    let parsed = indexed_rows(table)?;
-    let mut assignments = Vec::new();
-    for row in parsed {
-        let title = row.value("name")?;
-        let Some(url) = row.link_for("name", page_url)? else {
-            if title.is_some() {
-                return Err(AppError::shape(
-                    "assignment row contained no recognizable detail link",
-                ));
-            }
-            continue;
-        };
-        let Some(id) = super::shared::query_id(&url, &["id"]) else {
-            return Err(AppError::shape(
-                "assignment detail link contained no numeric module id",
-            ));
-        };
-        let due_text = row.value("due date")?;
-        assignments.push(Assignment {
-            id: id.clone(),
-            reference: ResourceRef::Assignment(id).to_string(),
-            course_id: course.id.clone(),
-            course_ref: course.reference.clone(),
-            week: row.value("week")?.as_deref().and_then(week_number),
-            title: title.unwrap_or_else(|| "Untitled assignment".into()),
-            due_at: due_text.as_deref().and_then(crate::date::moodle_datetime),
-            due_text,
-            submission_status: row.value("submit")?,
-            url: safe_url::display(&url),
-        });
-    }
-    Ok(assignments)
-}
-
-pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>, AppError> {
-    let document = Html::parse_document(html);
-    let table = semantic_table(&document, &["week", "name", "quiz closes"])?;
-    let Some(table) = table else {
-        if explicit_empty(&document, "quiz") {
-            return Ok(Vec::new());
-        }
-        return Err(AppError::shape(
-            "quiz index contained no recognizable quiz table",
-        ));
-    };
-    let parsed = indexed_rows(table)?;
-    let mut quizzes = Vec::new();
-    for row in parsed {
-        let title = row.value("name")?;
-        let Some(url) = row.link_for("name", page_url)? else {
-            if title.is_some() {
-                return Err(AppError::shape(
-                    "quiz row contained no recognizable detail link",
-                ));
-            }
-            continue;
-        };
-        let Some(id) = super::shared::query_id(&url, &["id"]) else {
-            return Err(AppError::shape(
-                "quiz detail link contained no numeric module id",
-            ));
-        };
-        let closes_text = row.value("quiz closes")?;
-        quizzes.push(Quiz {
-            id: id.clone(),
-            reference: ResourceRef::Quiz(id).to_string(),
-            course_id: course.id.clone(),
-            course_ref: course.reference.clone(),
-            week: row.value("week")?.as_deref().and_then(week_number),
-            title: title.unwrap_or_else(|| "Untitled quiz".into()),
-            closes_at: closes_text
-                .as_deref()
-                .and_then(crate::date::moodle_datetime),
-            closes_text,
-            grade: row.value("grade")?,
-            url: safe_url::display(&url),
-        });
-    }
-    Ok(quizzes)
-}
-
-fn explicit_empty(document: &Html, kind: &str) -> bool {
-    let page_text = super::detail::safe_html_preview(&document.html()).to_ascii_lowercase();
-    match kind {
-        "assignment" => {
-            page_text.contains("there are no assignments")
-                || page_text.contains("no assignments found")
-                || page_text.contains("과제가 없습니다")
-                || page_text.contains("이 강좌에는 과제물들이(가) 없습니다")
-        }
-        "quiz" => {
-            page_text.contains("there are no quizzes")
-                || page_text.contains("no quizzes found")
-                || page_text.contains("퀴즈가 없습니다")
-                || page_text.contains("이 강좌에는 퀴즈이(가) 없습니다")
-        }
-        _ => false,
-    }
-}
-
-pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
-    table_report(
+    index_rows(
         html,
-        course_id,
-        Some("grade item"),
-        &["grade", "range", "feedback", "percentage", "contribution"],
+        page_url,
+        "assignment",
+        "due date",
+        &[
+            "there are no assignments",
+            "no assignments found",
+            "과제가 없습니다",
+            "이 강좌에는 과제물들이(가) 없습니다",
+        ],
+        |row, id, title, url, due_text| {
+            Ok(Assignment {
+                reference: ResourceRef::Assignment(id.clone()).to_string(),
+                id,
+                course_id: course.id.clone(),
+                course_ref: course.reference.clone(),
+                week: row.value("week")?.as_deref().and_then(week_number),
+                title,
+                due_at: due_text.as_deref().and_then(date::moodle_datetime),
+                due_text,
+                submission_status: row.value("submit")?,
+                url: safe_url::display(url),
+            })
+        },
     )
 }
 
+pub fn quizzes(html: &str, page_url: &Url, course: &Course) -> Result<Vec<Quiz>, AppError> {
+    index_rows(
+        html,
+        page_url,
+        "quiz",
+        "quiz closes",
+        &[
+            "there are no quizzes",
+            "no quizzes found",
+            "퀴즈가 없습니다",
+            "이 강좌에는 퀴즈이(가) 없습니다",
+        ],
+        |row, id, title, url, closes_text| {
+            Ok(Quiz {
+                reference: ResourceRef::Quiz(id.clone()).to_string(),
+                id,
+                course_id: course.id.clone(),
+                course_ref: course.reference.clone(),
+                week: row.value("week")?.as_deref().and_then(week_number),
+                title,
+                closes_at: closes_text.as_deref().and_then(date::moodle_datetime),
+                closes_text,
+                grade: row.value("grade")?,
+                url: safe_url::display(url),
+            })
+        },
+    )
+}
+
+/// Shared walk over a coursework index table (week, name and `date_header`
+/// columns). `build` receives the row, the numeric module id, the title, the
+/// detail URL and the row's date text.
+fn index_rows<T>(
+    html: &str,
+    page_url: &Url,
+    kind: &str,
+    date_header: &str,
+    empty_phrases: &[&str],
+    build: impl Fn(&IndexedRow, String, String, &Url, Option<String>) -> Result<T, AppError>,
+) -> Result<Vec<T>, AppError> {
+    let document = Html::parse_document(html);
+    let expected = ["week", "name", date_header];
+    let table = find_table(&document, |headers| {
+        expected
+            .iter()
+            .all(|needle| headers.iter().any(|header| header.contains(needle)))
+    });
+    let Some(table) = table else {
+        let page_text = preview_from_document(&document).to_ascii_lowercase();
+        if empty_phrases
+            .iter()
+            .any(|phrase| page_text.contains(phrase))
+        {
+            return Ok(Vec::new());
+        }
+        return Err(AppError::shape(format!(
+            "{kind} index contained no recognizable {kind} table"
+        )));
+    };
+    let mut items = Vec::new();
+    for row in indexed_rows(table) {
+        let title = row.value("name")?;
+        let Some(url) = row.link_for("name", page_url)? else {
+            if title.is_some() {
+                return Err(AppError::shape(format!(
+                    "{kind} row contained no recognizable detail link"
+                )));
+            }
+            continue;
+        };
+        let Some(id) = query_id(&url, &["id"]) else {
+            return Err(AppError::shape(format!(
+                "{kind} detail link contained no numeric module id"
+            )));
+        };
+        let title = title.unwrap_or_else(|| format!("Untitled {kind}"));
+        items.push(build(&row, id, title, &url, row.value(date_header)?)?);
+    }
+    Ok(items)
+}
+
+pub fn grades(html: &str, course_id: String) -> Result<Report, AppError> {
+    // Percentage and contribution are optional Moodle columns: require a
+    // grade-item anchor plus a separate grade-report role column.
+    let roles = ["grade", "range", "feedback", "percentage", "contribution"];
+    table_report(html, course_id, |headers| {
+        headers.iter().any(|h| h.contains("grade item"))
+            && headers
+                .iter()
+                .any(|h| !h.contains("grade item") && roles.iter().any(|r| h.contains(r)))
+    })
+}
+
 pub fn attendance(html: &str, course_id: String) -> Result<Report, AppError> {
-    table_report(html, course_id, None, &["date", "attended", "absent"])
+    table_report(html, course_id, |headers| {
+        ["date", "attended", "absent"]
+            .iter()
+            .filter(|needle| headers.iter().any(|h| h.contains(**needle)))
+            .count()
+            >= 2
+    })
 }
 
 fn table_report(
     html: &str,
     course_id: String,
-    anchor: Option<&str>,
-    expected: &[&str],
+    recognizable: impl Fn(&[String]) -> bool,
 ) -> Result<Report, AppError> {
     let document = Html::parse_document(html);
-    let tables = selector("table")?;
-    let rows = selector("tr")?;
-    let cells = selector("th, td")?;
-    for table in document.select(&tables) {
-        let headers: Vec<_> = table
-            .select(&rows)
-            .next()
-            .map(|row| row.select(&cells).map(text).collect())
-            .unwrap_or_default();
-        let normalized: Vec<_> = headers.iter().map(|header| header_name(header)).collect();
-        let recognizable = match anchor {
-            Some(anchor) => {
-                // Percentage and contribution are optional Moodle columns.
-                // Require a grade-item anchor and a separate grade-report role.
-                normalized.iter().any(|header| header.contains(anchor))
-                    && normalized.iter().any(|header| {
-                        !header.contains(anchor)
-                            && expected.iter().any(|needle| header.contains(needle))
-                    })
-            }
-            None => {
-                expected
-                    .iter()
-                    .filter(|needle| normalized.iter().any(|header| header.contains(**needle)))
-                    .count()
-                    >= 2
-            }
-        };
-        if !recognizable {
-            continue;
-        }
-        let mut values = Vec::new();
-        for row in table.select(&rows) {
-            let row_values: Vec<_> = row.select(&cells).map(text).collect();
-            if row_values.is_empty() || row_values == headers {
-                continue;
-            }
-            values.push(row_values);
-        }
-        return Ok(Report {
-            course_id,
-            headers,
-            rows: values,
-        });
-    }
-    Err(AppError::shape("could not find the expected report table"))
+    let table = find_table(&document, recognizable)
+        .ok_or_else(|| AppError::shape("could not find the expected report table"))?;
+    let tr = sel("tr");
+    let mut rows = table.select(&tr).map(row_cells);
+    let headers = rows.next().unwrap_or_default();
+    Ok(Report {
+        course_id,
+        rows: rows
+            .filter(|cells| !cells.is_empty() && *cells != headers)
+            .collect(),
+        headers,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{assignments, attendance, grades, quizzes};
     use crate::models::Course;
-    use url::Url;
+    use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 
-    fn example_course() -> Course {
+    fn course() -> Course {
         Course {
             id: "42".into(),
             reference: "course:42".into(),
@@ -211,11 +186,18 @@ mod tests {
         }
     }
 
+    fn base() -> Url {
+        Url::parse(BASE).unwrap()
+    }
+
+    fn table(headers: &str, row: &str) -> String {
+        format!("<table><tr>{headers}</tr><tr>{row}</tr></table>")
+    }
+
     #[test]
     fn parses_korean_coursework_with_dates_weeks_and_canonical_refs() {
-        let base = Url::parse(BASE).unwrap();
         let assignment = include_str!("../../tests/fixtures/localized/assignment.html");
-        let rows = assignments(assignment, &base, &example_course()).unwrap();
+        let rows = assignments(assignment, &base(), &course()).unwrap();
         assert_eq!(rows[0].reference, "assign:7");
         assert_eq!(rows[0].week, Some(2));
         assert_eq!(rows[0].due_at.as_deref(), Some("2030-03-17T23:50:00+09:00"));
@@ -225,16 +207,12 @@ mod tests {
             ("2030.03.17", None),
             ("주차", None),
         ] {
-            let rows = assignments(
-                &assignment.replace("2주차", label),
-                &base,
-                &example_course(),
-            )
-            .unwrap();
+            let html = assignment.replace("2주차", label);
+            let rows = assignments(&html, &base(), &course()).unwrap();
             assert_eq!(rows[0].week, expected);
         }
         let quiz = include_str!("../../tests/fixtures/localized/quiz.html");
-        let rows = quizzes(quiz, &base, &example_course()).unwrap();
+        let rows = quizzes(quiz, &base(), &course()).unwrap();
         assert_eq!(rows[0].reference, "quiz:8");
         assert_eq!(rows[0].week, Some(3));
         assert_eq!(
@@ -242,56 +220,35 @@ mod tests {
             Some("2030-03-18T14:05:00+09:00")
         );
         assert_eq!(rows[0].grade, None);
-        assert!(
-            assignments(
-                &assignment.replace("<th>제출</th>", "<th>제목</th>"),
-                &base,
-                &example_course()
-            )
-            .is_err()
-        );
+        let broken = assignment.replace("<th>제출</th>", "<th>제목</th>");
+        assert!(assignments(&broken, &base(), &course()).is_err());
     }
 
     #[test]
     fn recognizes_only_visible_empty_messages_in_korean_and_english() {
-        let base = Url::parse(BASE).unwrap();
-        assert!(
-            assignments(
-                "<main>이 강좌에는 과제물들이(가) 없습니다.</main>",
-                &base,
-                &example_course()
-            )
-            .unwrap()
-            .is_empty()
-        );
-        assert!(
-            quizzes(
-                "<main>이 강좌에는 퀴즈이(가) 없습니다.</main>",
-                &base,
-                &example_course()
-            )
-            .unwrap()
-            .is_empty()
-        );
+        let (b, c) = (base(), course());
+        for page in [
+            "<main>이 강좌에는 과제물들이(가) 없습니다.</main>",
+            "<main>There are no assignments in this course.</main>",
+        ] {
+            assert!(assignments(page, &b, &c).unwrap().is_empty());
+        }
+        for page in [
+            "<main>이 강좌에는 퀴즈이(가) 없습니다.</main>",
+            "<main>No quizzes found.</main>",
+        ] {
+            assert!(quizzes(page, &b, &c).unwrap().is_empty());
+        }
         for tag in ["script", "template", "style", "noscript"] {
             let html = format!("<main>Changed page<{tag}>There are no assignments</{tag}></main>");
-            assert!(
-                assignments(&html, &base, &example_course()).is_err(),
-                "{tag}"
-            );
+            assert!(assignments(&html, &b, &c).is_err(), "{tag}");
         }
-        assert!(
-            quizzes(
-                "<main>Changed page<div hidden>No quizzes found</div></main>",
-                &base,
-                &example_course()
-            )
-            .is_err()
-        );
+        let hidden = "<main>Changed page<div hidden>No quizzes found</div></main>";
+        assert!(quizzes(hidden, &b, &c).is_err());
     }
 
     #[test]
-    fn preserves_korean_report_headers_and_skips_unrelated_tables() {
+    fn recognizes_report_tables_by_semantics_and_skips_unrelated_ones() {
         let unrelated = "<table><tr><th>Date</th></tr><tr><td>2030-03-17</td></tr></table>";
         let report = format!(
             "{unrelated}<table><tr><th>날짜</th><th>출석</th><th>결석</th></tr><tr><td>3월 17일</td><td>○</td><td></td></tr></table>"
@@ -300,8 +257,20 @@ mod tests {
         assert_eq!(result.headers, ["날짜", "출석", "결석"]);
         assert_eq!(result.rows.len(), 1);
         assert!(attendance(unrelated, "42".into()).is_err());
-        let result = grades("<table><tr><th>성적 항목</th><th>백분율</th></tr><tr><td>Practice</td><td>-</td></tr></table>", "42".into()).unwrap();
+        let english = table(
+            "<th>Date</th><th>Attended</th><th>Absent</th>",
+            "<td>Aug 1</td><td>Y</td><td></td>",
+        );
+        assert_eq!(attendance(&english, "42".into()).unwrap().rows.len(), 1);
+
+        let korean = table(
+            "<th>성적 항목</th><th>백분율</th>",
+            "<td>Practice</td><td>-</td>",
+        );
+        let result = grades(&korean, "42".into()).unwrap();
         assert_eq!(result.headers, ["성적 항목", "백분율"]);
+        let thead = "<table><thead><tr><th>Grade item</th><th>Percentage</th></tr></thead><tbody><tr><td>Quiz</td><td>90%</td></tr></tbody></table>";
+        assert_eq!(grades(thead, "42".into()).unwrap().rows.len(), 1);
     }
 
     #[test]
@@ -311,9 +280,7 @@ mod tests {
             ["성적 항목", "성적", "범위", "피드백"],
         ] {
             let cells = headers.map(|header| format!("<th>{header}</th>")).join("");
-            let html = format!(
-                "<table><tr>{cells}</tr><tr><td>Practice</td><td>-</td><td>0–10</td><td></td></tr></table>"
-            );
+            let html = table(&cells, "<td>Practice</td><td>-</td><td>0–10</td><td></td>");
             let report = grades(&html, "42".into()).unwrap();
             assert_eq!(report.headers, headers);
             assert_eq!(report.rows.len(), 1);
@@ -328,37 +295,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_report_tables_by_semantics() {
-        let grade_html = "<table><thead><tr><th>Grade item</th><th>Percentage</th></tr></thead><tbody><tr><td>Quiz</td><td>90%</td></tr></tbody></table>";
-        assert_eq!(grades(grade_html, "42".into()).unwrap().rows.len(), 1);
-        let attendance_html = "<table><tr><th>Date</th><th>Attended</th><th>Absent</th></tr><tr><td>Aug 1</td><td>Y</td><td></td></tr></table>";
-        assert_eq!(
-            attendance(attendance_html, "42".into()).unwrap().rows.len(),
-            1
-        );
-    }
-
-    #[test]
     fn parses_typed_assignment_and_quiz_indexes() {
-        let base = Url::parse(BASE).unwrap();
         let course = Course {
-            id: "42".into(),
-            reference: "course:42".into(),
-            title: "Compilers".into(),
             code: Some("CS.420".into()),
-            term: None,
-            url: format!("{BASE}/course/view.php?id=42"),
+            ..course()
         };
         let assignment_html = r#"<table><tr><th>No</th><th>Week</th><th>Name</th><th>Due date</th><th>Submit</th></tr>
           <tr><td>1</td><td>week 2</td><td><a href='/mod/assign/view.php?id=7'>Written work</a></td><td>Tuesday, 17 March 2026, 11:59 PM</td><td>Submitted for grading</td></tr></table>"#;
-        let rows = assignments(assignment_html, &base, &course).unwrap();
+        let rows = assignments(assignment_html, &base(), &course).unwrap();
         assert_eq!(rows[0].reference, "assign:7");
         assert_eq!(rows[0].week, Some(2));
         assert_eq!(rows[0].due_at.as_deref(), Some("2026-03-17T23:59:00+09:00"));
 
         let quiz_html = r#"<table><tr><th>No</th><th>Week</th><th>Name</th><th>Quiz closes</th><th>Grade</th></tr>
           <tr><td>1</td><td>week 3</td><td><a href='view.php?id=8'>Attendance quiz</a></td><td>Saturday, 21 March 2026, 11:59 PM</td><td>-</td></tr></table>"#;
-        let quiz_page = base.join("/mod/quiz/index.php?id=42").unwrap();
+        let quiz_page = base().join("/mod/quiz/index.php?id=42").unwrap();
         let rows = quizzes(quiz_html, &quiz_page, &course).unwrap();
         assert_eq!(rows[0].reference, "quiz:8");
         assert_eq!(rows[0].url, format!("{BASE}/mod/quiz/view.php?id=8"));
@@ -369,106 +320,53 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonempty_coursework_rows_without_actionable_identity() {
-        let base = Url::parse(BASE).unwrap();
-        let course = Course {
-            id: "42".into(),
-            reference: "course:42".into(),
-            title: "Compilers".into(),
-            code: None,
-            term: None,
-            url: format!("{BASE}/course/view.php?id=42"),
-        };
-        let missing_link = "<table><tr><th>Week</th><th>Name</th><th>Due date</th></tr><tr><td>1</td><td>Written work</td><td>soon</td></tr></table>";
-        assert!(assignments(missing_link, &base, &course).is_err());
+    fn rejects_rows_without_identity_and_does_not_mix_overlapping_name_columns() {
+        let (b, c) = (base(), course());
+        let head = "<th>Week</th><th>Name</th><th>Due date</th>";
+        let missing_link = table(head, "<td>1</td><td>Written work</td><td>soon</td>");
+        assert!(assignments(&missing_link, &b, &c).is_err());
+        let missing_id = table(
+            "<th>Week</th><th>Name</th><th>Quiz closes</th>",
+            "<td>1</td><td><a href='/mod/quiz/view.php'>Quiz</a></td><td>soon</td>",
+        );
+        assert!(quizzes(&missing_id, &b, &c).is_err());
 
-        let missing_id = "<table><tr><th>Week</th><th>Name</th><th>Quiz closes</th></tr><tr><td>1</td><td><a href='/mod/quiz/view.php'>Quiz</a></td><td>soon</td></tr></table>";
-        assert!(quizzes(missing_id, &base, &course).is_err());
-    }
-
-    #[test]
-    fn rejects_malformed_ids_and_does_not_mix_overlapping_name_columns() {
-        let base = Url::parse(BASE).unwrap();
-        let course = Course {
-            id: "42".into(),
-            reference: "course:42".into(),
-            title: "Compilers".into(),
-            code: None,
-            term: None,
-            url: format!("{BASE}/course/view.php?id=42"),
-        };
         for id in ["", "oops", "-1", "7:8"] {
-            let assignment = format!(
-                "<table><tr><th>Week</th><th>Name</th><th>Due date</th></tr><tr><td>1</td><td><a href='/mod/assign/view.php?id={id}'>Work</a></td><td>soon</td></tr></table>"
+            let assignment = table(
+                head,
+                &format!(
+                    "<td>1</td><td><a href='/mod/assign/view.php?id={id}'>Work</a></td><td>soon</td>"
+                ),
             );
-            assert!(assignments(&assignment, &base, &course).is_err());
+            assert!(assignments(&assignment, &b, &c).is_err());
             let quiz = assignment
                 .replace("Due date", "Quiz closes")
                 .replace("/assign/", "/quiz/");
-            assert!(quizzes(&quiz, &base, &course).is_err());
+            assert!(quizzes(&quiz, &b, &c).is_err());
         }
         let html = "<table><tr><th>Week</th><th>Course name</th><th>Name</th><th>Due date</th></tr><tr><td>1</td><td><a href='/course/view.php?id=42'>Course</a></td><td><a href='/mod/assign/view.php?id=7'>Work</a></td><td>soon</td></tr></table>";
-        let rows = assignments(html, &base, &course).unwrap();
+        let rows = assignments(html, &b, &c).unwrap();
         assert_eq!(rows[0].title, "Work");
         assert_eq!(rows[0].reference, "assign:7");
         let qualified = html
             .replace("Course name", "Course")
             .replace("<th>Name</th>", "<th>Assignment name</th>");
         assert_eq!(
-            assignments(&qualified, &base, &course).unwrap()[0].reference,
+            assignments(&qualified, &b, &c).unwrap()[0].reference,
             "assign:7"
         );
         for ambiguous in [
             html.replace("<th>Name</th>", "<th>Assignment name</th>"),
             html.replace("Course name", "Name"),
         ] {
-            assert_eq!(
-                assignments(&ambiguous, &base, &course).unwrap_err().code,
-                "UPSTREAM_SHAPE_CHANGED"
-            );
+            let code = assignments(&ambiguous, &b, &c).unwrap_err().code;
+            assert_eq!(code, "UPSTREAM_SHAPE_CHANGED");
             let quiz = ambiguous
                 .replace("Due date", "Quiz closes")
                 .replace("/assign/", "/quiz/");
-            assert_eq!(
-                quizzes(&quiz, &base, &course).unwrap_err().code,
-                "UPSTREAM_SHAPE_CHANGED"
-            );
+            assert_eq!(quizzes(&quiz, &b, &c).unwrap_err().code, code);
         }
-
-        assert!(
-            assignments(
-                &html.replace("<a href='/mod/assign/view.php?id=7'>Work</a>", "Work"),
-                &base,
-                &course
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_explicit_empty_coursework_pages() {
-        let base = Url::parse(BASE).unwrap();
-        let course = Course {
-            id: "42".into(),
-            reference: "course:42".into(),
-            title: "Compilers".into(),
-            code: None,
-            term: None,
-            url: format!("{BASE}/course/view.php?id=42"),
-        };
-        assert!(
-            assignments(
-                "<main>There are no assignments in this course.</main>",
-                &base,
-                &course
-            )
-            .unwrap()
-            .is_empty()
-        );
-        assert!(
-            quizzes("<main>No quizzes found.</main>", &base, &course)
-                .unwrap()
-                .is_empty()
-        );
+        let unlinked = html.replace("<a href='/mod/assign/view.php?id=7'>Work</a>", "Work");
+        assert!(assignments(&unlinked, &b, &c).is_err());
     }
 }

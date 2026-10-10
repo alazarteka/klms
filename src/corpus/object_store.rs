@@ -1,87 +1,72 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
 use sha2::{Digest, Sha256};
 
-use super::storage::{private_dir, private_file_options};
-use crate::error::AppError;
+use super::{private_dir, private_file_options};
+use crate::{
+    error::AppError,
+    private_fs::{PublishError, publish_new},
+};
 
-#[derive(Debug)]
-pub struct StoredObject {
-    pub sha256: String,
-    pub bytes: u64,
+fn io(context: &str) -> impl Fn(std::io::Error) -> AppError + '_ {
+    move |error| AppError::library_io(format!("cannot {context}: {error}"))
 }
 
-pub fn store(root: &Path, bytes: &[u8]) -> Result<StoredObject, AppError> {
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn digest(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// Store `bytes` under their SHA-256, deduplicating; returns the digest.
+pub fn store(root: &Path, bytes: &[u8]) -> Result<String, AppError> {
     let sha256 = digest(bytes);
     let directory = root.join(&sha256[..2]);
     private_dir(&directory)?;
-    let destination = root.join(&sha256[..2]).join(&sha256[2..]);
-    if let Ok(metadata) = fs::symlink_metadata(&destination) {
-        if metadata.file_type().is_symlink()
-            || !metadata.file_type().is_file()
-            || metadata.len() != bytes.len() as u64
-        {
+    let destination = directory.join(&sha256[2..]);
+    let intact =
+        || fs::symlink_metadata(&destination).map(|m| m.is_file() && m.len() == bytes.len() as u64);
+    match intact() {
+        Ok(true) => return Ok(sha256),
+        Ok(false) => {
             return Err(AppError::corpus_corrupt(format!(
                 "invalid object {}",
                 destination.display()
             )));
         }
-        return Ok(StoredObject {
-            sha256,
-            bytes: bytes.len() as u64,
-        });
+        Err(_) => {}
     }
     let temporary = directory.join(format!(".{sha256}.{}.tmp", std::process::id()));
-    let mut file = private_file_options()
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|error| AppError::library_io(format!("cannot create object: {error}")))?;
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(AppError::library_io(format!(
-            "cannot write object: {error}"
-        )));
-    }
-    match fs::hard_link(&temporary, &destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(&destination)
-                .map_err(|error| AppError::library_io(error.to_string()))?;
-            if metadata.file_type().is_symlink()
-                || !metadata.file_type().is_file()
-                || metadata.len() != bytes.len() as u64
-            {
-                let _ = fs::remove_file(&temporary);
-                return Err(AppError::corpus_corrupt("object destination collision"));
+    let (_, linked) =
+        publish_new(&temporary, &destination, |file| file.write_all(bytes)).map_err(|error| {
+            match error {
+                PublishError::Create(error) => io("create object")(error),
+                PublishError::Fill(error) | PublishError::Sync(error) => io("write object")(error),
+                PublishError::Link(error) => io("publish object")(error),
             }
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temporary);
-            return Err(AppError::library_io(format!(
-                "cannot publish object: {error}"
-            )));
-        }
+        })?;
+    if linked.existed && !matches!(intact(), Ok(true)) {
+        return Err(AppError::corpus_corrupt("object destination collision"));
     }
-    fs::remove_file(&temporary)
-        .map_err(|error| AppError::library_io(format!("cannot remove temporary file: {error}")))?;
-    Ok(StoredObject {
-        sha256,
-        bytes: bytes.len() as u64,
-    })
+    linked
+        .leftover
+        .map_or(Ok(sha256), |error| Err(io("remove temporary file")(error)))
 }
 
 pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf, AppError> {
-    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !super::valid_hash(sha256, 64) {
         return Err(AppError::corpus_corrupt("invalid object digest"));
     }
     let path = root.join(&sha256[..2]).join(&sha256[2..]);
     let metadata = fs::symlink_metadata(&path)
         .map_err(|_| AppError::content_unavailable("stored content file is missing"))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    if !metadata.is_file() {
         return Err(AppError::corpus_corrupt(
             "stored content target is not a regular file",
         ));
@@ -92,27 +77,21 @@ pub fn object_path(root: &Path, sha256: &str) -> Result<PathBuf, AppError> {
 pub fn export(root: &Path, sha256: &str, destination: &Path) -> Result<u64, AppError> {
     match fs::symlink_metadata(destination) {
         Ok(_) => return Err(AppError::library_io("export destination already exists")),
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(AppError::library_io(format!(
-                "cannot inspect export destination: {error}"
-            )));
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            return Err(io("inspect export destination")(error));
         }
         Err(_) => {}
     }
-    let source = object_path(root, sha256)?;
-    let mut input = fs::File::open(source)
-        .map_err(|error| AppError::library_io(format!("cannot open object: {error}")))?;
+    let mut input = fs::File::open(object_path(root, sha256)?).map_err(io("open object"))?;
     let mut output = private_file_options()
         .create_new(true)
         .open(destination)
-        .map_err(|error| AppError::library_io(format!("cannot create export: {error}")))?;
+        .map_err(io("create export"))?;
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let count = input
-            .read(&mut buffer)
-            .map_err(|error| AppError::library_io(format!("cannot read object: {error}")))?;
+        let count = input.read(&mut buffer).map_err(io("read object"))?;
         if count == 0 {
             break;
         }
@@ -120,30 +99,14 @@ pub fn export(root: &Path, sha256: &str, destination: &Path) -> Result<u64, AppE
         total += count as u64;
         if let Err(error) = output.write_all(&buffer[..count]) {
             let _ = fs::remove_file(destination);
-            return Err(AppError::library_io(format!(
-                "cannot write export: {error}"
-            )));
+            return Err(io("write export")(error));
         }
     }
-    if hex(hasher.finalize().as_slice()) != sha256 {
+    if hex(&hasher.finalize()) != sha256 {
         let _ = fs::remove_file(destination);
         return Err(AppError::corpus_corrupt("stored content digest mismatch"));
     }
     Ok(total)
-}
-
-pub fn digest(bytes: &[u8]) -> String {
-    hex(Sha256::digest(bytes).as_slice())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut value = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        value.push(DIGITS[(byte >> 4) as usize] as char);
-        value.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    value
 }
 
 #[cfg(test)]
@@ -156,9 +119,8 @@ mod tests {
         let root = temp.path().join("sha256");
         fs::create_dir(&root).unwrap();
         let first = store(&root, b"same").unwrap();
-        let second = store(&root, b"same").unwrap();
-        assert_eq!(first.sha256, second.sha256);
-        fs::write(object_path(&root, &first.sha256).unwrap(), b"longer").unwrap();
+        assert_eq!(first, store(&root, b"same").unwrap());
+        fs::write(object_path(&root, &first).unwrap(), b"longer").unwrap();
         assert_eq!(store(&root, b"same").unwrap_err().code, "CORPUS_CORRUPT");
     }
 
@@ -167,20 +129,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("sha256");
         fs::create_dir(&root).unwrap();
-        let object = store(&root, b"same").unwrap();
-        fs::write(object_path(&root, &object.sha256).unwrap(), b"evil").unwrap();
+        let sha = store(&root, b"same").unwrap();
+        fs::write(object_path(&root, &sha).unwrap(), b"evil").unwrap();
         let output = temp.path().join("output");
         assert_eq!(
-            export(&root, &object.sha256, &output).unwrap_err().code,
+            export(&root, &sha, &output).unwrap_err().code,
             "CORPUS_CORRUPT"
         );
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("missing", &output).unwrap();
-            assert_eq!(
-                export(&root, &object.sha256, &output).unwrap_err().code,
-                "LIBRARY_IO"
-            );
+            assert_eq!(export(&root, &sha, &output).unwrap_err().code, "LIBRARY_IO");
         }
     }
 }

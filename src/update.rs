@@ -7,12 +7,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-use crate::{client::release_bytes as fetch, error::AppError, output, skill};
+use crate::{
+    client::{Client, release_bytes as fetch},
+    error::AppError,
+    output,
+};
+use sha2::{Digest, Sha256};
 
 const REPO: &str = "alazarteka/klms";
 const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
@@ -35,8 +38,6 @@ pub fn run(check: bool, timeout: u64) -> Result<output::CommandResult, AppError>
             downloads_url: format!("https://github.com/{REPO}/releases/download"),
             current_version: env!("CARGO_PKG_VERSION").into(),
             destination: env::current_exe().and_then(fs::canonicalize).map_err(io)?,
-            #[cfg(test)]
-            home: None,
         },
     )
 }
@@ -46,8 +47,6 @@ struct ReleaseSource {
     downloads_url: String,
     current_version: String,
     destination: PathBuf,
-    #[cfg(test)]
-    home: Option<PathBuf>,
 }
 
 fn run_with_source(
@@ -66,26 +65,28 @@ fn run_with_source(
     let latest = version(&release.tag_name)?;
     let current = version(&source.current_version)?;
     let available = latest > current;
-    if check || !available {
-        return output::result(
+    let report = |updated: bool, available: bool, text: String| {
+        output::result(
             "update",
             &json!({
                 "current_version": source.current_version,
                 "latest_version": release.tag_name.trim_start_matches('v'),
                 "update_available": available,
-                "updated": false,
+                "updated": updated,
                 "path": source.destination,
             }),
+            text,
+        )
+    };
+    if check || !available {
+        let (tag, installed) = (&release.tag_name, &source.current_version);
+        return report(
+            false,
+            available,
             if available {
-                format!(
-                    "{} is available (installed: {}). Run `klms update`.",
-                    release.tag_name, source.current_version
-                )
+                format!("{tag} is available (installed: {installed}). Run `klms update`.")
             } else {
-                format!(
-                    "klms {} is current; latest stable release is {}.",
-                    source.current_version, release.tag_name
-                )
+                format!("klms {installed} is current; latest stable release is {tag}.")
             },
         );
     }
@@ -114,17 +115,11 @@ fn run_with_source(
         ));
     }
     let destination = &source.destination;
-    let mut command = Command::new(&candidate);
-    command
+    let installed = Command::new(&candidate)
         .args(["--json", "__install", "--destination"])
-        .arg(destination);
-    #[cfg(test)]
-    if let Some(home) = &source.home {
-        command
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("data"));
-    }
-    let installed = command.output().map_err(io)?;
+        .arg(destination)
+        .output()
+        .map_err(io)?;
     if !installed.status.success() {
         let diagnostic = serde_json::from_slice::<serde_json::Value>(&installed.stdout)
             .or_else(|_| serde_json::from_slice(&installed.stderr))
@@ -135,15 +130,9 @@ fn run_with_source(
             .unwrap_or("candidate installation failed");
         return Err(AppError::config(message).with_details(json!({"candidate_error": diagnostic})));
     }
-    output::result(
-        "update",
-        &json!({
-            "current_version": source.current_version,
-            "latest_version": release.tag_name.trim_start_matches('v'),
-            "update_available": false,
-            "updated": true,
-            "path": destination,
-        }),
+    report(
+        true,
+        false,
         format!(
             "Updated to {} at {}",
             release.tag_name,
@@ -152,9 +141,9 @@ fn run_with_source(
     )
 }
 
-/// Called by the verified candidate itself, so its embedded skill matches it.
-/// Stage a copy on the destination filesystem, install the skill with rollback,
-/// then atomically rename the binary. No fallible operation follows the switch.
+/// Called by the verified candidate itself. Stage a copy on the destination
+/// filesystem, then atomically rename it over the binary. Removing the legacy
+/// skill afterwards is best effort and never turns a switch into a failure.
 pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
     if !destination.is_absolute() {
         return Err(AppError::usage("installation destination must be absolute"));
@@ -194,20 +183,64 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
             destination.display()
         ),
     )?;
-    skill::with_install(|| fs::rename(&staged, &destination).map_err(io))?;
+    fs::rename(&staged, &destination).map_err(io)?;
+    remove_legacy_skill();
     Ok(result)
 }
 
-fn version(value: &str) -> Result<(u64, u64, u64), AppError> {
-    let value = value.strip_prefix('v').unwrap_or(value);
-    let parts: Vec<_> = value.split('.').collect();
-    if parts.len() != 3
-        || parts.iter().any(|p| {
-            p.is_empty()
-                || !p.bytes().all(|b| b.is_ascii_digit())
-                || (p.len() > 1 && p.starts_with('0'))
+/// Earlier releases installed an Agent Skill copy of the help text. Remove only
+/// what klms itself created: the payload under its data directory and a symlink
+/// that points at exactly that directory. Anything else is the user's.
+fn remove_legacy_skill() {
+    let nonempty = |name| {
+        env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let Some(home) = nonempty("HOME") else {
+        return;
+    };
+    let data_home = nonempty("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+    remove_legacy_skill_at(&home, &data_home);
+}
+
+fn remove_legacy_skill_at(home: &Path, data_home: &Path) {
+    let skills = data_home.join("klms/skills");
+    let payload_dir = skills.join("klms");
+    let link = home.join(".agents/skills/klms");
+    // read_link fails for anything that is not a symlink, so real files and
+    // directories at the discovery path are never touched.
+    if fs::read_link(&link).is_ok_and(|target| target == payload_dir) {
+        let _ = fs::remove_file(&link);
+    }
+    let is_real = |path: &Path, dir: bool| {
+        fs::symlink_metadata(path).is_ok_and(|m| {
+            !m.file_type().is_symlink() && if dir { m.is_dir() } else { m.is_file() }
         })
-    {
+    };
+    if is_real(&skills, true) && is_real(&payload_dir, true) {
+        let payload = payload_dir.join("SKILL.md");
+        if is_real(&payload, false) {
+            let _ = fs::remove_file(payload);
+        }
+        // Fail on non-empty directories rather than deleting unknown files.
+        let _ = fs::remove_dir(&payload_dir);
+        let _ = fs::remove_dir(&skills);
+    }
+}
+
+fn version(value: &str) -> Result<(u64, u64, u64), AppError> {
+    let parts: Vec<_> = value
+        .strip_prefix('v')
+        .unwrap_or(value)
+        .split('.')
+        .collect();
+    let plain = |p: &&str| {
+        !p.is_empty()
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && (p.len() == 1 || !p.starts_with('0'))
+    };
+    if parts.len() != 3 || !parts.iter().all(plain) {
         return Err(AppError::upstream(
             "release version must be stable major.minor.patch",
         ));
@@ -227,20 +260,24 @@ fn platform() -> Result<&'static str, AppError> {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn verify_checksum(bytes: &[u8], checksum: &[u8], name: &str) -> Result<(), AppError> {
     let text =
         std::str::from_utf8(checksum).map_err(|_| AppError::upstream("invalid checksum file"))?;
-    let fields: Vec<_> = text.split_whitespace().collect();
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if fields.len() != 2 || fields[0] != digest || fields[1].trim_start_matches('*') != name {
-        return Err(AppError::upstream(
+    match text.split_whitespace().collect::<Vec<_>>()[..] {
+        [digest, file] if digest == sha256_hex(bytes) && file.trim_start_matches('*') == name => {
+            Ok(())
+        }
+        _ => Err(AppError::upstream(
             "release archive checksum verification failed",
-        ));
+        )),
     }
-    Ok(())
 }
 
 fn extract_binary(archive: &Path, member: &str, candidate: &Path) -> Result<(), AppError> {
