@@ -1,11 +1,10 @@
-use crate::url::Url;
+use clap::ValueEnum;
 
+use crate::url::Url;
 use crate::{
-    cli::{
-        LibraryCommand, LibraryDownloadArg, LibraryFieldArg, LibraryRelationsCommand,
-        LibrarySyncArgs,
-    },
+    cli::{LibraryCommand, LibraryDownloadArg, LibraryRelationsCommand, LibrarySyncArgs},
     client::KlmsClient,
+    corpus::{Corpus, SyncOptions},
     error::AppError,
     output::{self, CommandResult},
 };
@@ -22,41 +21,28 @@ fn paged<T: serde::Serialize>(
     let truncated = rows.len() > limit;
     rows.truncate(limit);
     let human = rows.iter().map(format_row).collect::<Vec<_>>().join("\n");
-    output::local_collection(
-        command,
-        &rows,
-        human,
-        rows.len(),
-        limit,
-        !truncated,
-        coverage,
-    )
+    let returned = rows.len();
+    output::local_collection(command, &rows, human, returned, limit, !truncated, coverage)
 }
 
 pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError> {
-    let mut corpus = crate::corpus::Corpus::open()?;
+    let mut corpus = Corpus::open()?;
     match command {
         LibraryCommand::Status => library_status(&corpus),
-        LibraryCommand::Search { query, list } => {
-            let coverage = corpus.coverage()?;
-            paged(
-                "library.search",
-                list.limit,
-                coverage,
-                |n| corpus.search(query, n),
-                |r| format!("{}\t{}\t{}", r.reference, r.kind, r.title),
-            )
-        }
-        LibraryCommand::Changes(list) => {
-            let coverage = corpus.coverage()?;
-            paged(
-                "library.changes",
-                list.limit,
-                coverage,
-                |n| corpus.changes(n),
-                |r| format!("{}\t{}\t{}", r.occurred_at, r.kind, r.subject_ref),
-            )
-        }
+        LibraryCommand::Search { query, list } => paged(
+            "library.search",
+            list.limit,
+            corpus.coverage()?,
+            |n| corpus.search(query, n),
+            |r| format!("{}\t{}\t{}", r.reference, r.kind, r.title),
+        ),
+        LibraryCommand::Changes(list) => paged(
+            "library.changes",
+            list.limit,
+            corpus.coverage()?,
+            |n| corpus.changes(n),
+            |r| format!("{}\t{}\t{}", r.occurred_at, r.kind, r.subject_ref),
+        ),
         LibraryCommand::Activity(args) => paged(
             "library.activity",
             args.list.limit,
@@ -71,9 +57,12 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
         ),
         LibraryCommand::Show { reference } => {
             let row = corpus.show(reference)?;
-            let human = serde_json::to_string_pretty(&row)
-                .map_err(|error| AppError::internal(error.to_string()))?;
-            output::result("library.show", &row, human)
+            let human = serde_json::to_string_pretty(&row);
+            output::result(
+                "library.show",
+                &row,
+                human.map_err(|e| AppError::internal(e.to_string()))?,
+            )
         }
         LibraryCommand::History { reference, list } => paged(
             "library.history",
@@ -89,16 +78,10 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
         LibraryCommand::Export { reference, out } => library_export(&corpus, reference, out),
         LibraryCommand::Edit(args) => {
             let value = read_library_text(args.value.as_deref(), args.value_file.as_deref())?;
-            let field = match args.field {
-                LibraryFieldArg::Title => "title",
-                LibraryFieldArg::Filename => "filename",
-                LibraryFieldArg::Summary => "summary",
-                LibraryFieldArg::Note => "note",
-                LibraryFieldArg::Tag => "tag",
-            };
+            let field = args.field.to_possible_value().expect("no hidden fields");
             let row = corpus.edit(
                 &args.reference,
-                field,
+                field.get_name(),
                 &value,
                 &args.actor,
                 args.expected_revision,
@@ -120,70 +103,72 @@ pub(super) fn local(command: &LibraryCommand) -> Result<CommandResult, AppError>
                 format!("Retracted {}", row.target_ref),
             )
         }
-        LibraryCommand::Relations(args) => match &args.command {
-            LibraryRelationsCommand::Add {
+        LibraryCommand::Relations(args) => {
+            let LibraryRelationsCommand::Add {
                 left,
                 right,
                 kind,
                 actor,
-            } => {
-                let row = corpus.add_relation(left, right, kind, actor)?;
-                let reference = row.reference.clone();
-                output::result(
-                    "library.relations.add",
-                    &row,
-                    format!("Recorded {reference}"),
-                )
-            }
-        },
+            } = &args.command;
+            let row = corpus.add_relation(left, right, kind, actor)?;
+            let human = format!("Recorded {}", row.reference);
+            output::result("library.relations.add", &row, human)
+        }
         LibraryCommand::Sync(_) => Err(AppError::internal(
             "sync was routed through the local library dispatcher",
         )),
     }
 }
 
-fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppError> {
+fn library_status(corpus: &Corpus) -> Result<CommandResult, AppError> {
     let model = corpus.status()?;
-    let mut human = format!(
-        "Library storage: {}\nDatabase: {}\nObjects: {}\nSchema: {}\nCourses: {}\nResources: {}\nRepresentations: {}\nStored content: {} bytes",
-        if model.created {
-            "initialized"
-        } else {
-            "ready"
-        },
-        model.database_path,
-        model.object_store_path,
-        model.schema_version,
-        model.courses,
-        model.resources,
-        model.representations,
-        model.stored_bytes,
-    );
-    if let Some(sync) = &model.last_sync {
-        human.push_str(&format!(
-            "\nLast sync attempt: {} — {}\nScope: {}\nStarted: {}\nFinished: {}",
-            sync.reference,
-            sync.status,
-            sync.scope,
-            crate::date::epoch_to_seoul(sync.started_at).unwrap_or_else(|| "unknown".into()),
-            sync.finished_at
-                .and_then(crate::date::epoch_to_seoul)
-                .unwrap_or_else(|| "not recorded".into()),
-        ));
-        if sync.scope != "all" {
-            human.push_str("\nCourse-scoped syncs do not establish global coverage.");
+    let seoul = |at: Option<i64>, none: &str| {
+        at.and_then(crate::date::epoch_to_seoul)
+            .unwrap_or_else(|| none.into())
+    };
+    let mut lines = vec![
+        format!(
+            "Library storage: {}",
+            if model.created {
+                "initialized"
+            } else {
+                "ready"
+            }
+        ),
+        format!("Database: {}", model.database_path),
+        format!("Objects: {}", model.object_store_path),
+        format!("Schema: {}", model.schema_version),
+        format!("Courses: {}", model.courses),
+        format!("Resources: {}", model.resources),
+        format!("Representations: {}", model.representations),
+        format!("Stored content: {} bytes", model.stored_bytes),
+    ];
+    match &model.last_sync {
+        Some(sync) => {
+            lines.push(format!(
+                "Last sync attempt: {} — {}",
+                sync.reference, sync.status
+            ));
+            lines.push(format!("Scope: {}", sync.scope));
+            lines.push(format!(
+                "Started: {}",
+                seoul(Some(sync.started_at), "unknown")
+            ));
+            lines.push(format!(
+                "Finished: {}",
+                seoul(sync.finished_at, "not recorded")
+            ));
+            if sync.scope != "all" {
+                lines.push("Course-scoped syncs do not establish global coverage.".into());
+            }
         }
-    } else {
-        human.push_str("\nLast sync attempt: none");
+        None => lines.push("Last sync attempt: none".into()),
     }
-    human.push_str(&format!(
-        "\nLast complete global sync: {}",
-        model
-            .fresh_through
-            .and_then(crate::date::epoch_to_seoul)
-            .unwrap_or_else(|| "none".into()),
+    lines.push(format!(
+        "Last complete global sync: {}",
+        seoul(model.fresh_through, "none")
     ));
-    let mut result = output::result("library.status", &model, human)?;
+    let mut result = output::result("library.status", &model, lines.join("\n"))?;
     if model
         .last_sync
         .as_ref()
@@ -197,7 +182,7 @@ fn library_status(corpus: &crate::corpus::Corpus) -> Result<CommandResult, AppEr
 }
 
 fn library_content(
-    corpus: &crate::corpus::Corpus,
+    corpus: &Corpus,
     reference: &str,
     max: usize,
 ) -> Result<CommandResult, AppError> {
@@ -209,7 +194,7 @@ fn library_content(
     output::result("library.content", &model, human)
 }
 fn library_export(
-    corpus: &crate::corpus::Corpus,
+    corpus: &Corpus,
     reference: &str,
     out: &std::path::Path,
 ) -> Result<CommandResult, AppError> {
@@ -227,12 +212,12 @@ pub(super) fn sync(
     base_url: &Url,
     args: &LibrarySyncArgs,
 ) -> Result<CommandResult, AppError> {
-    let mut corpus = crate::corpus::Corpus::open()?;
+    let mut corpus = Corpus::open()?;
     let model = corpus.sync(
         client,
         base_url,
         args.course.as_deref(),
-        crate::corpus::SyncOptions {
+        SyncOptions {
             notices: args.notices,
             files: args.files || args.download.is_some(),
             download_changed: matches!(args.download, Some(LibraryDownloadArg::Changed)),
@@ -261,25 +246,22 @@ fn read_library_text(
     value: Option<&str>,
     path: Option<&std::path::Path>,
 ) -> Result<String, AppError> {
-    let mut text = if let Some(value) = value {
-        value.to_owned()
-    } else if let Some(path) = path {
-        if path == std::path::Path::new("-") {
+    let mut text = match (value, path) {
+        (Some(value), _) if value.len() > MAX_CURATION_TEXT => {
+            return Err(AppError::limit("curation text exceeds 1 MiB"));
+        }
+        (Some(value), _) => value.to_owned(),
+        (None, Some(path)) if path == std::path::Path::new("-") => {
             read_curation_text(std::io::stdin().lock())?
-        } else {
+        }
+        (None, Some(path)) => {
             let file = std::fs::File::open(path)
                 .map_err(|e| AppError::config(format!("cannot read {}: {e}", path.display())))?;
             read_curation_text(file)?
         }
-    } else {
-        unreachable!("clap requires exactly one of --value and --value-file");
+        (None, None) => unreachable!("clap requires exactly one of --value and --value-file"),
     };
-    if text.len() > MAX_CURATION_TEXT {
-        return Err(AppError::limit("curation text exceeds 1 MiB"));
-    }
-    while text.ends_with('\n') {
-        text.pop();
-    }
+    text.truncate(text.trim_end_matches('\n').len());
     Ok(text)
 }
 
