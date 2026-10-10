@@ -38,8 +38,6 @@ pub fn run(check: bool, timeout: u64) -> Result<output::CommandResult, AppError>
             downloads_url: format!("https://github.com/{REPO}/releases/download"),
             current_version: env!("CARGO_PKG_VERSION").into(),
             destination: env::current_exe().and_then(fs::canonicalize).map_err(io)?,
-            #[cfg(test)]
-            home: None,
         },
     )
 }
@@ -49,8 +47,6 @@ struct ReleaseSource {
     downloads_url: String,
     current_version: String,
     destination: PathBuf,
-    #[cfg(test)]
-    home: Option<PathBuf>,
 }
 
 fn run_with_source(
@@ -119,17 +115,11 @@ fn run_with_source(
         ));
     }
     let destination = &source.destination;
-    let mut command = Command::new(&candidate);
-    command
+    let installed = Command::new(&candidate)
         .args(["--json", "__install", "--destination"])
-        .arg(destination);
-    #[cfg(test)]
-    if let Some(home) = &source.home {
-        command
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("data"));
-    }
-    let installed = command.output().map_err(io)?;
+        .arg(destination)
+        .output()
+        .map_err(io)?;
     if !installed.status.success() {
         let diagnostic = serde_json::from_slice::<serde_json::Value>(&installed.stdout)
             .or_else(|_| serde_json::from_slice(&installed.stderr))
