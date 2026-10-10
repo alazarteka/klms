@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::{
     client::{Client, release_bytes as fetch},
     error::AppError,
-    output, skill,
+    output,
 };
 use sha2::{Digest, Sha256};
 
@@ -155,9 +155,9 @@ fn run_with_source(
     )
 }
 
-/// Called by the verified candidate itself, so its embedded skill matches it.
-/// Stage a copy on the destination filesystem, install the skill with rollback,
-/// then atomically rename the binary. No fallible operation follows the switch.
+/// Called by the verified candidate itself. Stage a copy on the destination
+/// filesystem, then atomically rename it over the binary. Removing the legacy
+/// skill afterwards is best effort and never turns a switch into a failure.
 pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
     if !destination.is_absolute() {
         return Err(AppError::usage("installation destination must be absolute"));
@@ -197,8 +197,50 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
             destination.display()
         ),
     )?;
-    skill::with_install(|| fs::rename(&staged, &destination).map_err(io))?;
+    fs::rename(&staged, &destination).map_err(io)?;
+    remove_legacy_skill();
     Ok(result)
+}
+
+/// Earlier releases installed an Agent Skill copy of the help text. Remove only
+/// what klms itself created: the payload under its data directory and a symlink
+/// that points at exactly that directory. Anything else is the user's.
+fn remove_legacy_skill() {
+    let nonempty = |name| {
+        env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let Some(home) = nonempty("HOME") else {
+        return;
+    };
+    let data_home = nonempty("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+    remove_legacy_skill_at(&home, &data_home);
+}
+
+fn remove_legacy_skill_at(home: &Path, data_home: &Path) {
+    let skills = data_home.join("klms/skills");
+    let payload_dir = skills.join("klms");
+    let link = home.join(".agents/skills/klms");
+    // read_link fails for anything that is not a symlink, so real files and
+    // directories at the discovery path are never touched.
+    if fs::read_link(&link).is_ok_and(|target| target == payload_dir) {
+        let _ = fs::remove_file(&link);
+    }
+    let is_real = |path: &Path, dir: bool| {
+        fs::symlink_metadata(path).is_ok_and(|m| {
+            !m.file_type().is_symlink() && if dir { m.is_dir() } else { m.is_file() }
+        })
+    };
+    if is_real(&skills, true) && is_real(&payload_dir, true) {
+        let payload = payload_dir.join("SKILL.md");
+        if is_real(&payload, false) {
+            let _ = fs::remove_file(payload);
+        }
+        // Fail on non-empty directories rather than deleting unknown files.
+        let _ = fs::remove_dir(&payload_dir);
+        let _ = fs::remove_dir(&skills);
+    }
 }
 
 fn version(value: &str) -> Result<(u64, u64, u64), AppError> {

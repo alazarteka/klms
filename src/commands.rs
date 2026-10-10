@@ -10,7 +10,7 @@ use crate::{
     auth,
     cli::{
         ActivitiesCommand, AuthArgs, AuthCommand, AuthMethodArg, AuthSecondFactorArg, Cli, Command,
-        CourseShowCommand, CoursesCommand, LibraryCommand, RequestCommand, SkillCommand,
+        CourseShowCommand, CoursesCommand, LibraryCommand, RequestCommand,
     },
     client::{KlmsClient, validate_base_url},
     error::AppError,
@@ -24,12 +24,6 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
     match &cli.command {
         Command::Update(args) => return crate::update::run(args.check, cli.timeout),
         Command::Install { destination } => return crate::update::install(destination),
-        Command::Skill(args) => {
-            return match args.command {
-                SkillCommand::Install => crate::skill::install(),
-                SkillCommand::Status => crate::skill::status(),
-            };
-        }
         Command::Library(args) if !matches!(args.command, LibraryCommand::Sync(_)) => {
             return library::local(&args.command);
         }
@@ -203,8 +197,7 @@ fn doctor(
 
 fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<CommandResult, AppError> {
     match command {
-        Command::Skill(_)
-        | Command::Spec
+        Command::Spec
         | Command::Completions { .. }
         | Command::Update(_)
         | Command::Install { .. } => {

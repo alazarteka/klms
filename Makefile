@@ -1,13 +1,9 @@
-PREFIX ?= $(HOME)/.local
-BINDIR ?= $(PREFIX)/bin
-
-.PHONY: check install-local
+.PHONY: check build
 
 check:
 	cargo fmt --all -- --check
 	cargo test --locked --all-targets
 	cargo clippy --locked --all-targets -- -D warnings
 
-install-local:
+build:
 	cargo build --release --locked
-	target/release/klms __install --destination "$(BINDIR)/klms"

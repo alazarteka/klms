@@ -54,6 +54,6 @@ chmod 0755 "$work_dir/klms"
 install_dir="${KLMS_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$install_dir"
 install_dir="$(cd "$install_dir" && pwd -P)"
-# The candidate preflights and installs its own embedded skill before switching
-# the binary, rolling skill content back if the final atomic rename fails.
+
+# The candidate installs itself with one atomic rename over the destination.
 "$work_dir/klms" __install --destination "$install_dir/klms" || die "candidate installation failed (requires klms 0.2.1 or newer)"

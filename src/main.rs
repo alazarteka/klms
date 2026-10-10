@@ -13,7 +13,6 @@ mod parse;
 mod present;
 mod reference;
 mod safe_url;
-mod skill;
 mod spec;
 mod update;
 mod url;

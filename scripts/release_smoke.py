@@ -69,13 +69,10 @@ def main():
         structured(candidate, "__install", "--destination", str(installed))
         if structured(installed, "--version")["data"]["version"] != version:
             raise RuntimeError("installed executable version mismatch")
-        status = structured(installed, "skill", "status")["data"]
-        if not status["payload_current"] or not status["link_current"]:
-            raise RuntimeError("matching companion skill was not installed")
         structured(candidate, "__install", "--destination", str(installed))
         if (root / "state" / "klms" / "session.json").exists():
             raise RuntimeError("offline installation unexpectedly created authentication state")
-    print(f"Release smoke passed: klms {version}; checksum, discovery, errors, installation and skill")
+    print(f"Release smoke passed: klms {version}; checksum, discovery, errors and installation")
 
 
 if __name__ == "__main__":
