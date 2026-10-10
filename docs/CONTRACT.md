@@ -27,6 +27,11 @@ must match it. Exit 0 covers a partial sync too: read `data.status`,
 `failures`, `truncated` and `warnings`. Retryable codes are NETWORK_ERROR (20)
 and CORPUS_BUSY (52).
 
+Exit 10 carries three error codes: AUTH_REQUIRED (no session, or KAIST rejected
+the sign-in), CODE_INCORRECT (`auth login --code` with a wrong code; the pending
+login is consumed) and CODE_EXPIRED (no pending login, or it or its code
+expired; run `auth login` again). Branch on `error.code`, not the exit status.
+
 ## Refs
 
 Canonical refs: `course:ID`, `assign:ID`, `quiz:ID`, `board:ID`,

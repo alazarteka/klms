@@ -22,7 +22,8 @@ JSON contract (global --json goes before the command):
 
 Exit codes:
   0 ok (a partial sync also exits 0: check data.status, failures, truncated, warnings)
-  2 USAGE (bad syntax, value or ref)      10 AUTH_REQUIRED (ask the user to run `klms auth login`)
+  2 USAGE (bad syntax, value or ref)      10 AUTH_REQUIRED (ask the user to run `klms auth login`;
+                                             `auth login --code` may give CODE_INCORRECT or CODE_EXPIRED)
   11 AUTH_PROTOCOL_CHANGED                12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED                    20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR                           30 UPSTREAM_SHAPE_CHANGED
@@ -130,11 +131,13 @@ pub enum Command {
     #[command(after_help = "Examples:\n  klms dashboard\n  klms --json dashboard --limit 20")]
     Dashboard(ListArgs),
     /// Show items scheduled for today in Korea time.
-    #[command(after_help = "Examples:\n  klms today\n  klms --json today --course CS.30200")]
+    #[command(
+        after_help = "Examples:\n  klms today\n  klms --json today --course CS.30200 --kind assign,quiz"
+    )]
     Today(AgendaArgs),
     /// Show scheduled items through a bounded future window.
     #[command(
-        after_help = "Examples:\n  klms upcoming\n  klms --json upcoming --through 7d --course CS.30200"
+        after_help = "Examples:\n  klms upcoming\n  klms --json upcoming --through 7d --kind assign --kind quiz"
     )]
     Upcoming(UpcomingArgs),
     /// Discover, resolve, or inspect courses.
@@ -195,7 +198,7 @@ pub enum Command {
     Spec,
     /// Print a shell completion script generated from the executable grammar.
     #[command(
-        after_help = "Examples:\n  klms completions bash > ~/.local/share/bash-completion/completions/klms\n  klms completions zsh > ~/.zfunc/_klms   # ensure ~/.zfunc is in fpath, then run compinit"
+        after_help = "Examples:\n  klms completions bash > ~/.local/share/bash-completion/completions/klms\n  mkdir -p ~/.zfunc && klms completions zsh > ~/.zfunc/_klms\n\nFor zsh, add `fpath=(~/.zfunc $fpath)` before `compinit` in ~/.zshrc."
     )]
     Completions {
         /// Shell to generate completions for.
@@ -397,11 +400,44 @@ pub struct ListArgs {
     pub limit: usize,
 }
 
+/// Row `kind` values `today`/`upcoming` can produce: the Moodle module name
+/// of the event's activity (calendar.rs), or `event` when it has none.
+pub const AGENDA_KINDS: [&str; 13] = [
+    "assign",
+    "quiz",
+    "courseboard",
+    "resource",
+    "coursefile",
+    "page",
+    "folder",
+    "url",
+    "vod",
+    "lti",
+    "panopto",
+    "panoptocourseembed",
+    "event",
+];
+
+const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate): assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, panoptocourseembed, event (no activity). Case-insensitive.";
+
+fn parse_agenda_kind(value: &str) -> Result<String, String> {
+    let kind = value.trim().to_ascii_lowercase();
+    match AGENDA_KINDS.contains(&kind.as_str()) {
+        true => Ok(kind),
+        false => Err(format!(
+            "unknown kind {value:?}; valid kinds: {}",
+            AGENDA_KINDS.join(", ")
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct AgendaArgs {
     /// Restrict results to one course (course ref, id, code, or fragment).
     #[arg(long, value_name = "COURSE")]
     pub course: Option<String>,
+    #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = parse_agenda_kind, help = KIND_HELP)]
+    pub kind: Vec<String>,
     #[command(flatten)]
     pub list: ListArgs,
 }
@@ -414,6 +450,8 @@ pub struct UpcomingArgs {
     /// Restrict results to one course (course ref, id, code, or fragment).
     #[arg(long, value_name = "COURSE")]
     pub course: Option<String>,
+    #[arg(long, value_name = "KIND", value_delimiter = ',', value_parser = parse_agenda_kind, help = KIND_HELP)]
+    pub kind: Vec<String>,
     #[command(flatten)]
     pub list: ListArgs,
 }
@@ -477,8 +515,11 @@ Without a terminal (agents, scripts, or --json):
   (SSO cookies only, never the password) is a private file that expires after
   5 minutes and is deleted after one attempt.
 
-Exit codes: 0 signed in; 12 CODE_REQUIRED (resume with --code); 10 sign-in
-rejected or code missing/expired; 2 bad flags; 11 KAIST protocol changed.
+Exit codes: 0 signed in; 12 CODE_REQUIRED (resume with --code); 2 bad flags;
+11 KAIST protocol changed; 10 for all of these, told apart by error.code:
+  AUTH_REQUIRED    KAIST rejected the sign-in (ID, password, lockout)
+  CODE_INCORRECT   wrong verification code (the pending login is consumed)
+  CODE_EXPIRED     no pending login, or it or its code expired (start over)
 
 Examples:
   klms auth login
@@ -668,7 +709,7 @@ pub enum FilesCommand {
     },
     /// Download a file ref or same-origin KLMS URL without overwriting.
     #[command(
-        after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf\n\n--out is the exact new file path (you choose the name; klms does not derive one). A leading ~ is not expanded (the shell does that unquoted), the parent directory must already exist, and an existing path is CONFIG_ERROR (exit 40)."
+        after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf\n\n--out is the exact new file path (you choose the name; klms does not derive one). A leading ~ is not expanded (the shell does that unquoted), the parent directory must already exist (`mkdir -p DIR` first), and an existing path is CONFIG_ERROR (exit 40)."
     )]
     Download {
         /// file:ID from `files list`, or a same-origin pluginfile.php URL; third-party links are rejected.

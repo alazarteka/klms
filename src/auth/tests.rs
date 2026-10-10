@@ -4,6 +4,7 @@
 use std::{
     cell::RefCell,
     fs,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
 };
@@ -317,7 +318,7 @@ fn a_failed_login_remembers_nothing() {
     *fx.otp.lock().unwrap() = "E001";
     assert_eq!(
         failure(fx.login(true, false, &remember())).code,
-        "AUTH_REQUIRED"
+        "CODE_INCORRECT"
     );
     assert!(fx.identity().is_none() && fx.password("student").is_none());
     assert!(!fx.dirs.session().exists());
@@ -438,14 +439,23 @@ fn non_interactive_login_is_two_steps_through_a_pending_file() {
 fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_is_rejected() {
     let fx = Fixture::new();
     fx.seed_remembered_password();
-    let message = |options: &LoginOptions| failure(fx.login(false, true, options)).message;
-    assert!(message(&code("123456")).contains("no login is waiting"));
+    // Exit 10 for all of these; the stable code tells them apart.
+    let message = |options: &LoginOptions, want: &str| {
+        let error = failure(fx.login(false, true, options));
+        assert_eq!((error.code, error.exit_code()), (want, 10));
+        error.message
+    };
+    assert!(message(&code("123456"), "CODE_EXPIRED").contains("no login is waiting"));
 
     fx.pend();
     *fx.otp.lock().unwrap() = "E001";
-    assert!(message(&code("000000")).contains("incorrect"));
+    assert!(message(&code("000000"), "CODE_INCORRECT").contains("incorrect"));
     assert!(!fx.dirs.pending().exists());
-    assert!(message(&code("000000")).contains("no login is waiting"));
+    assert!(message(&code("000000"), "CODE_EXPIRED").contains("no login is waiting"));
+
+    fx.pend();
+    *fx.otp.lock().unwrap() = "E002";
+    assert!(message(&code("000000"), "CODE_EXPIRED").contains("expired"));
 
     fx.pend();
     let path = fx.dirs.pending();
@@ -454,7 +464,7 @@ fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_is_rejected() {
     pending.expires_at = epoch_now() as u64 - 1;
     store::save_json(&path, &pending, "pending login").unwrap();
     let validations = fx.sso.count(VALIDATE);
-    assert!(message(&code("123456")).contains("expired"));
+    assert!(message(&code("123456"), "CODE_EXPIRED").contains("expired"));
     assert!(!path.exists());
     assert_eq!(
         fx.sso.count(VALIDATE),
@@ -516,4 +526,30 @@ fn device_registration_and_klms_handoff_across_two_origins() {
     // The handoff form was submitted to KLMS with its hidden ticket.
     let handoff = &fx.klms.requests("/login/ssologin.php")[0];
     assert!(handoff.starts_with("post ") && handoff.contains("ticket=opaque"));
+}
+
+#[test]
+fn saved_password_notice_names_the_backend_and_stays_quiet_for_json() {
+    let path = PathBuf::from("/cfg/klms/credentials.json");
+    let file = Backend::File(path.clone());
+    assert_eq!(
+        password_saved_notice(false, &file, Some("plaintext-file")).unwrap(),
+        "Password saved in plaintext at /cfg/klms/credentials.json (0600)."
+    );
+    let keychain = Backend::Keychain(PathBuf::from("security"));
+    assert_eq!(
+        password_saved_notice(false, &keychain, Some("keychain")).unwrap(),
+        "Password saved to the macOS Keychain."
+    );
+    let service = Backend::SecretService(PathBuf::from("secret-tool"));
+    assert_eq!(
+        password_saved_notice(false, &service, Some("secret-service")).unwrap(),
+        "Password saved to the Secret Service keyring."
+    );
+    assert_eq!(
+        password_saved_notice(true, &file, Some("plaintext-file")),
+        None
+    );
+    assert_eq!(password_saved_notice(false, &file, None), None);
+    assert_eq!(password_saved_notice(false, &file, Some("keychain")), None);
 }

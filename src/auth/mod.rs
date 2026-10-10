@@ -258,7 +258,24 @@ fn login_with(
         &mut warnings,
     );
     match begun.outcome {
-        Outcome::Complete(completed) => finish_login(env, completed, &identity, warnings),
+        Outcome::Complete(completed) => {
+            let saved =
+                new_backend
+                    .as_ref()
+                    .zip(begun.password.as_ref())
+                    .and_then(|(backend, _)| {
+                        password_saved_notice(
+                            env.json,
+                            backend,
+                            identity.password_backend.as_deref(),
+                        )
+                    });
+            let result = finish_login(env, completed, &identity, warnings)?;
+            if let Some(notice) = saved {
+                eprintln!("{notice}");
+            }
+            Ok(result)
+        }
         Outcome::CodeRequired(pending) => {
             store::save_json(&env.dirs.pending(), &pending, "pending login")?;
             let mut error =
@@ -269,6 +286,21 @@ fn login_with(
             Err(error)
         }
     }
+}
+
+/// Human-mode stderr line naming where a just-saved password lives; `None`
+/// under `--json` or when the password did not end up in `backend`.
+fn password_saved_notice(json: bool, backend: &Backend, stored: Option<&str>) -> Option<String> {
+    if json || stored != Some(backend.kind()) {
+        return None;
+    }
+    Some(match backend {
+        Backend::Keychain(_) => "Password saved to the macOS Keychain.".into(),
+        Backend::SecretService(_) => "Password saved to the Secret Service keyring.".into(),
+        Backend::File(path) => {
+            format!("Password saved in plaintext at {} (0600).", path.display())
+        }
+    })
 }
 
 /// Look up the remembered password; `Ok(None)` when nothing usable is stored.

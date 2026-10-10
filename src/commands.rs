@@ -183,10 +183,16 @@ impl Ctx<'_> {
         match command {
             Command::Auth { command } => self.session_time(matches!(command, AuthCommand::Extend)),
             Command::Dashboard(args) => self.dashboard(args.limit),
-            Command::Today(a) => self.agenda(a.course.as_deref(), a.list.limit, 0, "today"),
-            Command::Upcoming(a) => {
-                self.agenda(a.course.as_deref(), a.list.limit, a.through, "upcoming")
+            Command::Today(a) => {
+                self.agenda(a.course.as_deref(), &a.kind, a.list.limit, 0, "today")
             }
+            Command::Upcoming(a) => self.agenda(
+                a.course.as_deref(),
+                &a.kind,
+                a.list.limit,
+                a.through,
+                "upcoming",
+            ),
             Command::Courses { command } => match command {
                 CoursesCommand::List(list) => listing(
                     "courses.list",
@@ -557,6 +563,7 @@ impl Ctx<'_> {
     fn agenda(
         &self,
         course: Option<&str>,
+        kinds: &[String],
         limit: usize,
         days: u32,
         label: &'static str,
@@ -584,6 +591,7 @@ impl Ctx<'_> {
                     && course_id
                         .as_ref()
                         .is_none_or(|id| event.course_id.as_ref() == Some(id))
+                    && (kinds.is_empty() || kinds.contains(&event.kind.to_ascii_lowercase()))
             })
             .collect();
         rows.sort_by(|left, right| left.starts_at.cmp(&right.starts_at));
