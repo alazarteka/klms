@@ -13,7 +13,7 @@ use crate::{
 use rusqlite::{Connection, Params, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_DOWNLOAD: usize = 128 * 1024 * 1024;
 
@@ -200,7 +200,7 @@ impl Corpus {
             at: observed_at,
         };
         let mut listed = HashSet::new();
-        let mut frontier = HashSet::new();
+        let mut frontier = BTreeMap::new();
         let (mut resource_count, mut representation_count, mut truncated_count) = (0_u64, 0_u64, 0);
         for (course, resources, _) in &collections {
             let course_id = upsert_course(&x, course)?;
@@ -224,7 +224,10 @@ impl Corpus {
                         continue;
                     };
                     seen_urls.insert(url.as_str().to_owned());
-                    frontier.insert(upsert_representation(&x, resource_id, &url, &link.title)?);
+                    let id = upsert_representation(&x, resource_id, &url, &link.title)?;
+                    if representation_kind(&url) == "file" {
+                        frontier.insert(id, url.as_str().to_owned());
+                    }
                     representation_count += 1;
                 }
                 if resource.representations_complete {
@@ -302,18 +305,12 @@ impl Corpus {
         client: &KlmsClient,
         run_id: i64,
         download: bool,
-        frontier: &HashSet<i64>,
+        frontier: &BTreeMap<i64, String>,
     ) -> Result<(u64, Vec<String>), AppError> {
-        let targets = rows(
-            &self.connection,
-            "SELECT id,url FROM representations WHERE kind='file' ORDER BY id",
-            [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-        )?;
         let mut blobs_added = 0_u64;
         let mut failures = Vec::new();
-        for (id, url) in targets.into_iter().filter(|(id, _)| frontier.contains(id)) {
-            let metadata = match client.head(&url) {
+        for (&id, url) in frontier {
+            let metadata = match client.head(url) {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     failures.push(format!("representation:{id}: {}", error.message));
@@ -332,7 +329,7 @@ impl Corpus {
                 continue;
             }
             let conditional = client.get_conditional(
-                &url,
+                url,
                 bound.as_ref().and_then(|b| b.1.as_deref()),
                 bound.as_ref().and_then(|b| b.2.as_deref()),
                 MAX_DOWNLOAD,
