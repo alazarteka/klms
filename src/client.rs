@@ -541,37 +541,37 @@ impl http::Policy for KlmsPolicy {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read, Write},
-        net::{SocketAddr, TcpListener},
-        thread::{self, JoinHandle},
+        collections::VecDeque,
+        sync::Mutex,
+        thread,
         time::{Duration, Instant},
     };
 
     use super::{KlmsClient, validate_base_url};
+    use crate::fixture_server::{Response, Server};
 
-    const REDIRECT: &str =
-        "HTTP/1.1 302 Found\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-
-    /// Answers each connection with the next response; returns the lowercased requests.
-    fn serve(responses: Vec<String>) -> (SocketAddr, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let mut seen = Vec::new();
-            for response in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 4096];
-                let length = stream.read(&mut request).unwrap();
-                seen.push(String::from_utf8_lossy(&request[..length]).to_ascii_lowercase());
-                stream.write_all(response.as_bytes()).unwrap();
-            }
-            seen
-        });
-        (address, handle)
+    fn redirect(location: &str) -> Response {
+        Response::bytes("text/plain", "")
+            .status("302 Found")
+            .header("Location", location)
     }
 
-    fn client(address: SocketAddr, cookie: Option<&str>, timeout: u64) -> KlmsClient {
-        KlmsClient::new(&format!("http://{address}"), cookie, timeout).unwrap()
+    /// Answers each connection with the next response.
+    fn serve(responses: Vec<Response>) -> Server {
+        let queue = Mutex::new(VecDeque::from(responses));
+        Server::new(move |_| queue.lock().unwrap().pop_front().expect("extra request"))
+    }
+
+    /// The lowercased request line and headers of every request served.
+    fn seen(server: &Server) -> Vec<String> {
+        let recorded = server.recorded().into_iter();
+        recorded
+            .map(|r| format!("{}\r\n{}", r.line, r.headers.join("\r\n")).to_ascii_lowercase())
+            .collect()
+    }
+
+    fn client(server: &Server, cookie: Option<&str>, timeout: u64) -> KlmsClient {
+        KlmsClient::new(&server.url(), cookie, timeout).unwrap()
     }
 
     #[test]
@@ -587,16 +587,19 @@ mod tests {
     #[test]
     fn conditional_get_handles_opaque_etags_and_only_accepts_complete_206() {
         let partial = |range: &str| {
-            format!(
-                "HTTP/1.1 206 Partial Content\r\nETag: \"changed\"\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nContent-Range: {range}\r\nConnection: close\r\n\r\nnew"
-            )
+            Response::bytes("application/octet-stream", "new")
+                .status("206 Partial Content")
+                .header("ETag", "\"changed\"")
+                .header("Content-Range", range)
         };
-        let (address, server) = serve(vec![
-            "HTTP/1.1 304 Not Modified\r\nETag: W/\"opaque-value\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        let server = serve(vec![
+            Response::bytes("text/plain", "")
+                .status("304 Not Modified")
+                .header("ETag", "W/\"opaque-value\""),
             partial("bytes 0-2/8"),
             partial("bytes 0-2/3"),
         ]);
-        let client = client(address, None, 5);
+        let client = client(&server, None, 5);
         let etag = Some("W/\"opaque-value\"");
         let unchanged = client.get_conditional("/file", etag, None, 8).unwrap();
         assert_eq!(unchanged.metadata.status, 304);
@@ -605,9 +608,8 @@ mod tests {
         assert_eq!(prefix.code, "UPSTREAM_ERROR");
         let complete = client.get_conditional("/file", None, None, 8).unwrap();
         assert_eq!(complete.bytes.as_deref(), Some(&b"new"[..]));
-        let seen = server.join().unwrap();
         assert!(
-            seen[..2]
+            seen(&server)[..2]
                 .iter()
                 .all(|r| r.contains("if-none-match: w/\"opaque-value\""))
         );
@@ -615,48 +617,41 @@ mod tests {
 
     #[test]
     fn follows_same_origin_redirects_with_the_cookie_and_reports_the_final_url() {
-        let (address, server) = serve(vec![
-            "HTTP/1.1 302 Found\r\nLocation: /final?x=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".into(),
+        let server = serve(vec![
+            redirect("/final?x=1"),
+            Response::bytes("text/plain", "ok"),
         ]);
-        let response = client(address, Some("MoodleSession=a"), 5)
+        let response = client(&server, Some("MoodleSession=a"), 5)
             .get_bytes("/start", 16)
             .unwrap();
         assert_eq!(response.bytes, b"ok");
         assert_eq!(response.url.path(), "/final");
-        let seen = server.join().unwrap();
+        let seen = seen(&server);
         assert!(seen.iter().all(|r| r.contains("cookie: moodlesession=a")));
         assert!(seen[1].starts_with("get /final?x=1 "));
     }
 
     #[test]
     fn refuses_cross_origin_redirects_before_sending_the_cookie() {
-        let (address, server) = serve(vec![
-            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.2:1/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-        ]);
-        let error = client(address, Some("MoodleSession=a"), 5)
+        let server = serve(vec![redirect("http://127.0.0.2:1/steal")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
             .get_bytes("/start", 16)
             .err()
             .unwrap();
         assert_eq!(error.code, "NETWORK_ERROR");
         assert!(error.message.contains("cross-origin redirect refused"));
-        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[test]
     fn the_timeout_bounds_the_whole_redirect_chain_not_each_hop() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
         // Each hop answers well inside the 1s timeout; together they exceed it.
-        thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.read(&mut [0_u8; 4096]);
-                thread::sleep(Duration::from_millis(450));
-                let _ = stream.write_all(REDIRECT.as_bytes());
-            }
+        let server = Server::new(|_| {
+            thread::sleep(Duration::from_millis(450));
+            redirect("/again")
         });
         let started = Instant::now();
-        let error = client(address, None, 1)
+        let error = client(&server, None, 1)
             .get_bytes("/slow", 16)
             .err()
             .unwrap();
@@ -666,9 +661,9 @@ mod tests {
 
     #[test]
     fn head_stops_after_the_cap_on_endless_redirects() {
-        let (address, server) = serve(vec![REDIRECT.to_owned(); 6]);
-        let error = client(address, None, 5).head("/loop").unwrap_err();
+        let server = serve((0..6).map(|_| redirect("/again")).collect());
+        let error = client(&server, None, 5).head("/loop").unwrap_err();
         assert!(error.message.contains("too many redirects"));
-        assert_eq!(server.join().unwrap().len(), 6);
+        assert_eq!(server.requests().len(), 6);
     }
 }

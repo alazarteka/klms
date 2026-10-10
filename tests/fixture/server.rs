@@ -42,6 +42,8 @@ pub struct Response {
     content_type: &'static str,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// No `Content-Length`: the body ends only when the client hangs up.
+    open_ended: bool,
 }
 
 impl Response {
@@ -51,6 +53,7 @@ impl Response {
             content_type: "text/html; charset=utf-8",
             headers: Vec::new(),
             body: body.into(),
+            open_ended: false,
         }
     }
 
@@ -60,6 +63,16 @@ impl Response {
             content_type,
             headers: Vec::new(),
             body: body.into(),
+            open_ended: false,
+        }
+    }
+
+    /// A 200 body that is never terminated by length or EOF while the client
+    /// is still reading it.
+    pub fn open_ended(body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            open_ended: true,
+            ..Self::bytes("application/octet-stream", body)
         }
     }
 
@@ -127,11 +140,12 @@ impl Server {
                 };
                 let response = router(&request);
                 let mut headers = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
-                    response.status,
-                    response.content_type,
-                    response.body.len()
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\n",
+                    response.status, response.content_type
                 );
+                if !response.open_ended {
+                    headers.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+                }
                 for (name, value) in response.headers {
                     headers.push_str(&format!("{name}: {value}\r\n"));
                 }
@@ -143,6 +157,11 @@ impl Server {
                         Ok(())
                     }
                 });
+                if response.open_ended {
+                    // Hold the connection open until the client gives up.
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    let _ = stream.read(&mut [0_u8; 64]);
+                }
                 if let Err(error) = written {
                     // Cancellation may close a client before its response is sent.
                     if !disconnected(&error) {
