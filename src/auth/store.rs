@@ -371,16 +371,14 @@ impl PendingLogin {
 /// unreadable or foreign file is an error; all but "missing" also delete it
 /// so it cannot be retried.
 pub fn load_pending(path: &Path, klms: &Url, now: u64) -> Result<PendingLogin, AppError> {
-    let restart = "Run `klms auth login` to request a new verification code.";
     let Some(bytes) = read_file(path, "pending login")? else {
-        return Err(AppError::auth(
+        return Err(AppError::code_expired(
             "no login is waiting for a verification code",
-            restart,
         ));
     };
     let discard = |message: &str| {
         let _ = remove_file(path, "pending login");
-        AppError::auth(message.to_owned(), restart)
+        AppError::code_expired(message.to_owned())
     };
     let pending: PendingLogin = serde_json::from_slice(&bytes)
         .map_err(|_| discard("the pending login file is unreadable"))?;
@@ -511,7 +509,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("klms/pending-login.json");
         let missing = load_pending(&path, &klms(), 0).unwrap_err();
-        assert_eq!(missing.code, "AUTH_REQUIRED");
+        assert_eq!((missing.code, missing.exit_code()), ("CODE_EXPIRED", 10));
         assert!(missing.message.contains("no login is waiting"));
         assert!(missing.hint.unwrap().contains("klms auth login"));
 

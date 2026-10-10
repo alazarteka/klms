@@ -105,14 +105,10 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
             "KAIST temporarily locked password login after repeated failures",
             "Wait for the lockout to expire, then retry.",
         ),
-        (Otp, "E001") => denied(
+        (Otp, "E001") => Err(AppError::code_incorrect(
             "The verification code is incorrect",
-            "Retry login and enter the newest six-digit code.",
-        ),
-        (Otp, "E002") => denied(
-            "The verification code expired",
-            "Retry login to request a new code.",
-        ),
+        )),
+        (Otp, "E002") => Err(AppError::code_expired("The verification code expired")),
         (Otp, "E003") => denied(
             "Too many verification attempts",
             "Retry login to request a new code.",
@@ -611,7 +607,9 @@ mod tests {
             (Password, "SS0004", "AUTH_REQUIRED"),
             (Password, "EAU001", "AUTH_REQUIRED"),
             (Password, "EAU016", "AUTH_PROTOCOL_CHANGED"),
-            (Otp, "E001", "AUTH_REQUIRED"),
+            (Otp, "E001", "CODE_INCORRECT"),
+            (Otp, "E002", "CODE_EXPIRED"),
+            (Otp, "E003", "AUTH_REQUIRED"),
             (Otp, "ES0017", "AUTH_PROTOCOL_CHANGED"),
             (Otp, "SS0098", "AUTH_PROTOCOL_CHANGED"),
             (Policy, "SS0005", "AUTH_REQUIRED"),

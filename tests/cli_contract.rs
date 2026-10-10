@@ -229,6 +229,36 @@ fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
 }
 
 #[test]
+fn agenda_kind_filters_rows_and_rejects_unknown_kinds() {
+    let page = include_str!("fixtures/localized/calendar.html")
+        .replace("&amp;time=1899989400", "")
+        .replace("내일", "오늘");
+    let server = Server::new(move |_| Response::html(page.as_bytes()));
+    let env = Env::at(&server);
+    for command in ["today", "upcoming"] {
+        let rows = |kinds: &str| {
+            let value = env.ok(&format!("{command}{kinds}"));
+            value["data"].as_array().unwrap().len()
+        };
+        assert_eq!(rows(""), 1, "{command}");
+        assert_eq!(rows(" --kind assign"), 1);
+        assert_eq!(rows(" --kind ASSIGN"), 1);
+        assert_eq!(rows(" --kind quiz,assign"), 1);
+        assert_eq!(rows(" --kind quiz --kind assign"), 1);
+        assert_eq!(rows(" --kind quiz"), 0);
+        assert_eq!(rows(" --kind event,quiz"), 0);
+
+        let (exit, error) = env.fail(&format!("{command} --kind bogus"));
+        assert_eq!((exit, &error["code"]), (2, &json!("USAGE")));
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("valid kinds: assign, quiz, courseboard"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
 fn raw_get_is_a_truncated_secret_free_preview_and_redirect_errors_stay_secret_free() {
     let server = Server::new(|_| {
         Response::bytes(
@@ -539,6 +569,26 @@ fn help_is_the_agent_manual() {
     assert!(edit.contains("effective._provenance") && edit.contains("CURATION_CONFLICT"));
     let login = help(&["auth", "login", "--help"]);
     assert!(login.contains("--code") && login.contains("--remember-password"));
+    for code in ["AUTH_REQUIRED", "CODE_INCORRECT", "CODE_EXPIRED"] {
+        assert!(login.contains(code) && top.contains(code), "lacks {code}");
+    }
+    let download = help(&["files", "download", "--help"]);
+    assert!(download.contains("mkdir -p"));
+    let completions = help(&["completions", "--help"]);
+    for needle in [
+        "mkdir -p ~/.zfunc && klms completions zsh > ~/.zfunc/_klms",
+        "fpath=(~/.zfunc $fpath)",
+        "compinit",
+    ] {
+        assert!(
+            completions.contains(needle),
+            "completions help lacks {needle}"
+        );
+    }
+    for command in ["today", "upcoming"] {
+        let text = help(&[command, "--help"]);
+        assert!(text.contains("--kind") && text.contains("courseboard, resource"));
+    }
 }
 
 #[test]
