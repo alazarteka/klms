@@ -10,9 +10,9 @@ use serde::Serialize;
 use crate::{
     auth,
     cli::{
-        ActivitiesCommand, AuthCommand, AuthMethodArg, AuthSecondFactorArg, BoardsCommand,
-        CalendarCommand, Cli, Command, CourseShowCommand, CoursesCommand, FilesCommand,
-        LibraryCommand, ModuleCommand, NoticesCommand, RequestCommand,
+        ActivitiesCommand, AuthCommand, BoardsCommand, CalendarCommand, Cli, Command,
+        CourseShowCommand, CoursesCommand, FilesCommand, LibraryCommand, ModuleCommand,
+        NoticesCommand, RequestCommand,
     },
     client::{KlmsClient, validate_base_url},
     course_pages, date,
@@ -55,14 +55,8 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             AuthCommand::Login(login) => {
                 let options = auth::LoginOptions {
                     user: login.user.clone(),
-                    method: login.method.map(|method| match method {
-                        AuthMethodArg::Easy => auth::LoginMethod::Easy,
-                        AuthMethodArg::Password => auth::LoginMethod::Password,
-                    }),
-                    factor: login.second_factor.map(|factor| match factor {
-                        AuthSecondFactorArg::Email => auth::SecondFactor::Email,
-                        AuthSecondFactorArg::Sms => auth::SecondFactor::Sms,
-                    }),
+                    method: login.method,
+                    factor: login.second_factor,
                     remember_password: login.remember_password,
                     insecure_storage: login.insecure_storage,
                     code: login.code.clone(),

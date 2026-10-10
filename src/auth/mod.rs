@@ -25,14 +25,14 @@ use flow::{Attempt, AuthPrompt, Outcome, TerminalPrompt};
 use secret::{Backend, Secrets};
 use store::{Dirs, Identity};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum LoginMethod {
     Easy,
     Password,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SecondFactor {
     Email,
