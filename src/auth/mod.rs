@@ -1,54 +1,106 @@
-mod codes;
-mod cookie_rules;
+//! Native KAIST SSO login and the files it leaves behind. This module is the
+//! orchestration (`login`, `logout`, `forget`, `load`); the SSO conversation
+//! is in `flow`, the on-disk state in `store`, password storage in `secret`.
+
 mod cookies;
-mod crypto;
 mod flow;
-mod fsutil;
-mod identity;
-mod model;
-mod pending;
-mod prompt;
 mod secret;
 mod store;
 mod transport;
 
 use std::io::IsTerminal;
 
-use crate::url::Url;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use zeroize::Zeroizing;
 
 use crate::{
     date::epoch_now,
     error::AppError,
     output::{self, CommandResult},
+    url::Url,
 };
 
-use flow::{Attempt, OtpMode, Outcome};
-use identity::{Dirs, Identity};
-pub use model::{AuthSession, AuthStatus, LoginMethod, SecondFactor};
-use model::{ForgetResult, LoginResult, LogoutResult, Remembered};
-use prompt::{AuthPrompt, KnownAnswers, TerminalPrompt};
-use secret::{Provider, SecretStore, SystemProvider};
+use flow::{Attempt, AuthPrompt, Outcome, TerminalPrompt};
+use secret::{Backend, Secrets};
+use store::{Dirs, Identity};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoginMethod {
+    Easy,
+    Password,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecondFactor {
+    Email,
+    Sms,
+}
+
+impl LoginMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Easy => "easy",
+            Self::Password => "password",
+        }
+    }
+}
+
+impl SecondFactor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Email => "email",
+            Self::Sms => "sms",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthStatus {
+    pub configured: bool,
+    pub source: &'static str,
+    pub path: String,
+    pub cookie_count: usize,
+    pub device_count: usize,
+    pub created_at: Option<u64>,
+    /// The remembered login (`login.json`), without any secret.
+    pub remembered: Option<Remembered>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remembered_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Remembered {
+    pub username: String,
+    pub method: String,
+    pub second_factor: Option<String>,
+    /// `none`, `keychain`, `secret-service` or `plaintext-file`.
+    pub password_backend: String,
+}
+
+#[derive(Debug)]
+pub struct AuthSession {
+    pub status: AuthStatus,
+    pub cookie_header: Option<String>,
+    pub devices: Vec<String>,
+}
 
 pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
-    let mut session = store::load(base_url)?;
-    match Dirs::from_env().and_then(|dirs| identity::load(&dirs.identity())) {
-        Ok(found) => session.status.remembered = found.as_ref().map(remembered),
+    let mut session = store::load_session(&Dirs::state_dir()?.join("session.json"), base_url)?;
+    match Dirs::from_env().and_then(|dirs| store::load_identity(&dirs.identity())) {
+        Ok(found) => {
+            session.status.remembered = found.map(|identity| Remembered {
+                username: identity.username,
+                method: identity.method.as_str().to_owned(),
+                second_factor: identity.second_factor.map(|f| f.as_str().to_owned()),
+                password_backend: identity.password_backend.unwrap_or_else(|| "none".into()),
+            });
+        }
         Err(error) => session.status.remembered_error = Some(error.message),
     }
     Ok(session)
-}
-
-fn remembered(identity: &Identity) -> Remembered {
-    Remembered {
-        username: identity.username.clone(),
-        method: identity.method.clone(),
-        second_factor: identity.second_factor.clone(),
-        password_backend: identity
-            .password_backend
-            .clone()
-            .unwrap_or_else(|| "none".into()),
-    }
 }
 
 /// Flags of `klms auth login`, already parsed.
@@ -68,7 +120,7 @@ struct Env<'a> {
     klms: &'a Url,
     sso: &'a Url,
     timeout: u64,
-    provider: &'a dyn Provider,
+    secrets: &'a Secrets,
     /// Standard input is a terminal, so prompts can be answered.
     interactive: bool,
     /// Stop after sending a second-factor code instead of prompting for it.
@@ -85,14 +137,14 @@ pub fn login(
     json: bool,
 ) -> Result<CommandResult, AppError> {
     let dirs = Dirs::from_env()?;
-    let provider = SystemProvider::new(dirs.credentials());
+    let secrets = Secrets::new(dirs.credentials());
     let interactive = std::io::stdin().is_terminal();
     let env = Env {
         dirs: &dirs,
         klms: base_url,
         sso: sso_url,
         timeout,
-        provider: &provider,
+        secrets: &secrets,
         interactive,
         defer_code: !interactive || json,
         json,
@@ -103,22 +155,23 @@ pub fn login(
 fn login_with(
     env: &Env<'_>,
     options: &LoginOptions,
-    terminal: impl AuthPrompt,
+    mut terminal: impl AuthPrompt,
 ) -> Result<CommandResult, AppError> {
     if let Some(code) = &options.code {
         return resume_login(env, code);
     }
-    let remembered = identity::load(&env.dirs.identity())?;
+    let remembered = store::load_identity(&env.dirs.identity())?;
     let method = options
         .method
-        .or_else(|| remembered.as_ref().map(Identity::method))
+        .or(remembered.as_ref().map(|found| found.method))
         .unwrap_or(LoginMethod::Easy);
-    if options.factor.is_some() && method != LoginMethod::Password {
+    let password_login = method == LoginMethod::Password;
+    if options.factor.is_some() && !password_login {
         return Err(AppError::usage(
             "--second-factor applies only to password login",
         ));
     }
-    if options.remember_password && method != LoginMethod::Password {
+    if options.remember_password && !password_login {
         return Err(AppError::usage(
             "--remember-password applies only to password login (Easy Login has no password)",
         ));
@@ -128,16 +181,16 @@ fn login_with(
             "--remember-password needs a terminal to read the password; run it once from an interactive shell",
         ));
     }
-    if method == LoginMethod::Easy && !env.interactive {
+    if !password_login && !env.interactive {
         return Err(AppError::auth(
             "Easy Login needs you to approve a request in the KAIST app, so it cannot run without a terminal",
             "Use `klms auth login --method password --second-factor email`; after one interactive `klms auth login --method password --remember-password`, that works non-interactively in two steps (the first prints CODE_REQUIRED, then `klms auth login --code CODE`).",
         ));
     }
-    let factor = (method == LoginMethod::Password).then(|| {
+    let factor = password_login.then(|| {
         options
             .factor
-            .or_else(|| remembered.as_ref().and_then(Identity::factor))
+            .or(remembered.as_ref().and_then(|found| found.second_factor))
             .unwrap_or(SecondFactor::Email)
     });
     let username = options
@@ -145,35 +198,29 @@ fn login_with(
         .clone()
         .or_else(|| remembered.as_ref().map(|found| found.username.clone()));
     if let Some(username) = &username {
-        identity::validate_username(username)?;
+        store::validate_username(username)?;
     }
     if username.is_none() && !env.interactive {
         return Err(AppError::usage(
             "no KAIST ID is remembered; pass `--user ID` (an interactive login also remembers it)",
         ));
     }
-    let same_account = match (&username, &remembered) {
-        (Some(username), Some(found)) => *username == found.username,
-        _ => false,
-    };
 
     // Refuse before any network traffic when there is nowhere to keep a password.
-    let new_backend = if options.remember_password {
-        Some(env.provider.choose(options.insecure_storage)?)
-    } else {
-        None
-    };
+    let new_backend = options
+        .remember_password
+        .then(|| env.secrets.choose(options.insecure_storage))
+        .transpose()?;
     let mut warnings = Vec::new();
-    let stored_password = if method == LoginMethod::Password && !options.remember_password {
-        stored_password(
-            env,
-            remembered.as_ref().filter(|_| same_account),
-            &mut warnings,
-        )?
+    let stored = if password_login && !options.remember_password {
+        let same_account = remembered
+            .as_ref()
+            .filter(|found| Some(&found.username) == username.as_ref());
+        stored_password(env, same_account, &mut warnings)?
     } else {
         None
     };
-    if method == LoginMethod::Password && !env.interactive && stored_password.is_none() {
+    if password_login && !env.interactive && stored.is_none() {
         let who = username.as_deref().unwrap_or("ID");
         return Err(AppError::auth(
             format!("no stored password for {who}, and there is no terminal to ask for one"),
@@ -184,58 +231,40 @@ fn login_with(
         eprintln!("Signing in as {username} ({})", method.as_str());
     }
 
-    let previous_devices = store::load_at(&env.dirs.session(), env.klms)
+    let previous_devices = store::load_session(&env.dirs.session(), env.klms)
         .map(|session| session.devices)
         .unwrap_or_default();
-    let mut prompt = KnownAnswers::new(terminal, username.clone(), stored_password);
-    let otp_mode = if env.defer_code {
-        OtpMode::Defer
-    } else {
-        OtpMode::Prompt
-    };
-    let outcome = flow::begin(
-        &Attempt {
+    let begun = flow::begin(
+        Attempt {
             klms: env.klms,
             sso: env.sso,
             timeout: env.timeout,
             method,
             factor,
             previous_devices: &previous_devices,
-            otp_mode,
+            defer_code: env.defer_code,
+            username,
+            password: stored,
         },
-        &mut prompt,
+        &mut terminal,
     )?;
-    let used_name = prompt
-        .identifier_used
-        .clone()
-        .ok_or_else(|| AppError::internal("login finished without an identifier"))?;
-    let remember = |warnings: &mut Vec<String>| {
-        remember_login(
-            env,
-            remembered.as_ref(),
-            &used_name,
-            method,
-            factor,
-            new_backend.as_deref().zip(prompt.password_used.as_ref()),
-            warnings,
-        )
-    };
-    match outcome {
-        Outcome::Complete(completed) => {
-            let backend = remember(&mut warnings);
-            let mut result = finish_login(env, completed, &used_name, method, factor, backend)?;
-            result.warnings.extend(warnings);
-            Ok(result)
-        }
+    // KAIST accepted the credentials (even if it still wants a code), so it
+    // is safe to remember them now.
+    let identity = remember_login(
+        env,
+        remembered.as_ref(),
+        Identity::new(&begun.username, method, factor),
+        new_backend.as_ref().zip(begun.password.as_ref()),
+        &mut warnings,
+    );
+    match begun.outcome {
+        Outcome::Complete(completed) => finish_login(env, completed, &identity, warnings),
         Outcome::CodeRequired(pending) => {
-            // KAIST accepted the password, so it is safe to remember it now.
-            remember(&mut warnings);
-            pending::save(&env.dirs.pending(), &pending)?;
-            let mut error = AppError::code_required(&pending.second_factor, pending.expires_at);
-            if !warnings.is_empty() {
-                if let Some(details) = error.details.as_mut() {
-                    details["warnings"] = serde_json::json!(warnings);
-                }
+            store::save_json(&env.dirs.pending(), &pending, "pending login")?;
+            let mut error =
+                AppError::code_required(pending.second_factor.as_str(), pending.expires_at);
+            if let (false, Some(details)) = (warnings.is_empty(), error.details.as_mut()) {
+                details["warnings"] = json!(warnings);
             }
             Err(error)
         }
@@ -248,18 +277,16 @@ fn stored_password(
     remembered: Option<&Identity>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Zeroizing<String>>, AppError> {
-    let Some(found) = remembered else {
-        return Ok(None);
-    };
-    let Some(kind) = &found.password_backend else {
+    let Some((found, kind)) =
+        remembered.and_then(|found| Some((found, found.password_backend.as_ref()?)))
+    else {
         return Ok(None);
     };
     match env
-        .provider
+        .secrets
         .open(kind)
         .and_then(|backend| backend.lookup(&found.username))
     {
-        Ok(password) => Ok(password),
         Err(error) if env.interactive => {
             warnings.push(format!(
                 "could not read the stored password ({}); asking for it instead",
@@ -267,52 +294,50 @@ fn stored_password(
             ));
             Ok(None)
         }
-        Err(error) => Err(error),
+        other => other,
     }
 }
 
 /// Persist `login.json` (and the password, when asked) after KAIST accepted
-/// the credentials. Returns the backend now holding the password. Failures
-/// are warnings: the sign-in itself already worked.
+/// the credentials; returns what was saved. Failures are warnings: the
+/// sign-in itself already worked.
 fn remember_login(
     env: &Env<'_>,
     previous: Option<&Identity>,
-    username: &str,
-    method: LoginMethod,
-    factor: Option<SecondFactor>,
-    new_password: Option<(&dyn SecretStore, &Zeroizing<String>)>,
+    mut identity: Identity,
+    new_password: Option<(&Backend, &Zeroizing<String>)>,
     warnings: &mut Vec<String>,
-) -> Option<String> {
-    let same_account = previous.is_some_and(|found| found.username == username);
-    let mut identity = Identity::new(
-        username,
-        method,
-        factor.or_else(|| previous.filter(|_| same_account).and_then(Identity::factor)),
-    );
-    if same_account {
-        identity.password_backend = previous.and_then(|found| found.password_backend.clone());
-    }
-    if let Some(old) = previous.filter(|found| found.username != username) {
-        // A different account: its password must not linger.
-        if let Some(kind) = &old.password_backend {
-            if let Err(error) = env
-                .provider
-                .open(kind)
-                .and_then(|backend| backend.clear(&old.username))
-            {
-                warnings.push(format!(
-                    "could not remove the stored password of {}: {}",
-                    old.username, error.message
-                ));
-            }
+) -> Identity {
+    let username = identity.username.clone();
+    let same = previous.filter(|found| found.username == username);
+    identity.second_factor = identity
+        .second_factor
+        .or(same.and_then(|found| found.second_factor));
+    identity.password_backend = same.and_then(|found| found.password_backend.clone());
+    // A different account: its password must not linger.
+    if let Some((old, kind)) = previous
+        .filter(|found| found.username != username)
+        .and_then(|old| Some((old, old.password_backend.as_ref()?)))
+    {
+        let cleared = env
+            .secrets
+            .open(kind)
+            .and_then(|backend| backend.clear(&old.username));
+        if let Err(error) = cleared {
+            warnings.push(format!(
+                "could not remove the stored password of {}: {}",
+                old.username, error.message
+            ));
         }
     }
     if let Some((backend, password)) = new_password {
-        match backend.store(username, password) {
+        match backend.store(&username, password) {
             Ok(()) => {
-                let previous_kind = identity.password_backend.clone();
-                if let Some(kind) = previous_kind.filter(|kind| kind != backend.kind()) {
-                    let _ = env.provider.open(&kind).and_then(|old| old.clear(username));
+                let stale = identity
+                    .password_backend
+                    .take_if(|kind| kind.as_str() != backend.kind());
+                if let Some(kind) = stale {
+                    let _ = env.secrets.open(&kind).and_then(|old| old.clear(&username));
                 }
                 identity.password_backend = Some(backend.kind().to_owned());
             }
@@ -322,141 +347,116 @@ fn remember_login(
             )),
         }
     }
-    if let Err(error) = identity::save(&env.dirs.identity(), &identity) {
+    if let Err(error) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
         warnings.push(format!("could not remember the login: {}", error.message));
     }
-    identity.password_backend
+    identity
 }
 
 fn finish_login(
     env: &Env<'_>,
     completed: flow::CompletedLogin,
-    username: &str,
-    method: LoginMethod,
-    factor: Option<SecondFactor>,
-    password_backend: Option<String>,
+    identity: &Identity,
+    warnings: Vec<String>,
 ) -> Result<CommandResult, AppError> {
-    let cookie_count = completed.cookies.len();
-    let device_count = completed.devices.len();
+    let (cookie_count, device_count) = (completed.cookies.len(), completed.devices.len());
     let session_path = env.dirs.session();
-    store::save_at(
+    store::save_session(
         &session_path,
         env.klms,
         completed.cookies,
         completed.devices,
     )?;
-    let _ = pending::remove(&env.dirs.pending());
-    let method_name = method.as_str();
-    let result = LoginResult {
-        method: method_name,
-        second_factor: factor.map(SecondFactor::as_str),
-        user: username.to_owned(),
-        session_path: session_path.display().to_string(),
-        cookie_count,
-        device_count,
-        password_backend,
-    };
-    output::result(
-        "auth.login",
-        &result,
-        format!(
-            "Signed in to KLMS with {method_name} login.\nSession: {}",
-            session_path.display()
-        ),
-    )
+    let _ = store::remove_file(&env.dirs.pending(), "pending login");
+    let method = identity.method.as_str();
+    let human = format!(
+        "Signed in to KLMS with {method} login.\nSession: {}",
+        session_path.display()
+    );
+    let data = json!({
+        "method": method,
+        "second_factor": identity.second_factor.filter(|_| identity.method == LoginMethod::Password).map(SecondFactor::as_str),
+        "user": identity.username,
+        "session_path": session_path.display().to_string(),
+        "cookie_count": cookie_count,
+        "device_count": device_count,
+        "password_backend": identity.password_backend,
+    });
+    let mut result = output::result("auth.login", &data, human)?;
+    result.warnings = warnings;
+    Ok(result)
 }
 
 fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
     flow::check_code_format(code)?;
     let pending_path = env.dirs.pending();
-    let pending = pending::load(&pending_path, env.klms, epoch_now() as u64)?;
+    let pending = store::load_pending(&pending_path, env.klms, epoch_now() as u64)?;
     let completed = flow::resume(env.klms, env.sso, env.timeout, &pending, code);
     // The challenge is single-use whether or not the code was right.
-    let _ = pending::remove(&pending_path);
+    let _ = store::remove_file(&pending_path, "pending login");
     let completed = completed?;
-    let factor = SecondFactor::parse(&pending.second_factor);
-    let previous = identity::load(&env.dirs.identity()).ok().flatten();
+    let previous = store::load_identity(&env.dirs.identity()).ok().flatten();
     let mut warnings = Vec::new();
-    let backend = remember_login(
-        env,
-        previous.as_ref(),
+    let login = Identity::new(
         &pending.username,
         LoginMethod::Password,
-        factor,
-        None,
-        &mut warnings,
+        Some(pending.second_factor),
     );
-    let mut result = finish_login(
-        env,
-        completed,
-        &pending.username,
-        LoginMethod::Password,
-        factor,
-        backend,
-    )?;
-    result.warnings.extend(warnings);
-    Ok(result)
+    let identity = remember_login(env, previous.as_ref(), login, None, &mut warnings);
+    finish_login(env, completed, &identity, warnings)
 }
 
 pub fn logout() -> Result<CommandResult, AppError> {
-    let (path, removed) = store::remove()?;
-    if let Ok(dirs) = Dirs::from_env() {
-        let _ = pending::remove(&dirs.pending());
-    }
-    let result = LogoutResult {
-        session_path: path.display().to_string(),
-        removed,
-    };
+    let state = Dirs::state_dir()?;
+    let path = state.join("session.json");
+    let removed = store::remove_file(&path, "KLMS session")?;
+    let _ = store::remove_file(&state.join("pending-login.json"), "pending login");
     let human = if removed {
         format!("Removed local KLMS session: {}", path.display())
     } else {
         format!("No local KLMS session was present at {}", path.display())
     };
-    output::result("auth.logout", &result, human)
+    let data = json!({"session_path": path.display().to_string(), "removed": removed});
+    output::result("auth.logout", &data, human)
 }
 
 pub fn forget() -> Result<CommandResult, AppError> {
     let dirs = Dirs::from_env()?;
-    let provider = SystemProvider::new(dirs.credentials());
-    forget_with(&dirs, &provider)
+    forget_with(&dirs, &Secrets::new(dirs.credentials()))
 }
 
-fn forget_with(dirs: &Dirs, provider: &dyn Provider) -> Result<CommandResult, AppError> {
+fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError> {
     // A corrupt login.json must still be removable.
-    let found = identity::load(&dirs.identity()).ok().flatten();
-    let mut password_removed = false;
-    let mut backend_name = None;
-    if let Some(found) = &found {
-        if let Some(kind) = &found.password_backend {
-            provider.open(kind)?.clear(&found.username)?;
-            password_removed = true;
-            backend_name = Some(kind.clone());
-        }
+    let found = store::load_identity(&dirs.identity()).ok().flatten();
+    let mut backend = None;
+    if let Some((found, kind)) = found
+        .as_ref()
+        .and_then(|found| Some((found, found.password_backend.clone()?)))
+    {
+        secrets.open(&kind)?.clear(&found.username)?;
+        backend = Some(kind);
     }
     // The plaintext file only ever holds klms passwords; drop it entirely.
-    if fsutil::remove_file(&dirs.credentials(), "credentials file")? {
-        password_removed = true;
-        backend_name.get_or_insert_with(|| secret::PLAINTEXT_FILE.to_owned());
+    if store::remove_file(&dirs.credentials(), "credentials file")? {
+        backend.get_or_insert_with(|| secret::PLAINTEXT_FILE.to_owned());
     }
-    let login_removed = identity::remove(&dirs.identity())?;
-    let pending_removed = pending::remove(&dirs.pending())?;
-    let result = ForgetResult {
-        login_removed,
-        password_removed,
-        password_backend: backend_name,
-        pending_removed,
-    };
-    let human = if login_removed || password_removed || pending_removed {
-        let mut parts = Vec::new();
-        if login_removed {
-            parts.push("remembered login");
-        }
-        if password_removed {
-            parts.push("stored password");
-        }
-        if pending_removed {
-            parts.push("pending verification");
-        }
+    let removed = [
+        (
+            store::remove_file(&dirs.identity(), "remembered login")?,
+            "remembered login",
+        ),
+        (backend.is_some(), "stored password"),
+        (
+            store::remove_file(&dirs.pending(), "pending login")?,
+            "pending verification",
+        ),
+    ];
+    let human = if removed.iter().any(|(gone, _)| *gone) {
+        let parts: Vec<_> = removed
+            .iter()
+            .filter(|(gone, _)| *gone)
+            .map(|(_, name)| *name)
+            .collect();
         format!(
             "Forgot {}. The saved KLMS session is unchanged; `klms auth logout` removes it.",
             parts.join(", ")
@@ -464,7 +464,13 @@ fn forget_with(dirs: &Dirs, provider: &dyn Provider) -> Result<CommandResult, Ap
     } else {
         "Nothing remembered; nothing to forget.".to_owned()
     };
-    output::result("auth.forget", &result, human)
+    let data = json!({
+        "login_removed": removed[0].0,
+        "password_removed": removed[1].0,
+        "password_backend": backend,
+        "pending_removed": removed[2].0,
+    });
+    output::result("auth.forget", &data, human)
 }
 
 #[cfg(test)]

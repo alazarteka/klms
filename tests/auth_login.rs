@@ -4,6 +4,7 @@
 
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -14,59 +15,56 @@ use tempfile::TempDir;
 mod fixture;
 use fixture::server::{Response, Server};
 
-struct Home {
-    root: TempDir,
-}
+struct Home(TempDir);
 
 impl Home {
     fn new() -> Self {
-        let root = TempDir::new().unwrap();
-        fs::create_dir_all(root.path().join("bin")).unwrap();
-        Self { root }
+        Self(TempDir::new().unwrap())
     }
 
     fn config(&self) -> PathBuf {
-        self.root.path().join("config/klms")
+        self.0.path().join("config/klms")
     }
 
     fn state(&self) -> PathBuf {
-        self.root.path().join("state/klms")
+        self.0.path().join("state/klms")
     }
 
     /// Runs klms with no terminal on stdin and no helper programs on PATH.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_klms"))
-            .env("HOME", self.root.path())
-            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
-            .env("XDG_STATE_HOME", self.root.path().join("state"))
-            .env("PATH", self.root.path().join("bin"))
+            .env("HOME", self.0.path())
+            .env("XDG_CONFIG_HOME", self.0.path().join("config"))
+            .env("XDG_STATE_HOME", self.0.path().join("state"))
+            .env("PATH", self.0.path().join("bin"))
             .stdin(Stdio::null())
             .args(args)
             .output()
             .unwrap()
     }
 
-    fn seed_login(&self, backend: Option<&str>) {
-        fs::create_dir_all(self.config()).unwrap();
-        let backend = backend
-            .map(|name| format!(r#","password_backend":"{name}""#))
-            .unwrap_or_default();
-        fs::write(
-            self.config().join("login.json"),
-            format!(
-                r#"{{"version":1,"username":"student","method":"password","second_factor":"email"{backend}}}"#
-            ),
-        )
-        .unwrap();
+    /// `klms --json --base-url URL auth login EXTRA...`
+    fn login(&self, url: &str, extra: &[&str]) -> Output {
+        let head = ["--json", "--base-url", url, "auth", "login"];
+        self.run(&[&head[..], extra].concat())
     }
 
-    fn seed_password(&self) {
-        self.seed_login(Some("plaintext-file"));
-        fs::write(
-            self.config().join("credentials.json"),
-            r#"{"version":1,"passwords":{"student":"s3cret"}}"#,
-        )
-        .unwrap();
+    /// A remembered login, with its password in the credentials file if asked.
+    fn seed(&self, password: bool) {
+        fs::create_dir_all(self.config()).unwrap();
+        let backend = if password {
+            r#","password_backend":"plaintext-file""#
+        } else {
+            ""
+        };
+        let login = format!(
+            r#"{{"version":1,"username":"student","method":"password","second_factor":"email"{backend}}}"#
+        );
+        fs::write(self.config().join("login.json"), login).unwrap();
+        if password {
+            let credentials = r#"{"version":1,"passwords":{"student":"s3cret"}}"#;
+            fs::write(self.config().join("credentials.json"), credentials).unwrap();
+        }
     }
 }
 
@@ -74,8 +72,12 @@ fn json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).unwrap()
 }
 
+fn mode(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 #[test]
-fn login_help_documents_every_new_flag_specifically() {
+fn help_documents_the_login_flags_and_the_parser_rejects_bad_combinations() {
     let home = Home::new();
     let help = String::from_utf8(home.run(&["auth", "login", "--help"]).stdout).unwrap();
     for needle in [
@@ -91,32 +93,17 @@ fn login_help_documents_every_new_flag_specifically() {
     ] {
         assert!(help.contains(needle), "missing {needle:?} in:\n{help}");
     }
-    assert!(!help.contains("--password"));
-    assert!(!help.contains("--otp"));
+    assert!(!help.contains("--password") && !help.contains("--otp"));
     let forget = String::from_utf8(home.run(&["auth", "forget", "--help"]).stdout).unwrap();
-    assert!(forget.contains("plaintext credentials file"));
-    assert!(forget.contains("keychain"));
-}
+    assert!(forget.contains("plaintext credentials file") && forget.contains("keychain"));
 
-#[test]
-fn flag_combinations_are_rejected_by_the_parser() {
-    let home = Home::new();
     for args in [
-        &["--json", "auth", "login", "--insecure-storage"][..],
-        &[
-            "--json", "auth", "login", "--code", "123456", "--method", "password",
-        ],
-        &["--json", "auth", "login", "--code", "123456", "--user", "x"],
-        &[
-            "--json",
-            "auth",
-            "login",
-            "--code",
-            "123456",
-            "--remember-password",
-        ],
+        &["--insecure-storage"][..],
+        &["--code", "123456", "--method", "password"],
+        &["--code", "123456", "--user", "x"],
+        &["--code", "123456", "--remember-password"],
     ] {
-        let output = home.run(args);
+        let output = home.run(&[&["--json", "auth", "login"][..], args].concat());
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert_eq!(json(&output.stderr)["error"]["code"], "USAGE");
     }
@@ -128,18 +115,17 @@ fn status_reports_remembered_login_and_backend_without_secrets() {
     let none = home.run(&["--json", "auth", "status"]);
     assert!(json(&none.stdout)["data"]["remembered"].is_null());
 
-    home.seed_password();
+    home.seed(true);
     let output = home.run(&["--json", "auth", "status"]);
     assert!(output.status.success());
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(!text.contains("s3cret"));
-    let data = &json(&output.stdout)["data"]["remembered"];
-    assert_eq!(data["username"], "student");
-    assert_eq!(data["method"], "password");
-    assert_eq!(data["second_factor"], "email");
-    assert_eq!(data["password_backend"], "plaintext-file");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("s3cret"));
+    let remembered = &json(&output.stdout)["data"]["remembered"];
+    assert_eq!(remembered["username"], "student");
+    assert_eq!(remembered["method"], "password");
+    assert_eq!(remembered["second_factor"], "email");
+    assert_eq!(remembered["password_backend"], "plaintext-file");
 
-    home.seed_login(None);
+    home.seed(false);
     let bare = json(&home.run(&["--json", "auth", "status"]).stdout);
     assert_eq!(bare["data"]["remembered"]["password_backend"], "none");
     let human = String::from_utf8(home.run(&["auth", "status"]).stdout).unwrap();
@@ -150,25 +136,25 @@ fn status_reports_remembered_login_and_backend_without_secrets() {
 #[test]
 fn logout_keeps_the_remembered_login_and_forget_removes_it() {
     let home = Home::new();
-    home.seed_password();
-    fixture::seed_session(&home.root.path().join("state"), "cookie");
+    home.seed(true);
+    let state_root = home.0.path().join("state");
+    fixture::seed_session(&state_root, "cookie");
     fs::write(home.state().join("pending-login.json"), "{}").unwrap();
 
-    let logout = home.run(&["--json", "auth", "logout"]);
-    assert!(logout.status.success());
+    assert!(home.run(&["--json", "auth", "logout"]).status.success());
     assert!(!home.state().join("session.json").exists());
     assert!(!home.state().join("pending-login.json").exists());
     assert!(home.config().join("login.json").is_file());
     assert!(home.config().join("credentials.json").is_file());
 
-    fixture::seed_session(&home.root.path().join("state"), "cookie");
+    fixture::seed_session(&state_root, "cookie");
     let forget = home.run(&["--json", "auth", "forget"]);
     assert!(forget.status.success(), "{:?}", forget.stderr);
-    let data = &json(&forget.stdout)["data"];
-    assert_eq!(forget_command(&forget.stdout), "auth.forget");
-    assert_eq!(data["login_removed"], true);
-    assert_eq!(data["password_removed"], true);
-    assert_eq!(data["password_backend"], "plaintext-file");
+    let value = json(&forget.stdout);
+    assert_eq!(value["command"], "auth.forget");
+    assert_eq!(value["data"]["login_removed"], true);
+    assert_eq!(value["data"]["password_removed"], true);
+    assert_eq!(value["data"]["password_backend"], "plaintext-file");
     assert!(!home.config().join("login.json").exists());
     assert!(!home.config().join("credentials.json").exists());
     assert!(
@@ -176,66 +162,59 @@ fn logout_keeps_the_remembered_login_and_forget_removes_it() {
         "session untouched"
     );
 
-    let again = home.run(&["--json", "auth", "forget"]);
-    assert!(again.status.success());
-    let data = &json(&again.stdout)["data"];
-    assert_eq!(data["login_removed"], false);
-    assert_eq!(data["password_removed"], false);
-}
-
-fn forget_command(stdout: &[u8]) -> String {
-    json(stdout)["command"].as_str().unwrap().to_owned()
+    let again = json(&home.run(&["--json", "auth", "forget"]).stdout);
+    assert_eq!(again["data"]["login_removed"], false);
+    assert_eq!(again["data"]["password_removed"], false);
 }
 
 #[test]
 fn non_interactive_login_fails_clearly_before_touching_the_network() {
     let home = Home::new();
-    let base = [
-        "--json",
-        "--base-url",
-        "http://127.0.0.1:9",
-        "auth",
-        "login",
-    ];
-    let run = |extra: &[&str]| home.run(&[&base[..], extra].concat());
-
-    let easy = run(&["--user", "student"]);
-    assert_eq!(easy.status.code(), Some(10));
-    let error = &json(&easy.stderr)["error"];
-    assert!(error["message"].as_str().unwrap().contains("approve"));
-    assert!(
-        error["hint"]
-            .as_str()
-            .unwrap()
-            .contains("--method password")
-    );
-
-    let nopass = run(&["--user", "student", "--method", "password"]);
-    assert_eq!(nopass.status.code(), Some(10));
-    assert!(
-        json(&nopass.stderr)["error"]["hint"]
-            .as_str()
-            .unwrap()
-            .contains("--remember-password")
-    );
-
-    let nobody = run(&["--method", "password"]);
-    assert_eq!(nobody.status.code(), Some(2));
-
-    let remember = run(&[
-        "--method",
-        "password",
-        "--remember-password",
-        "--insecure-storage",
-    ]);
-    assert_eq!(remember.status.code(), Some(2));
+    // (extra args, exit code, message part, hint part)
+    for (extra, exit, message, hint) in [
+        (
+            &["--user", "student"][..],
+            10,
+            "approve",
+            "--method password",
+        ),
+        (
+            &["--user", "student", "--method", "password"],
+            10,
+            "no stored password",
+            "--remember-password",
+        ),
+        (&["--method", "password"], 2, "--user", ""),
+        (
+            &[
+                "--method",
+                "password",
+                "--remember-password",
+                "--insecure-storage",
+            ],
+            2,
+            "terminal",
+            "",
+        ),
+    ] {
+        let output = home.login("http://127.0.0.1:9", extra);
+        assert_eq!(output.status.code(), Some(exit), "{extra:?}");
+        let error = &json(&output.stderr)["error"];
+        assert!(
+            error["message"].as_str().unwrap().contains(message),
+            "{extra:?}"
+        );
+        assert!(
+            error["hint"].as_str().unwrap_or_default().contains(hint),
+            "{extra:?}"
+        );
+    }
     assert!(!home.config().join("credentials.json").exists());
 }
 
 fn sso_router(target: &str) -> Response {
-    let path = target.split('?').next().unwrap();
     let json = |body: &str| Response::bytes("application/json", body.as_bytes().to_vec());
-    match path {
+    match target.split('?').next().unwrap() {
         "/auth/kaist/user/login/view" => {
             Response::html("login").header("Set-Cookie", "sso-session=one; Path=/")
         }
@@ -252,56 +231,34 @@ fn sso_router(target: &str) -> Response {
     }
 }
 
-fn mode(path: &Path) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        0o600
-    }
-}
-
 #[test]
 fn two_step_password_login_end_to_end() {
     let home = Home::new();
-    home.seed_password();
+    home.seed(true);
     let server = Server::new(|request| sso_router(&request.target));
     let url = server.url();
+    let pending = home.state().join("pending-login.json");
 
-    let first = home.run(&["--json", "--base-url", &url, "auth", "login"]);
-    assert_eq!(
-        first.status.code(),
-        Some(12),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    assert!(first.stdout.is_empty());
+    let first = home.login(&url, &[]);
     let stderr = String::from_utf8_lossy(&first.stderr).into_owned();
-    assert!(!stderr.contains("s3cret"));
+    assert_eq!(first.status.code(), Some(12), "{stderr}");
+    assert!(first.stdout.is_empty() && !stderr.contains("s3cret"));
     let error = &json(&first.stderr)["error"];
     assert_eq!(error["code"], "CODE_REQUIRED");
     assert_eq!(error["retryable"], false);
     assert_eq!(error["details"]["channel"], "email");
     assert_eq!(error["details"]["resume"], "klms auth login --code CODE");
     assert!(error["details"]["expires_at"].as_u64().unwrap() > 1_700_000_000);
-    let pending = home.state().join("pending-login.json");
     assert_eq!(mode(&pending), 0o600);
     assert!(!fs::read_to_string(&pending).unwrap().contains("s3cret"));
     assert!(!home.state().join("session.json").exists());
 
-    let second = home.run(&[
-        "--json",
-        "--base-url",
-        &url,
-        "auth",
-        "login",
-        "--code",
-        "123456",
-    ]);
+    // A malformed code is a usage error and does not consume the pending login.
+    let bad = home.login(&url, &["--code", "12x"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(pending.is_file());
+
+    let second = home.login(&url, &["--code", "123456"]);
     assert!(
         second.status.success(),
         "{}",
@@ -314,7 +271,6 @@ fn two_step_password_login_end_to_end() {
     assert!(!String::from_utf8_lossy(&second.stdout).contains("owned"));
     assert!(!pending.exists());
     assert_eq!(mode(&home.state().join("session.json")), 0o600);
-
     let bodies: Vec<_> = server
         .recorded()
         .into_iter()
@@ -322,54 +278,18 @@ fn two_step_password_login_end_to_end() {
         .map(|seen| seen.body)
         .collect();
     assert_eq!(bodies, ["crtfc_no=123456"]);
-    // Resuming again has nothing to resume.
-    let third = home.run(&[
-        "--json",
-        "--base-url",
-        &url,
-        "auth",
-        "login",
-        "--code",
-        "123456",
-    ]);
-    assert_eq!(third.status.code(), Some(10));
-    assert!(
-        json(&third.stderr)["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("no login is waiting")
-    );
-}
 
-#[test]
-fn resume_rejects_malformed_codes_without_consuming_the_pending_login() {
-    let home = Home::new();
-    home.seed_password();
-    let server = Server::new(|request| sso_router(&request.target));
-    let url = server.url();
-    assert_eq!(
-        home.run(&["--json", "--base-url", &url, "auth", "login"])
-            .status
-            .code(),
-        Some(12)
-    );
-    let bad = home.run(&[
-        "--json",
-        "--base-url",
-        &url,
-        "auth",
-        "login",
-        "--code",
-        "12x",
-    ]);
-    assert_eq!(bad.status.code(), Some(2));
-    assert!(home.state().join("pending-login.json").is_file());
+    // Resuming again has nothing to resume.
+    let third = home.login(&url, &["--code", "123456"]);
+    assert_eq!(third.status.code(), Some(10));
+    let message = &json(&third.stderr)["error"]["message"];
+    assert!(message.as_str().unwrap().contains("no login is waiting"));
 }
 
 #[test]
 fn bare_login_announces_the_remembered_identity_on_stderr() {
     let home = Home::new();
-    home.seed_password();
+    home.seed(true);
     let server = Server::new(|request| sso_router(&request.target));
     let output = home.run(&["--base-url", &server.url(), "auth", "login"]);
     assert_eq!(output.status.code(), Some(12));
