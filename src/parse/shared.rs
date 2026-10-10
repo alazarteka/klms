@@ -5,26 +5,20 @@ use scraper::{ElementRef, Html, Selector};
 
 use crate::{error::AppError, models::LinkItem, reference::valid_id, safe_url};
 
-struct IndexedCell {
-    header: String,
-    value: String,
-    link: Option<String>,
-}
-
-pub(super) struct IndexedRow {
-    cells: Vec<IndexedCell>,
-}
+/// One coursework table row as (normalized header, text, first link href).
+type Cell = (String, String, Option<String>);
+pub(super) struct IndexedRow(Vec<Cell>);
 
 impl IndexedRow {
     // Exact headers win over qualified labels, but neither may be ambiguous.
     // Both accessors resolve the same cell, including when its link is absent.
-    fn cell(&self, header: &str) -> Result<Option<&IndexedCell>, AppError> {
-        let exact = self.cells.iter().any(|cell| cell.header == header);
-        let mut matching = self.cells.iter().filter(|cell| {
+    fn cell(&self, header: &str) -> Result<Option<&Cell>, AppError> {
+        let exact = self.0.iter().any(|cell| cell.0 == header);
+        let mut matching = self.0.iter().filter(|cell| {
             if exact {
-                cell.header == header
+                cell.0 == header
             } else {
-                cell.header.contains(header)
+                cell.0.contains(header)
             }
         });
         let cell = matching.next();
@@ -39,25 +33,35 @@ impl IndexedRow {
     pub(super) fn value(&self, header: &str) -> Result<Option<String>, AppError> {
         Ok(self
             .cell(header)?
-            .map(|cell| cell.value.clone())
+            .map(|cell| cell.1.clone())
             .filter(|value| !value.is_empty() && value != "-"))
     }
 
     pub(super) fn link_for(&self, header: &str, base_url: &Url) -> Result<Option<Url>, AppError> {
         Ok(self
             .cell(header)?
-            .and_then(|cell| cell.link.as_deref())
+            .and_then(|cell| cell.2.as_deref())
             .and_then(|value| base_url.join(value).ok()))
     }
 }
 
-pub(super) fn has_any(document: &Html, selectors: &[&str]) -> Result<bool, AppError> {
-    for css in selectors {
-        if document.select(&selector(css)?).next().is_some() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+/// Built-in selectors are literals; an invalid one is a bug caught by tests.
+pub(super) fn sel(css: &str) -> Selector {
+    Selector::parse(css).expect("valid built-in selector")
+}
+
+pub(super) fn first<'a>(root: ElementRef<'a>, css: &str) -> Option<ElementRef<'a>> {
+    root.select(&sel(css)).next()
+}
+
+pub(super) fn all<'a>(root: ElementRef<'a>, css: &str) -> Vec<ElementRef<'a>> {
+    root.select(&sel(css)).collect()
+}
+
+pub(super) fn has_any(document: &Html, selectors: &[&str]) -> bool {
+    selectors
+        .iter()
+        .any(|css| first(document.root_element(), css).is_some())
 }
 
 pub(super) const NEXT_PAGE_SELECTORS: &[&str] = &[
@@ -66,90 +70,65 @@ pub(super) const NEXT_PAGE_SELECTORS: &[&str] = &[
     "a[data-page-number][aria-label*=Next]",
 ];
 
-pub(super) fn has_next_link(document: &Html) -> Result<bool, AppError> {
-    has_any(document, NEXT_PAGE_SELECTORS)
+pub(super) fn row_cells(row: ElementRef<'_>) -> Vec<String> {
+    all(row, "th, td").into_iter().map(text).collect()
 }
 
-pub(super) fn first_row_cells(
-    table: ElementRef<'_>,
-    rows: &Selector,
-    cells: &Selector,
-) -> Vec<String> {
-    table
-        .select(rows)
-        .next()
-        .map(|row| row.select(cells).map(text).collect())
-        .unwrap_or_default()
-}
-
-pub(super) fn semantic_table<'a>(
-    document: &'a Html,
-    expected: &[&str],
-) -> Result<Option<ElementRef<'a>>, AppError> {
-    let tables = selector("table")?;
-    let rows = selector("tr")?;
-    let cells = selector("th, td")?;
-    Ok(document.select(&tables).find(|table| {
-        let headers: Vec<_> = first_row_cells(*table, &rows, &cells)
-            .iter()
-            .map(|header| header_name(header))
-            .collect();
-        expected
-            .iter()
-            .all(|needle| headers.iter().any(|header| header.contains(needle)))
-    }))
-}
-
-pub(super) fn indexed_rows(table: ElementRef<'_>) -> Result<Vec<IndexedRow>, AppError> {
-    let rows = selector("tr")?;
-    let cells = selector("th, td")?;
-    let links = selector("a[href]")?;
-    let mut table_rows = table.select(&rows);
-    let headers: Vec<_> = table_rows
-        .next()
-        .map(|row| {
-            row.select(&cells)
-                .map(|cell| header_name(&text(cell)))
-                .collect()
+/// First table whose normalized header row satisfies `ok`.
+pub(super) fn find_table(
+    document: &Html,
+    ok: impl Fn(&[String]) -> bool,
+) -> Option<ElementRef<'_>> {
+    all(document.root_element(), "table")
+        .into_iter()
+        .find(|table| {
+            let headers = first(*table, "tr").map(row_cells).unwrap_or_default();
+            ok(&headers.iter().map(|h| header_name(h)).collect::<Vec<_>>())
         })
-        .unwrap_or_default();
-    let mut parsed = Vec::new();
-    for row in table_rows {
-        let row_cells: Vec<_> = row.select(&cells).collect();
-        if row_cells.is_empty() {
-            continue;
-        }
-        let cells = headers
-            .iter()
-            .zip(row_cells)
-            .map(|(header, cell)| IndexedCell {
-                header: header.clone(),
-                value: text(cell),
-                link: cell
-                    .select(&links)
-                    .find_map(|anchor| anchor.value().attr("href"))
-                    .map(str::to_owned),
-            })
-            .collect();
-        parsed.push(IndexedRow { cells });
-    }
-    Ok(parsed)
 }
 
-fn collect_links<'a>(
+pub(super) fn indexed_rows(table: ElementRef<'_>) -> Vec<IndexedRow> {
+    let mut rows = all(table, "tr").into_iter();
+    let headers: Vec<_> = rows
+        .next()
+        .map(|row| row_cells(row).iter().map(|h| header_name(h)).collect())
+        .unwrap_or_default();
+    rows.filter_map(|row| {
+        let cells = all(row, "th, td");
+        (!cells.is_empty()).then(|| {
+            IndexedRow(
+                headers
+                    .iter()
+                    .zip(cells)
+                    .map(|(header, cell)| {
+                        let href = first(cell, "a[href]").and_then(|a| a.value().attr("href"));
+                        (header.clone(), text(cell), href.map(str::to_owned))
+                    })
+                    .collect(),
+            )
+        })
+    })
+    .collect()
+}
+
+pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
+    anchor
+        .value()
+        .attr("href")
+        .and_then(|href| base_url.join(href).ok())
+}
+
+/// Titled, de-duplicated links from `anchors`, stopping at `limit`.
+pub(super) fn link_items<'a>(
     anchors: impl Iterator<Item = ElementRef<'a>>,
     base_url: &Url,
-    limit: Option<usize>,
+    limit: usize,
 ) -> Vec<LinkItem> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for anchor in anchors {
         let title = text(anchor);
-        let Some(url) = anchor
-            .value()
-            .attr("href")
-            .and_then(|href| base_url.join(href).ok())
-        else {
+        let Some(url) = href_url(anchor, base_url) else {
             continue;
         };
         if title.is_empty() || !seen.insert(url.to_string()) {
@@ -159,68 +138,43 @@ fn collect_links<'a>(
             title,
             url: safe_url::display(&url),
         });
-        if Some(rows.len()) == limit {
+        if rows.len() == limit {
             break;
         }
     }
     rows
 }
 
-pub(super) fn link_items(
-    document: &Html,
-    base_url: &Url,
-    css: &str,
-) -> Result<Vec<LinkItem>, AppError> {
-    let selector = selector(css)?;
-    Ok(collect_links(document.select(&selector), base_url, None))
-}
-
-pub(super) fn link_items_in(
-    root: ElementRef<'_>,
-    base_url: &Url,
-    limit: usize,
-) -> Result<Vec<LinkItem>, AppError> {
-    let anchors = selector("a[href]")?;
-    Ok(collect_links(root.select(&anchors), base_url, Some(limit)))
-}
-
-pub(super) fn first_text(document: &Html, css: &str) -> Result<Option<String>, AppError> {
-    Ok(document
-        .select(&selector(css)?)
+pub(super) fn first_text(document: &Html, css: &str) -> Option<String> {
+    document
+        .select(&sel(css))
         .map(text)
-        .find(|value| !value.is_empty()))
+        .find(|value| !value.is_empty())
 }
 
 pub(super) fn selected_value(document: &Html, css: &str) -> Option<String> {
-    let select = Selector::parse(css).ok()?;
-    let selected = Selector::parse("option[selected]").ok()?;
-    let fallback = Selector::parse("option").ok()?;
-    let node = document.select(&select).next()?;
-    node.select(&selected)
+    let node = document.select(&sel(css)).next()?;
+    node.select(&sel("option[selected]"))
         .next()
-        .or_else(|| node.select(&fallback).next())
+        .or_else(|| node.select(&sel("option")).next())
         .map(text)
 }
 
-pub(super) fn selector(value: &str) -> Result<Selector, AppError> {
-    Selector::parse(value)
-        .map_err(|_| AppError::internal(format!("invalid built-in selector: {value}")))
+fn norm<'a>(parts: impl Iterator<Item = &'a str>) -> String {
+    parts
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(super) fn text(element: ElementRef<'_>) -> String {
-    element
-        .text()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    norm(element.text())
 }
 
 /// Preserve qualified English labels and ambiguity checks while recognizing
 /// the Korean labels used by KLMS. Unknown locales still fail visibly.
 pub(super) fn header_name(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = norm(std::iter::once(value));
     let compact: String = normalized.chars().filter(|c| !c.is_whitespace()).collect();
     let canonical = match compact.as_str() {
         "주차" | "주차(토픽)" => "week",
@@ -243,44 +197,40 @@ pub(super) fn header_name(value: &str) -> String {
 }
 
 pub(super) fn visible_text(element: ElementRef<'_>) -> String {
-    element
-        .descendants()
-        .filter_map(|node| {
-            let value = node.value().as_text()?;
-            let hidden = node
-                .ancestors()
-                .filter_map(ElementRef::wrap)
-                .any(|ancestor| {
-                    matches!(
-                        ancestor.value().name(),
-                        "script" | "style" | "noscript" | "template"
-                    ) || ancestor.value().attr("hidden").is_some()
-                        || ancestor.value().attr("aria-hidden") == Some("true")
-                });
-            (!hidden).then_some(value.as_ref())
-        })
-        .flat_map(str::split_whitespace)
-        .collect::<Vec<_>>()
-        .join(" ")
+    norm(element.descendants().filter_map(|node| {
+        let value = node.value().as_text()?;
+        let hidden = node
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .any(|ancestor| {
+                matches!(
+                    ancestor.value().name(),
+                    "script" | "style" | "noscript" | "template"
+                ) || ancestor.value().attr("hidden").is_some()
+                    || ancestor.value().attr("aria-hidden") == Some("true")
+            });
+        (!hidden).then_some(value.as_ref())
+    }))
 }
 
 pub(super) fn week_number(value: &str) -> Option<u32> {
     let lower = value.to_ascii_lowercase();
+    let not_digit = |c: char| !c.is_ascii_digit();
     if let Some(position) = lower.find("week") {
         return lower[position + 4..]
-            .trim_start_matches(|c: char| !c.is_ascii_digit())
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
+            .split(not_digit)
+            .find(|s| !s.is_empty())?
             .parse()
             .ok();
     }
-    let prefix = lower.split_once("주차")?.0.trim_end();
-    let number: String = prefix
-        .chars()
-        .rev()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    number.chars().rev().collect::<String>().parse().ok()
+    lower
+        .split_once("주차")?
+        .0
+        .trim_end()
+        .rsplit(not_digit)
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub(super) fn module_kind(url: &Url) -> Option<String> {
@@ -291,9 +241,9 @@ pub(super) fn module_kind(url: &Url) -> Option<String> {
 }
 
 pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
-    url.query_pairs()
-        .find_map(|(key, value)| names.contains(&key.as_ref()).then(|| value.into_owned()))
-        .filter(|value| valid_id(value))
+    url.query_pairs().find_map(|(key, value)| {
+        (names.contains(&key.as_ref()) && valid_id(&value)).then(|| value.into_owned())
+    })
 }
 
 #[cfg(test)]
@@ -303,57 +253,44 @@ mod tests {
     #[test]
     fn overlapping_headers_keep_values_and_links_in_the_same_column() {
         let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
-        for (headers, cells, expected, link) in [
+        let link = "<td><a href='/course'>Course</a></td>";
+        for (headers, cells, expected) in [
             (
                 "<th>Course name</th><th>Name</th>",
-                "<td><a href='/course'>Course</a></td><td><a href='/assignment'>Work</a></td>",
-                "Work",
-                Some("/assignment"),
+                format!("{link}<td><a href='/assignment'>Work</a></td>"),
+                Ok(Some("/assignment")),
             ),
             (
                 "<th>Assignment name</th><th>Course</th>",
-                "<td>Work</td><td><a href='/course'>Course</a></td>",
-                "Work",
-                None,
+                format!("<td>Work</td>{link}"),
+                Ok(None),
+            ),
+            (
+                "<th>Name</th><th>Name</th>",
+                format!("<td>Work</td>{link}"),
+                Err(()),
+            ),
+            (
+                "<th>Assignment name</th><th>Course name</th>",
+                format!("<td>Work</td>{link}"),
+                Err(()),
             ),
         ] {
             let document = Html::parse_document(&format!(
                 "<table><tr>{headers}</tr><tr>{cells}</tr></table>"
             ));
-            let table = document.select(&selector("table").unwrap()).next().unwrap();
-            let rows = indexed_rows(table).unwrap();
-            assert_eq!(rows[0].value("name").unwrap().as_deref(), Some(expected));
-            assert_eq!(
-                rows[0]
-                    .link_for("name", &base)
-                    .unwrap()
-                    .as_ref()
-                    .map(Url::path),
-                link
-            );
-        }
-    }
-
-    #[test]
-    fn ambiguous_headers_fail_for_both_value_and_link_access() {
-        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
-        for headers in [
-            "<th>Name</th><th>Name</th>",
-            "<th>Assignment name</th><th>Course name</th>",
-        ] {
-            let document = Html::parse_document(&format!(
-                "<table><tr>{headers}</tr><tr><td>Work</td><td><a href='/course'>Course</a></td></tr></table>"
-            ));
-            let table = document.select(&selector("table").unwrap()).next().unwrap();
-            let rows = indexed_rows(table).unwrap();
-            assert_eq!(
-                rows[0].value("name").unwrap_err().code,
-                "UPSTREAM_SHAPE_CHANGED"
-            );
-            assert_eq!(
-                rows[0].link_for("name", &base).unwrap_err().code,
-                "UPSTREAM_SHAPE_CHANGED"
-            );
+            let rows = indexed_rows(first(document.root_element(), "table").unwrap());
+            let (value, found) = (rows[0].value("name"), rows[0].link_for("name", &base));
+            match expected {
+                Ok(path) => {
+                    assert_eq!(value.unwrap().as_deref(), Some("Work"));
+                    assert_eq!(found.unwrap().as_ref().map(Url::path), path);
+                }
+                Err(()) => {
+                    assert_eq!(value.unwrap_err().code, "UPSTREAM_SHAPE_CHANGED");
+                    assert_eq!(found.unwrap_err().code, "UPSTREAM_SHAPE_CHANGED");
+                }
+            }
         }
     }
 }

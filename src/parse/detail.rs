@@ -1,9 +1,8 @@
 use crate::url::Url;
-use scraper::{ElementRef, Html, Selector};
-use std::collections::HashSet;
+use scraper::{ElementRef, Html};
 
 use super::shared::{
-    NEXT_PAGE_SELECTORS, first_text, has_next_link, link_items_in, query_id, selector, visible_text,
+    NEXT_PAGE_SELECTORS, first_text, has_any, link_items, query_id, sel, visible_text,
 };
 use crate::{
     error::AppError,
@@ -13,21 +12,20 @@ use crate::{
 };
 
 pub fn sesskey(html: &str) -> Result<String, AppError> {
-    for marker in ["\"sesskey\":\"", "\"sesskey\": \"", "sesskey="] {
-        if let Some(rest) = html.split(marker).nth(1) {
-            let value: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            if !value.is_empty() {
-                return Ok(value);
-            }
-        }
+    let token = ["\"sesskey\":\"", "\"sesskey\": \"", "sesskey="]
+        .into_iter()
+        .filter_map(|marker| html.split(marker).nth(1))
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        })
+        .find(|value| !value.is_empty());
+    if let Some(value) = token {
+        return Ok(value);
     }
-    let document = Html::parse_document(html);
-    let input = selector("input[name=sesskey]")?;
-    document
-        .select(&input)
+    Html::parse_document(html)
+        .select(&sel("input[name=sesskey]"))
         .find_map(|node| node.value().attr("value"))
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
@@ -41,38 +39,30 @@ pub fn resource_detail(
     kind: &str,
 ) -> Result<ResourceDetail, AppError> {
     let document = Html::parse_document(html);
-    let (title, text_value, mut links) = if kind == "courseboard-post" {
+    let board_post = kind == "courseboard-post";
+    let (title, text_value, mut links) = if board_post {
         notice_content(&document, base_url)?
     } else {
         let title = first_text(
             &document,
             ".page-header-headings h1, #page-header h1, h1, title",
-        )?
+        )
         .unwrap_or_else(|| format!("{kind} detail"));
         let content = content_root(&document);
-        let text_value = content
-            .map(visible_text)
-            .map(strip_embedded_active_markup)
+        let links = content
+            .map(|root| link_items(root.select(&sel("a[href]")), base_url, 101))
             .unwrap_or_default();
-        let links = match content {
-            Some(root) => link_items_in(root, base_url, 101)?,
-            None => Vec::new(),
-        };
-        (title, text_value, links)
+        (title, preview_from_document(&document), links)
     };
     let text_truncated = text_value.chars().count() > 100_000;
     let links_truncated = links.len() > 100;
     links.truncate(100);
-    let (id, board_id, reference) = if kind == "courseboard-post" {
-        let board = query_id(url, &["id"]);
-        let post = query_id(url, &["bwid"]);
-        let reference = board.as_ref().zip(post.as_ref()).map(|(board, post)| {
-            ResourceRef::BoardPost {
-                board: board.clone(),
-                post: post.clone(),
-            }
-            .to_string()
-        });
+    let (id, board_id, reference) = if board_post {
+        let (board, post) = (query_id(url, &["id"]), query_id(url, &["bwid"]));
+        let reference = board
+            .clone()
+            .zip(post.clone())
+            .map(|(board, post)| ResourceRef::BoardPost { board, post }.to_string());
         (post, board, reference)
     } else {
         let id = query_id(url, &["id", "bwid"]);
@@ -101,40 +91,31 @@ fn notice_content(
     base_url: &Url,
 ) -> Result<(String, String, Vec<LinkItem>), AppError> {
     let root = document
-        .select(&selector(".courseboard_view")?)
+        .select(&sel(".courseboard_view"))
         .next()
         .ok_or_else(|| AppError::shape("notice page contained no recognizable post region"))?;
     let title = root
-        .select(&selector(".courseboard_view > .subject > h3")?)
+        .select(&sel(".courseboard_view > .subject > h3"))
         .next()
         .map(visible_text)
         .filter(|text| !text.is_empty())
         .ok_or_else(|| AppError::shape("notice page contained no recognizable post title"))?;
     let body = root
-        .select(&selector(".courseboard_view > .content")?)
+        .select(&sel(".courseboard_view > .content"))
         .next()
         .ok_or_else(|| AppError::shape("notice page contained no recognizable post body"))?;
-    let text = strip_embedded_active_markup(visible_text(body));
-    let mut links = Vec::new();
-    let mut seen = HashSet::new();
-    for part in root.select(&selector(
-        ".courseboard_view > .content, .courseboard_view > .info > .files",
-    )?) {
-        for link in link_items_in(part, base_url, 101)? {
-            if seen.insert(link.url.clone()) {
-                links.push(link);
-                if links.len() == 101 {
-                    return Ok((title, text, links));
-                }
-            }
-        }
-    }
-    Ok((title, text, links))
+    let css =
+        sel(".courseboard_view > .content a[href], .courseboard_view > .info > .files a[href]");
+    let anchors = root.select(&css);
+    Ok((
+        title,
+        strip_embedded_active_markup(visible_text(body)),
+        link_items(anchors, base_url, 101),
+    ))
 }
 
 pub fn has_next_page(html: &str) -> Result<bool, AppError> {
-    let document = Html::parse_document(html);
-    has_next_link(&document)
+    Ok(has_any(&Html::parse_document(html), NEXT_PAGE_SELECTORS))
 }
 
 pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppError> {
@@ -144,9 +125,8 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
         .map(|css| format!("{css}[href]"))
         .collect::<Vec<_>>()
         .join(", ");
-    let selector = selector(&joined)?;
     let Some(href) = document
-        .select(&selector)
+        .select(&sel(&joined))
         .find_map(|node| node.value().attr("href"))
     else {
         return Ok(None);
@@ -154,13 +134,10 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
     let url = base_url
         .join(href)
         .map_err(|e| AppError::shape(format!("invalid pagination URL: {e}")))?;
-    if url.scheme() != base_url.scheme()
-        || url.host_str() != base_url.host_str()
-        || url.port_or_known_default() != base_url.port_or_known_default()
-    {
+    if url.origin() != base_url.origin() {
         return Err(AppError::shape("pagination URL left the KLMS origin"));
     }
-    Ok(Some(crate::safe_url::display(&url)))
+    Ok(Some(safe_url::display(&url)))
 }
 
 pub fn safe_html_preview(html: &str) -> String {
@@ -177,11 +154,7 @@ pub(super) fn preview_from_document(document: &Html) -> String {
 fn content_root(document: &Html) -> Option<ElementRef<'_>> {
     ["#region-main", "[role=main]", "main", "body"]
         .into_iter()
-        .find_map(|css| {
-            Selector::parse(css)
-                .ok()
-                .and_then(|selector| document.select(&selector).next())
-        })
+        .find_map(|css| document.select(&sel(css)).next())
 }
 
 fn strip_embedded_active_markup(mut text: String) -> String {
@@ -195,8 +168,7 @@ fn strip_embedded_active_markup(mut text: String) -> String {
             };
             let end = lower[start..]
                 .find(&closing)
-                .map(|offset| start + offset + closing.len())
-                .unwrap_or(text.len());
+                .map_or(text.len(), |offset| start + offset + closing.len());
             text.replace_range(start..end, " [embedded launch data omitted] ");
         }
     }
@@ -206,7 +178,19 @@ fn strip_embedded_active_markup(mut text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{next_page_url, resource_detail, sesskey};
+    use crate::models::ResourceDetail;
     use crate::url::Url;
+
+    fn base() -> Url {
+        Url::parse("https://klms.example").unwrap()
+    }
+
+    fn notice(html: &str) -> Result<ResourceDetail, crate::error::AppError> {
+        let url = base()
+            .join("/mod/courseboard/article.php?id=10&bwid=11")
+            .unwrap();
+        resource_detail(html, &base(), &url, "courseboard-post")
+    }
 
     #[test]
     fn extracts_session_key_without_exposing_it_elsewhere() {
@@ -219,9 +203,8 @@ mod tests {
     #[test]
     fn omits_escaped_lti_launch_forms_from_detail_text() {
         let html = r#"<main>Course tool &lt;form method=&quot;post&quot;&gt;&lt;input name=&quot;login_hint&quot; value=&quot;private-user-id&quot;/&gt;&lt;/form&gt; Ready</main>"#;
-        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
-        let url = base.join("/mod/lti/view.php?id=7").unwrap();
-        let detail = resource_detail(html, &base, &url, "lti").unwrap();
+        let url = base().join("/mod/lti/view.php?id=7").unwrap();
+        let detail = resource_detail(html, &base(), &url, "lti").unwrap();
         assert!(!detail.text.contains("private-user-id"));
         assert!(!detail.text.contains("login_hint"));
         assert!(detail.text.contains("Course tool"));
@@ -230,16 +213,9 @@ mod tests {
 
     #[test]
     fn board_post_detail_uses_post_id_and_preserves_board_id() {
-        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
-        let url = base
-            .join("/mod/courseboard/article.php?id=10&bwid=11")
-            .unwrap();
-        let detail = resource_detail(
+        let detail = notice(
             "<div class='courseboard_view'><div class='subject'><h3>Notice</h3></div>\
              <div class='content'>Body</div></div>",
-            &base,
-            &url,
-            "courseboard-post",
         )
         .unwrap();
         assert_eq!(detail.id.as_deref(), Some("11"));
@@ -262,27 +238,18 @@ mod tests {
               <a href='/pluginfile.php/1/notes.pdf'>Notes</a></div>\
             <div class='pre_next'><a href='/mod/courseboard/article.php?id=10&bwid=12'>Other post</a></div>\
             <div class='button_area'>List</div><div id='password_confirm'>Dialog wording</div></div>";
-        let base = Url::parse("https://klms.example").unwrap();
-        let url = base
-            .join("/mod/courseboard/article.php?id=10&bwid=11")
-            .unwrap();
-        let first = resource_detail(html, &base, &url, "courseboard-post").unwrap();
+        let first = notice(html).unwrap();
         assert_eq!(first.title, "Exam schedule");
         assert_eq!(
             first.text,
             "Discuss Views : 10, Next, and Enter password in class. Reading Notes"
         );
         assert_eq!(first.links.len(), 2);
-        assert!(
-            first
-                .links
-                .iter()
-                .all(|link| !link.url.contains("article.php"))
-        );
+        assert!(first.links.iter().all(|l| !l.url.contains("article.php")));
         let changed_chrome = html
             .replace("<div class='hit'>Views : 10", "<div class='hit'>Views : 11")
             .replace("Other post", "Different neighbor");
-        let second = resource_detail(&changed_chrome, &base, &url, "courseboard-post").unwrap();
+        let second = notice(&changed_chrome).unwrap();
         assert_eq!(
             serde_json::to_value(first).unwrap(),
             serde_json::to_value(second).unwrap()
@@ -291,43 +258,27 @@ mod tests {
 
     #[test]
     fn notice_requires_explicit_title_and_body_but_allows_empty_body() {
-        let base = Url::parse("https://klms.example").unwrap();
-        let url = base
-            .join("/mod/courseboard/article.php?id=10&bwid=11")
-            .unwrap();
         for html in [
             "<main><h1>Notice</h1>Fallback is unsafe</main>",
             "<div class='courseboard_view'><div class='content'>Body</div></div>",
             "<div class='courseboard_view'><div class='subject'><h3>Title</h3></div></div>",
         ] {
-            assert_eq!(
-                resource_detail(html, &base, &url, "courseboard-post")
-                    .unwrap_err()
-                    .code,
-                "UPSTREAM_SHAPE_CHANGED"
-            );
+            assert_eq!(notice(html).unwrap_err().code, "UPSTREAM_SHAPE_CHANGED");
         }
-        let empty = resource_detail("<div class='courseboard_view'><div class='subject'><h3>Title</h3></div><div class='content'></div></div>", &base, &url, "courseboard-post").unwrap();
+        let empty = notice("<div class='courseboard_view'><div class='subject'><h3>Title</h3></div><div class='content'></div></div>").unwrap();
         assert!(empty.text.is_empty());
     }
 
     #[test]
     fn notice_preserves_text_and_combined_link_caps() {
-        let base = Url::parse("https://klms.example").unwrap();
-        let url = base
-            .join("/mod/courseboard/article.php?id=10&bwid=11")
-            .unwrap();
-        let attachments: String = (0..60)
-            .map(|i| format!("<a href='/pluginfile.php/{i}'>File {i}</a>"))
-            .collect();
-        let body_links: String = (50..102)
-            .map(|i| format!("<a href='/pluginfile.php/{i}'>File {i}</a>"))
-            .collect();
+        let link = |i: usize| format!("<a href='/pluginfile.php/{i}'>File {i}</a>");
+        let attachments: String = (0..60).map(link).collect();
+        let body_links: String = (50..102).map(link).collect();
         let html = format!(
             "<div class='courseboard_view'><div class='subject'><h3>Title</h3></div><div class='info'><div class='files'>{attachments}</div></div><div class='content'>{}{body_links}</div></div>",
             "가".repeat(100_001)
         );
-        let detail = resource_detail(&html, &base, &url, "courseboard-post").unwrap();
+        let detail = notice(&html).unwrap();
         assert!(detail.text_truncated);
         assert_eq!(detail.text.chars().count(), 100_000);
         assert!(detail.links_truncated);
@@ -337,13 +288,12 @@ mod tests {
     #[test]
     fn pagination_stays_on_origin() {
         let base = Url::parse("https://klms.example/").unwrap();
-        assert_eq!(next_page_url("<div class='pagination'><span class='next'><a href='/mod/courseboard/view.php?id=8&page=2'>Next</a></span></div>",&base).unwrap().as_deref(),Some("https://klms.example/mod/courseboard/view.php?id=8&page=2"));
-        assert!(
-            next_page_url(
-                "<a rel='next' href='https://external.example/page'>Next</a>",
-                &base
-            )
-            .is_err()
+        let next = "<div class='pagination'><span class='next'><a href='/mod/courseboard/view.php?id=8&page=2'>Next</a></span></div>";
+        assert_eq!(
+            next_page_url(next, &base).unwrap().as_deref(),
+            Some("https://klms.example/mod/courseboard/view.php?id=8&page=2")
         );
+        let external = "<a rel='next' href='https://external.example/page'>Next</a>";
+        assert!(next_page_url(external, &base).is_err());
     }
 }
