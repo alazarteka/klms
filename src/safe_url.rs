@@ -1,4 +1,4 @@
-use url::Url;
+use crate::url::Url;
 
 pub fn display(url: &Url) -> String {
     let mut safe = url.clone();
@@ -16,8 +16,8 @@ pub fn display(url: &Url) -> String {
     if safe.query().is_some() {
         safe.query_pairs_mut().clear().extend_pairs(pairs);
     }
-    let _ = safe.set_username("");
-    let _ = safe.set_password(None);
+    safe.set_username("");
+    safe.set_password(None);
     safe.set_fragment(None);
     safe.into()
 }
@@ -41,7 +41,7 @@ pub fn sensitive_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::display;
-    use url::Url;
+    use crate::url::Url;
 
     #[test]
     fn strips_userinfo_and_sensitive_query_values() {

@@ -1,3 +1,4 @@
+use crate::url::Url;
 use crate::{
     client::KlmsClient,
     error::AppError,
@@ -5,7 +6,6 @@ use crate::{
     output::{self, CommandResult},
     parse, safe_url,
 };
-use url::Url;
 
 pub(super) fn get(
     client: &KlmsClient,

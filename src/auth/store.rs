@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use url::Url;
+use crate::url::Url;
 
 use crate::date::epoch_now;
 

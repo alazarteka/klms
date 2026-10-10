@@ -1,5 +1,5 @@
+use crate::url::Url;
 use scraper::{Html, Selector};
-use url::Url;
 
 use crate::error::AppError;
 

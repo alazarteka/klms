@@ -3,8 +3,8 @@ mod download;
 mod library;
 mod raw;
 
+use crate::url::Url;
 use serde::Serialize;
-use url::Url;
 
 use crate::{
     auth,

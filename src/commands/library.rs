@@ -1,4 +1,4 @@
-use url::Url;
+use crate::url::Url;
 
 use crate::{
     cli::{

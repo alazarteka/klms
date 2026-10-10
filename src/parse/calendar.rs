@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::url::Url;
 use scraper::{ElementRef, Html};
-use url::Url;
 
 use super::shared::{has_any, has_next_link, module_kind, query_id, selector, text, visible_text};
 use crate::{date, error::AppError, models::CalendarEvent, reference::ResourceRef, safe_url};
@@ -228,7 +228,7 @@ fn event_time(
 #[cfg(test)]
 mod tests {
     use super::{calendar_page, calendar_page_on};
-    use url::Url;
+    use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 

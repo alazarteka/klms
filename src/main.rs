@@ -16,6 +16,7 @@ mod safe_url;
 mod skill;
 mod spec;
 mod update;
+mod url;
 
 use std::process::ExitCode;
 

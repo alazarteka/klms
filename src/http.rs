@@ -2,13 +2,13 @@
 //! every caller supplies its own origin policy to [`follow`].
 use std::{io, time::Duration};
 
+use crate::url::Url;
 use ureq::{
     Agent, BodyReader,
     config::Config,
     http::{self},
     tls::{RootCerts, TlsConfig},
 };
-use url::Url;
 
 use crate::error::AppError;
 

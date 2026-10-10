@@ -1,5 +1,5 @@
+use crate::url::Url;
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 use crate::error::AppError;
 
@@ -14,7 +14,7 @@ struct Cookie {
     domain: String,
     path: String,
     secure: bool,
-    source_origin: url::Origin,
+    source_origin: crate::url::Origin,
 }
 
 #[derive(Debug, Default)]

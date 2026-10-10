@@ -1,7 +1,7 @@
 use std::{thread, time::Duration};
 
+use crate::url::Url;
 use serde_json::{Value, json};
-use url::Url;
 use zeroize::Zeroizing;
 
 use crate::error::AppError;

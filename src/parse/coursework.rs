@@ -1,5 +1,5 @@
+use crate::url::Url;
 use scraper::Html;
-use url::Url;
 
 use super::detail::preview_from_document;
 use super::shared::{
@@ -192,7 +192,7 @@ fn table_report(
 mod tests {
     use super::{assignments, attendance, grades, quizzes};
     use crate::models::Course;
-    use url::Url;
+    use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 
