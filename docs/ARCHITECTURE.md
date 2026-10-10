@@ -1,33 +1,63 @@
 # Architecture
 
-One crate, one binary. Dependency direction:
+One crate, one binary. `main.rs` parses arguments, runs `commands::run`, and
+prints the result through `output`. Arrows below point from a module to the
+modules it uses:
 
 ```text
-cli -> commands -> client + parse -> models -> output
-              \-> corpus -> SQLite + object store
-              \-> update -> release client + installer
+main      -> cli, commands, output, error
+commands  -> cli, auth, client, course_pages, parse, corpus, update, spec, output
+spec      -> cli, output
+update    -> client, output
+corpus    -> client, course_pages, parse, models, date, url, reference, error
+course_pages -> client, parse, models, url
+auth      -> http, parse, url, date, output, error
+client    -> http, url, error
+parse     -> models, reference, safe_url, date, url, error
+output    -> models, error
 ```
 
 ## Modules
 
-- `cli`: grammar and help text only. `spec` renders it as `klms spec`.
-- `commands`: validates a job, coordinates transport and parsing.
-- `client`: URL policy, cookie selection, timeouts, redirects, response bounds,
-  authentication checks; plus a separate unauthenticated HTTPS client for
-  `update`. `http` and `url` are the small HTTP/URL primitives under it.
-- `auth`: the KAIST SSO state machine, exact-origin login transport, prompts,
-  remembered login, password backends, and private session persistence. Exposes
-  only non-secret status models.
+- `main`: entry point; reports clap parse errors in the JSON envelope under `--json`.
+- `cli`: grammar and help text only. `spec` renders it as `klms spec`
+  (and `klms --json spec`); `completions` generates shell scripts.
+- `commands`: validates a job, coordinates transport and parsing, and builds
+  the command result. `commands/library.rs` holds the local-library commands.
+- `client`: KLMS URL policy, cookie selection, timeouts, redirects, response
+  bounds, and authentication checks. It also has a separate unauthenticated
+  HTTPS client for release downloads used by `update`.
+- `http`: the one blocking HTTP transport. It never follows redirects itself;
+  each caller supplies its origin policy to `follow`.
+- `url`: a small `http`/`https` URL type with WHATWG-style normalization for a
+  single-origin client.
+- `auth`: orchestration (`login`, `logout`, `forget`, `load`) and the status
+  models it exposes, with submodules:
+  - `flow`: the KAIST SSO state machine and prompts.
+  - `transport`: the short-lived, exact-origin login transport.
+  - `cookies`: cookie jar handling for the SSO exchange.
+  - `store`: session file, remembered login and private file writes.
+  - `secret`: password storage backends (macOS keychain, Linux Secret Service,
+    or an opt-in plaintext file).
+  - `tests`: auth tests.
+  Only non-secret status models leave this module.
 - `parse`: all KLMS/Moodle markup knowledge. Selectors live here and nowhere
-  else. `course_pages` merges paged week formats.
-- `models`, `reference`, `date`, `safe_url`, `error`: typed records, canonical
-  refs and endpoint mapping, Korea-time arithmetic, URL redaction, error codes.
-- `output`, `present`: JSON envelope, exit categories, sanitized human output.
-- `corpus`: the only module that touches SQLite or the object store (queries,
-  curation, sync). Commands contain no SQL. Local library commands load no auth.
+  else. Submodules: `auth`, `calendar`, `courses`, `coursework`, `detail`
+  and `shared`.
+- `course_pages`: course activities across every page KLMS splits a course
+  into, merging the paged week format.
+- `models`, `reference`, `date`, `safe_url`, `error`, `spec`: typed records,
+  canonical refs and endpoint mapping, Korea-time arithmetic, URL redaction,
+  error codes and exit categories, and the grammar spec.
+- `output`: the JSON envelope, list and detail rendering for human output, and
+  terminal sanitization.
+- `corpus`: the only module that touches SQLite or the object store. Submodules:
+  `schema`, `sync`, `curate`, `query`, `object_store`. Commands contain no SQL.
+  Local library commands load no auth.
 - `update`: stable release selection, checksum and candidate version checks,
-  and the single executable-replacement path (`__install`, shared with
-  `scripts/install.sh`), plus removal of the legacy managed skill.
+  the single executable-replacement path (`__install`, shared with
+  `scripts/install.sh`), and removal of the legacy managed skill. Tests are in
+  `update/tests.rs`.
 
 ## Boundaries
 
