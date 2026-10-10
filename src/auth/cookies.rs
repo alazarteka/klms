@@ -4,10 +4,7 @@ use url::Url;
 
 use crate::error::AppError;
 
-use super::{
-    cookie_rules::{self, Rules},
-    model::StoredCookie,
-};
+use super::{cookie_rules, model::StoredCookie};
 
 #[derive(Debug, Clone)]
 struct Cookie {
@@ -51,7 +48,7 @@ impl TransientCookies {
         let acceptable = if remove {
             cookie_rules::valid_name(name)
         } else {
-            cookie_rules::valid_cookie(name, cookie_value, Rules::Rfc6265)
+            cookie_rules::valid_cookie(name, cookie_value)
         };
         if !acceptable {
             return Err(AppError::auth_protocol("SSO returned an unsafe cookie"));
@@ -121,7 +118,7 @@ impl TransientCookies {
         let corrupt = || AppError::config("saved login state contains an invalid cookie");
         let mut cookies = Vec::new();
         for saved in &snapshot.cookies {
-            if !cookie_rules::valid_cookie(&saved.name, &saved.value, Rules::Rfc6265)
+            if !cookie_rules::valid_cookie(&saved.name, &saved.value)
                 || saved.domain.is_empty()
                 || !saved.path.starts_with('/')
                 || saved
@@ -336,13 +333,14 @@ mod tests {
     }
 
     #[test]
-    fn capture_applies_the_shared_rfc_predicate() {
+    fn capture_applies_the_shared_predicate() {
         let mut jar = TransientCookies::default();
-        for bad in [
-            "a=b c", "a=b,c", "a=b\\c", "a=\"b", "a b=c", "=v", "novalue",
-        ] {
+        for bad in ["a b=c", "=v", "novalue", "a=caf\u{e9}", "a=b\tc"] {
             let result = capture_header(&mut jar, "https://sso.kaist.ac.kr/", bad);
             assert!(result.is_err(), "{bad:?}");
+        }
+        for good in ["s=b c", "t=b,c", "u=b\\c"] {
+            capture_header(&mut jar, "https://sso.kaist.ac.kr/", good).unwrap();
         }
         capture_header(&mut jar, "https://sso.kaist.ac.kr/", "q=\"quoted\"; Path=/").unwrap();
         assert!(

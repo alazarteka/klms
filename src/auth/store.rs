@@ -10,8 +10,7 @@ use crate::date::epoch_now;
 use crate::error::AppError;
 
 use super::{
-    cookie_rules::{self, Rules},
-    fsutil,
+    cookie_rules, fsutil,
     model::{AuthSession, AuthStatus, SESSION_VERSION, StoredCookie, StoredSession},
 };
 
@@ -66,7 +65,7 @@ pub fn load_at(path: &Path, base_url: &Url) -> Result<AuthSession, AppError> {
     }
     for cookie in &stored.cookies {
         // Older releases saved under a looser value rule; keep reading them.
-        validate_cookie(cookie, Rules::Saved)?;
+        validate_cookie(cookie)?;
     }
     let header = (!stored.cookies.is_empty()).then(|| {
         stored
@@ -104,7 +103,7 @@ pub fn save_at(
         ));
     }
     for cookie in &cookies {
-        validate_cookie(cookie, Rules::Rfc6265)?;
+        validate_cookie(cookie)?;
     }
     let stored = StoredSession {
         version: SESSION_VERSION,
@@ -132,8 +131,8 @@ pub fn remove() -> Result<(PathBuf, bool), AppError> {
     Ok((path, true))
 }
 
-fn validate_cookie(cookie: &StoredCookie, rules: Rules) -> Result<(), AppError> {
-    if cookie_rules::valid_cookie(&cookie.name, &cookie.value, rules) {
+fn validate_cookie(cookie: &StoredCookie) -> Result<(), AppError> {
+    if cookie_rules::valid_cookie(&cookie.name, &cookie.value) {
         Ok(())
     } else {
         Err(AppError::config("saved session contains an invalid cookie"))
@@ -176,12 +175,10 @@ mod tests {
 
     #[test]
     fn rejects_header_injection() {
-        for rules in [Rules::Rfc6265, Rules::Saved] {
-            assert!(validate_cookie(&cookie("MoodleSession", "abc123"), rules).is_ok());
-            assert!(validate_cookie(&cookie("bad\r\n", "x"), rules).is_err());
-            assert!(validate_cookie(&cookie("ok", "x; injected=y"), rules).is_err());
-            assert!(validate_cookie(&cookie("ok", ""), rules).is_err());
-        }
+        assert!(validate_cookie(&cookie("MoodleSession", "abc123")).is_ok());
+        assert!(validate_cookie(&cookie("bad\r\n", "x")).is_err());
+        assert!(validate_cookie(&cookie("ok", "x; injected=y")).is_err());
+        assert!(validate_cookie(&cookie("ok", "")).is_err());
     }
 
     fn klms() -> Url {
@@ -216,7 +213,7 @@ mod tests {
     fn load_still_rejects_unsafe_saved_cookies() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.json");
-        for value in ["", "a;b", "a b"] {
+        for value in ["", "a;b", r"a\tb"] {
             let body = format!(
                 r#"{{"version":1,"origin":"https://klms.kaist.ac.kr:443","created_at":1,
                    "cookies":[{{"name":"n","value":"{value}"}}],"devices":[]}}"#
@@ -227,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn save_uses_strict_rules_and_round_trips_privately() {
+    fn save_round_trips_privately_and_rejects_unsafe_cookies() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("klms/session.json");
         save_at(&path, &klms(), vec![cookie("MoodleSession", "abc")], vec![]).unwrap();
@@ -242,7 +239,7 @@ mod tests {
             assert_eq!(mode(&path), 0o600);
             assert_eq!(mode(path.parent().unwrap()), 0o700);
         }
-        for value in ["a,b", "", "a\"b"] {
+        for value in ["a;b", "", "a\r\nX: y"] {
             let result = save_at(&path, &klms(), vec![cookie("n", value)], vec![]);
             assert_eq!(result.unwrap_err().code, "CONFIG_ERROR", "{value:?}");
         }
