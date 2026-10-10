@@ -44,8 +44,8 @@ impl ResourceRef {
         }
     }
 
-    pub fn from_activity(kind: &str, id: Option<&str>, url: Option<&str>) -> Option<Self> {
-        let id = id.map(str::to_owned).or_else(|| url.and_then(module_id))?;
+    pub fn from_activity(kind: &str, id: Option<&str>, url: Option<&Url>) -> Option<Self> {
+        let id = id.map(str::to_owned).or_else(|| url?.query_value("id"))?;
         let kind = kind.to_ascii_lowercase();
         if !valid_id(&id) {
             return None;
@@ -62,11 +62,7 @@ impl ResourceRef {
     }
 
     pub fn from_url(url: &Url) -> Option<Self> {
-        let parts: Vec<_> = url.path_segments()?.collect();
-        let kind = parts
-            .windows(2)
-            .find_map(|pair| (pair[0] == "mod").then_some(pair[1]))?;
-        Self::from_activity(kind, None, Some(url.as_str()))
+        Self::from_activity(url.module_kind()?, None, Some(url))
     }
 
     pub fn activity_kind(&self) -> Option<&str> {
@@ -134,13 +130,6 @@ fn valid_kind(value: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-fn module_id(value: &str) -> Option<String> {
-    let url = Url::parse(value).ok()?;
-    url.query_pairs()
-        .find_map(|(key, value)| (key == "id").then(|| value.into_owned()))
-        .filter(|value| valid_id(value))
-}
-
 #[cfg(test)]
 mod tests {
     use super::ResourceRef;
@@ -166,9 +155,12 @@ mod tests {
     fn inferred_references_obey_the_same_identity_rules_as_cli_input() {
         for id in ["", "oops", "-1", "1:2", "１２"] {
             assert!(ResourceRef::from_activity("assign", Some(id), None).is_none());
-            let url = format!("https://klms.kaist.ac.kr/mod/assign/view.php?id={id}");
+            let url = Url::parse(&format!(
+                "https://klms.kaist.ac.kr/mod/assign/view.php?id={id}"
+            ))
+            .unwrap();
             assert!(ResourceRef::from_activity("assign", None, Some(&url)).is_none());
-            assert!(ResourceRef::from_url(&Url::parse(&url).unwrap()).is_none());
+            assert!(ResourceRef::from_url(&url).is_none());
         }
         assert!(ResourceRef::from_activity("", Some("7"), None).is_none());
         for kind in ["assign", "quiz", "courseboard", "resource", "vod", "CUSTOM"] {

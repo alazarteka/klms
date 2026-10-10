@@ -518,7 +518,7 @@ fn collect_board(
                 break;
             }
         };
-        let posts = match parse::board_posts(&page.text, base_url, query(&page.url, "id")) {
+        let posts = match parse::board_posts(&page.text, base_url, page.url.query_value("id")) {
             Ok(posts) => posts,
             Err(error) => {
                 fail(&mut failures, &error.message);
@@ -847,11 +847,6 @@ fn representation_kind(url: &Url) -> &'static str {
 fn activity_container(value: &str) -> bool {
     Url::parse(value)
         .is_ok_and(|url| url.path().starts_with("/mod/") && url.path().ends_with("/view.php"))
-}
-
-fn query(url: &Url, key: &str) -> Option<String> {
-    url.query_pairs()
-        .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
 }
 
 fn digest_json(value: &impl Serialize) -> Result<String, AppError> {

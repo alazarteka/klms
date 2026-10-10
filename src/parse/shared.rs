@@ -233,13 +233,6 @@ pub(super) fn week_number(value: &str) -> Option<u32> {
         .ok()
 }
 
-pub(super) fn module_kind(url: &Url) -> Option<String> {
-    let parts: Vec<_> = url.path_segments()?.collect();
-    parts
-        .windows(2)
-        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
-}
-
 pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
     url.query_pairs().find_map(|(key, value)| {
         (names.contains(&key.as_ref()) && valid_id(&value)).then(|| value.into_owned())

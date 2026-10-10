@@ -66,7 +66,7 @@ pub fn resource_detail(
         (post, board, reference)
     } else {
         let id = query_id(url, &["id", "bwid"]);
-        let reference = ResourceRef::from_activity(kind, id.as_deref(), Some(url.as_str()))
+        let reference = ResourceRef::from_activity(kind, id.as_deref(), Some(url))
             .map(|reference| reference.to_string());
         (id, None, reference)
     };
