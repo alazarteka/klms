@@ -286,8 +286,18 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
             .unwrap()
             .contains("downloadsecret")
     );
-    assert!(!env.out(&args).status.success());
+    let (_, error) = env.fail(&args);
+    assert_eq!(error["code"], "CONFIG_ERROR");
+    assert!(
+        (error["message"].as_str().unwrap()).contains("destination already exists"),
+        "{error}"
+    );
     assert_eq!(fs::read(&out).unwrap(), b"notes");
+    let leftovers = fs::read_dir(out.parent().unwrap())
+        .unwrap()
+        .filter(|entry| (entry.as_ref().unwrap().file_name().to_string_lossy()).ends_with(".part"))
+        .count();
+    assert_eq!(leftovers, 0, "no temporary file is left behind");
     assert_eq!(
         server.requests(),
         ["GET /pluginfile.php/7/notes.pdf?token=downloadsecret HTTP/1.1"]

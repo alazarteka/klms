@@ -2,7 +2,8 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind},
-    path::Path,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// Write-only options that create files with mode 0600 on Unix.
@@ -24,24 +25,30 @@ pub enum PublishError<E> {
 
 /// How a publication ended.
 pub struct Linked {
+    /// The temporary this call created (`temporary`, or a suffixed variant
+    /// when that name was already taken).
+    pub temporary: PathBuf,
     /// `destination` was already there and was left untouched.
     pub existed: bool,
     /// Removing `temporary` failed; the content is published regardless.
     pub leftover: Option<io::Error>,
 }
 
-/// Creates `temporary` exclusively with mode 0600, lets `fill` write it,
+const TEMPORARY_ATTEMPTS: u32 = 8;
+
+/// Creates a temporary exclusively with mode 0600, lets `fill` write it,
 /// syncs it, hard-links it to `destination` without ever replacing that, and
-/// removes `temporary`. On every failure `temporary` is removed again.
+/// removes the temporary. The name is `temporary`; if something already has
+/// that name (say, a leftover of a crashed run with a recycled pid), up to
+/// seven other unique names are tried, and nothing this call did not create
+/// is ever removed. On every failure the temporary it created is removed.
 pub fn publish_new<T, E>(
     temporary: &Path,
     destination: &Path,
     fill: impl FnOnce(&mut File) -> Result<T, E>,
 ) -> Result<(T, Linked), PublishError<E>> {
-    let mut file = private_file_options()
-        .create_new(true)
-        .open(temporary)
-        .map_err(PublishError::Create)?;
+    let (mut file, temporary) = create_exclusive(temporary)?;
+    let temporary = temporary.as_path();
     let value = match fill(&mut file) {
         Ok(value) => value,
         Err(error) => {
@@ -63,7 +70,32 @@ pub fn publish_new<T, E>(
         }
     };
     let leftover = fs::remove_file(temporary).err();
-    Ok((value, Linked { existed, leftover }))
+    let linked = Linked {
+        temporary: temporary.to_path_buf(),
+        existed,
+        leftover,
+    };
+    Ok((value, linked))
+}
+
+fn create_exclusive<E>(base: &Path) -> Result<(File, PathBuf), PublishError<E>> {
+    let nanos = (SystemTime::now().duration_since(UNIX_EPOCH)).map_or(0, |d| d.subsec_nanos());
+    let mut last = None;
+    for attempt in 0..TEMPORARY_ATTEMPTS {
+        let candidate = if attempt == 0 {
+            base.to_path_buf()
+        } else {
+            let mut name = base.as_os_str().to_owned();
+            name.push(format!(".{nanos:x}{attempt}"));
+            PathBuf::from(name)
+        };
+        match private_file_options().create_new(true).open(&candidate) {
+            Ok(file) => return Ok((file, candidate)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(PublishError::Create(error)),
+        }
+    }
+    Err(PublishError::Create(last.expect("at least one attempt")))
 }
 
 #[cfg(test)]
@@ -94,15 +126,17 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fill_or_stale_temporary_is_reported_and_cleaned() {
+    fn a_failed_fill_is_cleaned_and_a_stale_temporary_is_kept_but_bypassed() {
         let directory = tempfile::tempdir().unwrap();
         let (temporary, out) = (directory.path().join("x.part"), directory.path().join("x"));
         let failed = publish_new(&temporary, &out, |_| Err::<(), _>("no"));
         assert!(matches!(failed, Err(PublishError::Fill("no"))));
         assert!(!temporary.exists() && !out.exists());
         fs::write(&temporary, b"stale").unwrap();
-        let stale = publish_new(&temporary, &out, |_| Ok::<_, ()>(()));
-        assert!(matches!(stale, Err(PublishError::Create(_))));
+        let (_, linked) = publish_new(&temporary, &out, |file| file.write_all(b"new")).unwrap();
+        assert_ne!(linked.temporary, temporary);
+        assert!(!linked.temporary.exists() && !linked.existed);
         assert_eq!(fs::read(&temporary).unwrap(), b"stale");
+        assert_eq!(fs::read(&out).unwrap(), b"new");
     }
 }

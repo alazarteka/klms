@@ -565,7 +565,7 @@ impl Ctx<'_> {
         let response = self.client.get(CALENDAR_PATH)?;
         let today = date::seoul_today();
         let through = date::add_days(&today, days as i64).expect("valid current date");
-        let page = parse::calendar_page(&response.text, self.base, &date::seoul_today())?;
+        let page = parse::calendar_page(&response.text, self.base, &today)?;
         if !page.complete || page.unparsed_times > 0 {
             return Err(AppError::shape(
                 "cannot build a complete agenda from the current calendar page",
@@ -849,7 +849,7 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
     let cleanup_warning = linked.leftover.map(|error| {
         format!(
             "download completed, but temporary link cleanup failed for {}: {error}",
-            temp.display()
+            linked.temporary.display()
         )
     });
     let model = DownloadResult {
