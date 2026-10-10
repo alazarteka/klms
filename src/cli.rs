@@ -197,7 +197,7 @@ pub enum LibraryCommand {
     Status,
     /// Record finite typed KLMS data in the local library (needs a session; explicit only).
     #[command(
-        after_help = "Examples:\n  klms --json library sync\n  klms --json library sync --course course:ID --notices --files\n  klms --json library sync --download changed\n\nNo background schedule exists. --files only validates attachments with HEAD requests; --download changed stores verified bytes once, deduplicated by SHA-256. data.status is \"complete\" or \"incomplete\" (a run that errors exits non-zero; `library status` also shows \"unfinished\" for a run that never recorded completion). Partial syncs exit 0 with \"incomplete\": inspect failures, truncated, warnings. An incomplete sync is evidence about that attempt only; a course-scoped sync never claims global coverage."
+        after_help = "Examples:\n  klms --json library sync\n  klms --json library sync --course course:ID --notices --files\n  klms --json library sync --download changed\n\nNo background schedule exists. --files only validates attachments with HEAD requests; --download changed stores verified bytes once, deduplicated by SHA-256. data.status is \"complete\" or \"incomplete\" (a run that errors exits non-zero and `library status` shows it as \"failed\"; it shows \"unfinished\" for a run that never recorded completion). Partial syncs exit 0 with \"incomplete\": inspect failures, truncated, warnings. An incomplete sync is evidence about that attempt only; a course-scoped sync never claims global coverage."
     )]
     Sync(LibrarySyncArgs),
     /// Search stored prose: notice text, file text, summaries, notes (local; run `library sync` first).
