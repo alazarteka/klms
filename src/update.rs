@@ -7,11 +7,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{client::release_bytes as fetch, error::AppError, output, skill};
+use crate::{
+    client::{Client, release_bytes as fetch},
+    error::AppError,
+    output, skill,
+};
 use sha2::{Digest, Sha256};
 
 const REPO: &str = "alazarteka/klms";
