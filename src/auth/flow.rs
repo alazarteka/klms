@@ -82,11 +82,14 @@ enum Next {
     SecondFactor,
 }
 
+fn denied<T>(message: &str, hint: &str) -> Result<T, AppError> {
+    Err(AppError::auth(message.to_owned(), hint))
+}
+
 /// What KAIST's result `code` means at this `stage`; unknown codes are a
 /// protocol change.
 fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
     use Stage::{Otp, Password, Policy};
-    let again = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
     match (stage, code) {
         (_, "SS0001" | "SS0007") | (Policy, "") => Ok(Next::Link),
         (_, "SS0099") => Ok(Next::Device),
@@ -94,23 +97,23 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
         (Password | Policy, "SS0004" | "SS0005" | "SS0006") => Err(AppError::auth_required(
             "KAIST requires a password update before this account can sign in",
         )),
-        (Password, "EAU001") => again(
+        (Password, "EAU001") => denied(
             "KAIST rejected the login identifier or password",
             "Check the credentials and retry `klms auth login --method password`.",
         ),
-        (Password, "EAU005" | "EAU006" | "EAU007") => again(
+        (Password, "EAU005" | "EAU006" | "EAU007") => denied(
             "KAIST temporarily locked password login after repeated failures",
             "Wait for the lockout to expire, then retry.",
         ),
-        (Otp, "E001") => again(
+        (Otp, "E001") => denied(
             "The verification code is incorrect",
             "Retry login and enter the newest six-digit code.",
         ),
-        (Otp, "E002") => again(
+        (Otp, "E002") => denied(
             "The verification code expired",
             "Retry login to request a new code.",
         ),
-        (Otp, "E003") => again(
+        (Otp, "E003") => denied(
             "Too many verification attempts",
             "Retry login to request a new code.",
         ),
@@ -132,27 +135,26 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
 
 /// `Ok(true)` once the Easy Login request is approved, `Ok(false)` while pending.
 fn easy_approved(code: &str) -> Result<bool, AppError> {
-    let blocked = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
     match code {
         "" | "SS0001" => Ok(true),
         "ESY020" => Ok(false),
-        "ESY021" => blocked(
+        "ESY021" => denied(
             "Easy Login is temporarily blocked",
             "Wait and retry after the block expires.",
         ),
-        "ESY022" => blocked(
+        "ESY022" => denied(
             "Easy Login is blocked for this account",
             "Use password login or contact KAIST support.",
         ),
-        "ESY023" => blocked(
+        "ESY023" => denied(
             "Easy Login was cancelled",
             "Run `klms auth login --method easy` to start again.",
         ),
-        "ESY024" => blocked(
+        "ESY024" => denied(
             "Easy Login verification did not match",
             "Start a new Easy Login request.",
         ),
-        "E004" => blocked("Easy Login expired", "Start a new Easy Login request."),
+        "E004" => denied("Easy Login expired", "Start a new Easy Login request."),
         other => Err(AppError::auth_protocol(format!(
             "KAIST SSO returned unknown result code {other:?}"
         ))),
@@ -369,17 +371,16 @@ fn second_factor(
         SecondFactor::Sms => ("/auth/kaist/user/login/second/ajaxSendSms", "SMS"),
     };
     let response = transport.ajax(endpoint, &[])?;
-    let refused = |message: &str, hint: &str| Err(AppError::auth(message.to_owned(), hint));
     match result_code(&response)? {
         "SS0001" => {}
         "ES0003" => {
-            return refused(
+            return denied(
                 "KAIST has no usable destination for that verification method",
                 "Retry with the other `--second-factor` value.",
             );
         }
         "ES0018" => {
-            return refused(
+            return denied(
                 "KAIST verification requests are temporarily limited",
                 "Wait, then retry login.",
             );
@@ -409,10 +410,8 @@ fn verify_code(transport: &mut SsoTransport, otp: &str) -> Result<(), AppError> 
     check_code_format(otp)?;
     let path = "/auth/kaist/user/login/second/ajaxValidCrtfcNo";
     let response = transport.ajax(path, &[("crtfc_no", otp)])?;
-    match next(Stage::Otp, result_code(&response)?)? {
-        Next::Device => register_device(transport),
-        _ => link(transport),
-    }
+    let step = next(Stage::Otp, result_code(&response)?)?;
+    proceed(transport, step)
 }
 
 pub fn check_code_format(otp: &str) -> Result<(), AppError> {
@@ -477,7 +476,13 @@ fn easy_login(
         .map(|device| ("device", device.as_str()))
         .collect();
     let response = transport.ajax("/auth/kaist/user/login/check/policy", &form)?;
-    match next(Stage::Policy, result_code(&response)?)? {
+    let step = next(Stage::Policy, result_code(&response)?)?;
+    proceed(transport, step)
+}
+
+/// Finish a login whose password or code step was accepted.
+fn proceed(transport: &mut SsoTransport, step: Next) -> Result<(), AppError> {
+    match step {
         Next::Device => register_device(transport),
         _ => link(transport),
     }
