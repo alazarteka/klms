@@ -122,7 +122,10 @@ pub enum Command {
     #[command(after_help = "Example:\n  klms --json doctor")]
     Doctor,
     /// Sign in, inspect, or extend the KLMS session.
-    Auth(AuthArgs),
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Show dashboard courses and upcoming items.
     #[command(after_help = "Examples:\n  klms dashboard\n  klms --json dashboard --limit 20")]
     Dashboard(ListArgs),
@@ -135,21 +138,39 @@ pub enum Command {
     )]
     Upcoming(UpcomingArgs),
     /// Discover, resolve, or inspect courses.
-    Courses(CoursesArgs),
+    Courses {
+        #[command(subcommand)]
+        command: CoursesCommand,
+    },
     /// List the typed weekly structure of a course.
-    Activities(ActivitiesArgs),
+    Activities {
+        #[command(subcommand)]
+        command: ActivitiesCommand,
+    },
     /// List or inspect assignments.
     Assignments(ModuleArgs),
     /// List or inspect quizzes.
     Quizzes(ModuleArgs),
     /// List upcoming calendar events.
-    Calendar(CalendarArgs),
+    Calendar {
+        #[command(subcommand)]
+        command: CalendarCommand,
+    },
     /// List boards and inspect their posts.
-    Boards(BoardsArgs),
+    Boards {
+        #[command(subcommand)]
+        command: BoardsCommand,
+    },
     /// List course notices and inspect their content.
-    Notices(NoticesArgs),
+    Notices {
+        #[command(subcommand)]
+        command: NoticesCommand,
+    },
     /// List or download course files.
-    Files(FilesArgs),
+    Files {
+        #[command(subcommand)]
+        command: FilesCommand,
+    },
     /// List or inspect video metadata.
     Videos(ModuleArgs),
     /// Show the grade report for a course.
@@ -157,12 +178,18 @@ pub enum Command {
     /// Show the attendance report for a course.
     Attendance(CourseShowArgs),
     /// Preview a known same-origin HTML or JSON read (experimental repair hatch).
-    Request(RequestArgs),
+    Request {
+        #[command(subcommand)]
+        command: RequestCommand,
+    },
     /// Inspect and synchronize the private versioned local library.
     #[command(
         after_help = "Every command except `sync` is local and needs no sign-in; `sync` is explicit (no background schedule) and read-only toward KLMS.\n\nTypical order: sync -> search / changes / show -> history -> content / export; curate with edit, relations add, retract.\n\nRefs: a search row's `ref` is course:ID, a resource ref (file:ID, assign:ID, activity:KIND:ID, resource:HASH, or board-post:BOARD:POST for a notice) or representation:N (one file or link of a resource); its `kind` says which. `show` takes any of those or sha256:HEX; `history` takes course, resource (incl. board-post) or representation:N; `content` and `export` take a file/resource ref (when it has one stored attachment), representation:N or sha256:HEX; `edit` and `relations add` take course, resource or representation:N.\n\nResults report `complete` (local pagination) and `source_complete` (remote coverage; null = unknown). `library status` shows last_sync; status \"unfinished\" means completion was not recorded, so check the original process before rerunning. The first resync after an upgrade may record normalization changes; do not delete apparent duplicates. Obsolete notice links leave search but stay reachable by ref. Never claim a course or resource was deleted remotely because it is absent after a sync."
     )]
-    Library(LibraryArgs),
+    Library {
+        #[command(subcommand)]
+        command: LibraryCommand,
+    },
     /// Print the executable command grammar; --json emits the full argument tree (paths, kinds, choices, defaults, help).
     #[command(after_help = "Examples:\n  klms spec\n  klms --json spec")]
     Spec,
@@ -182,12 +209,6 @@ pub struct UpdateArgs {
     /// Check for a newer release without downloading or installing it.
     #[arg(long)]
     pub check: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct LibraryArgs {
-    #[command(subcommand)]
-    pub command: LibraryCommand,
 }
 
 #[derive(Debug, Subcommand)]
@@ -397,12 +418,6 @@ pub struct UpcomingArgs {
     pub list: ListArgs,
 }
 
-#[derive(Debug, Args)]
-pub struct AuthArgs {
-    #[command(subcommand)]
-    pub command: AuthCommand,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     /// Sign in through KAIST SSO and save a private session (prompts; secrets are never flags).
@@ -524,12 +539,6 @@ pub enum AuthSecondFactorArg {
     Sms,
 }
 
-#[derive(Debug, Args)]
-pub struct CoursesArgs {
-    #[command(subcommand)]
-    pub command: CoursesCommand,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum CoursesCommand {
     /// List courses visible on the selected dashboard term.
@@ -554,12 +563,6 @@ pub enum CoursesCommand {
         #[arg(help = COURSE_HELP, value_name = "COURSE", value_parser = nonempty_operand)]
         course: String,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct ActivitiesArgs {
-    #[command(subcommand)]
-    pub command: ActivitiesCommand,
 }
 
 #[derive(Debug, Subcommand)]
@@ -611,29 +614,11 @@ pub enum ModuleCommand {
     },
 }
 
-#[derive(Debug, Args)]
-pub struct CalendarArgs {
-    #[command(subcommand)]
-    pub command: CalendarCommand,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum CalendarCommand {
     /// List upcoming scheduled calendar events (omits unscheduled notices and unread posts).
     #[command(after_help = "Example:\n  klms --json calendar list --limit 50")]
     List(ListArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct BoardsArgs {
-    #[command(subcommand)]
-    pub command: BoardsCommand,
-}
-
-#[derive(Debug, Args)]
-pub struct NoticesArgs {
-    #[command(subcommand)]
-    pub command: NoticesCommand,
 }
 
 #[derive(Debug, Subcommand)]
@@ -683,12 +668,6 @@ pub enum BoardsCommand {
     },
 }
 
-#[derive(Debug, Args)]
-pub struct FilesArgs {
-    #[command(subcommand)]
-    pub command: FilesCommand,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum FilesCommand {
     /// List file-like activities in a course.
@@ -729,12 +708,6 @@ pub enum CourseShowCommand {
         #[arg(help = COURSE_HELP, long, value_name = "COURSE")]
         course: String,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct RequestArgs {
-    #[command(subcommand)]
-    pub command: RequestCommand,
 }
 
 #[derive(Debug, Subcommand)]

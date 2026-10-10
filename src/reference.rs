@@ -1,8 +1,6 @@
 use std::fmt;
 
-use crate::url::Url;
-
-use crate::error::AppError;
+use crate::{error::AppError, url::Url};
 
 const VIDEO_KINDS: [&str; 4] = ["vod", "lti", "panopto", "panoptocourseembed"];
 
@@ -21,25 +19,24 @@ pub enum ResourceRef {
 impl ResourceRef {
     pub fn parse(value: &str) -> Result<Self, AppError> {
         let parts: Vec<_> = value.split(':').collect();
+        let id = |s: &str| s.to_owned();
         match parts.as_slice() {
-            ["course", id] if valid_id(id) => Ok(Self::Course((*id).into())),
-            ["assign", id] if valid_id(id) => Ok(Self::Assignment((*id).into())),
-            ["quiz", id] if valid_id(id) => Ok(Self::Quiz((*id).into())),
-            ["board", id] if valid_id(id) => Ok(Self::Board((*id).into())),
-            ["board-post", board, post] if valid_id(board) && valid_id(post) => {
-                Ok(Self::BoardPost {
-                    board: (*board).into(),
-                    post: (*post).into(),
-                })
-            }
-            ["file", id] if valid_id(id) => Ok(Self::File((*id).into())),
-            ["activity", kind, id] if valid_id(id) && valid_kind(kind) => Ok(Self::Activity {
-                kind: (*kind).into(),
-                id: (*id).into(),
+            ["course", i] if valid_id(i) => Ok(Self::Course(id(i))),
+            ["assign", i] if valid_id(i) => Ok(Self::Assignment(id(i))),
+            ["quiz", i] if valid_id(i) => Ok(Self::Quiz(id(i))),
+            ["board", i] if valid_id(i) => Ok(Self::Board(id(i))),
+            ["board-post", b, p] if valid_id(b) && valid_id(p) => Ok(Self::BoardPost {
+                board: id(b),
+                post: id(p),
             }),
-            [kind, id] if VIDEO_KINDS.contains(kind) && valid_id(id) => Ok(Self::Video {
-                kind: (*kind).into(),
-                id: (*id).into(),
+            ["file", i] if valid_id(i) => Ok(Self::File(id(i))),
+            ["activity", k, i] if valid_id(i) && valid_kind(k) => Ok(Self::Activity {
+                kind: id(k),
+                id: id(i),
+            }),
+            [k, i] if VIDEO_KINDS.contains(k) && valid_id(i) => Ok(Self::Video {
+                kind: id(k),
+                id: id(i),
             }),
             _ => Err(AppError::usage(format!(
                 "invalid resource reference {value:?}"
@@ -49,23 +46,17 @@ impl ResourceRef {
 
     pub fn from_activity(kind: &str, id: Option<&str>, url: Option<&str>) -> Option<Self> {
         let id = id.map(str::to_owned).or_else(|| url.and_then(module_id))?;
+        let kind = kind.to_ascii_lowercase();
         if !valid_id(&id) {
             return None;
         }
-        let kind = kind.to_ascii_lowercase();
         match kind.as_str() {
             "assign" => Some(Self::Assignment(id)),
             "quiz" => Some(Self::Quiz(id)),
             "courseboard" => Some(Self::Board(id)),
             "resource" | "coursefile" => Some(Self::File(id)),
-            other if VIDEO_KINDS.contains(&other) => Some(Self::Video {
-                kind: other.into(),
-                id,
-            }),
-            other if valid_kind(other) => Some(Self::Activity {
-                kind: other.into(),
-                id,
-            }),
+            k if VIDEO_KINDS.contains(&k) => Some(Self::Video { kind, id }),
+            k if valid_kind(k) => Some(Self::Activity { kind, id }),
             _ => None,
         }
     }
@@ -92,13 +83,13 @@ impl ResourceRef {
     pub fn path(&self) -> String {
         match self {
             Self::Course(id) => format!("/course/view.php?id={id}"),
-            Self::Assignment(id) => format!("/mod/assign/view.php?id={id}"),
-            Self::Quiz(id) => format!("/mod/quiz/view.php?id={id}"),
-            Self::Board(id) => format!("/mod/courseboard/view.php?id={id}"),
             Self::BoardPost { board, post } => {
                 format!("/mod/courseboard/article.php?id={board}&bwid={post}")
             }
-            Self::File(id) => format!("/mod/resource/view.php?id={id}"),
+            Self::Assignment(id) | Self::Quiz(id) | Self::Board(id) | Self::File(id) => {
+                let kind = self.activity_kind().unwrap_or_default();
+                format!("/mod/{kind}/view.php?id={id}")
+            }
             Self::Activity { kind, id } | Self::Video { kind, id } => {
                 format!("/mod/{kind}/view.php?id={id}")
             }
@@ -107,16 +98,12 @@ impl ResourceRef {
 
     pub fn matches_module(&self, kinds: &[&str]) -> bool {
         match self {
-            Self::Assignment(_) => kinds.contains(&"assign"),
-            Self::Quiz(_) => kinds.contains(&"quiz"),
-            Self::Board(_) => kinds.contains(&"courseboard"),
             Self::File(_) => kinds
                 .iter()
                 .any(|kind| matches!(*kind, "resource" | "coursefile")),
-            Self::Activity { kind, .. } | Self::Video { kind, .. } => {
-                kinds.iter().any(|expected| kind == expected)
-            }
-            Self::Course(_) | Self::BoardPost { .. } => false,
+            _ => self
+                .activity_kind()
+                .is_some_and(|kind| kinds.contains(&kind)),
         }
     }
 }
@@ -167,6 +154,12 @@ mod tests {
             reference.path(),
             "/mod/courseboard/article.php?id=12&bwid=34"
         );
+        assert_eq!(
+            ResourceRef::parse("quiz:7").unwrap().path(),
+            "/mod/quiz/view.php?id=7"
+        );
+        assert!(ResourceRef::parse("123").is_err());
+        assert!(ResourceRef::parse("assign:not-a-number").is_err());
     }
 
     #[test]
@@ -185,11 +178,5 @@ mod tests {
                 reference
             );
         }
-    }
-
-    #[test]
-    fn rejects_untyped_or_non_numeric_refs() {
-        assert!(ResourceRef::parse("123").is_err());
-        assert!(ResourceRef::parse("assign:not-a-number").is_err());
     }
 }
