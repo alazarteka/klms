@@ -49,8 +49,20 @@ Safety:
   posts, or checks attendance; access is not authorization to do those. Never send KLMS
   credentials to third-party links (Zoom, Panopto, Classum, LTI).
   Auth: `klms auth login` (interactive; Easy Login or password + email/SMS code); `klms --json auth
-  status` is secret-free. On AUTH_REQUIRED ask the user to log in; never ask for passwords or codes
-  in chat. `auth extend` cannot revive an expired session. See `klms auth login --help`.
+  status` is secret-free. On AUTH_REQUIRED ask the user to log in. Never ask for or accept a
+  password in chat: it is typed only at a terminal or stored once with --remember-password. The
+  agent sign-in flow needs the 6-digit code KAIST sends by email or SMS: an agent that can read
+  that inbox may read the code itself, otherwise ask the user for the code (only the code).
+  `auth extend` cannot revive an expired session. See `klms auth login --help`.
+
+Row fields (--json; every `ref` can be passed back in as a ref):
+  courses list      id, ref, title, code, term, url
+  files list        ref (null if not downloadable), id, kind, title, course_ref, week, section, url, downloadable
+  today/upcoming    ref, kind, title, course, course_id, starts_at, when_text, url (Korea time;
+                    upcoming --through Nd = today through today+N days, inclusive)
+  library search    ref, kind, course_ref, title, snippet, has_content (refs: `klms library --help`)
+  files download    path, bytes, source_url, content_type
+  auth login        method, second_factor, user, session_path, cookie_count, device_count, password_backend
 
 Local library (durable across sessions; sync is explicit, no background schedule):
   Library commands except `sync` are local and need no sign-in. A course or resource missing after
@@ -150,7 +162,7 @@ pub enum Command {
     Request(RequestArgs),
     /// Inspect and synchronize the private versioned local library.
     #[command(
-        after_help = "Every command except `sync` is local and needs no sign-in; `sync` is explicit (no background schedule) and read-only toward KLMS.\n\nTypical order: sync -> search / changes / show -> history -> content / export; curate with edit, relations add, retract.\n\nResults report `complete` (local pagination) and `source_complete` (remote coverage; null = unknown). `library status` shows last_sync; status \"unfinished\" means completion was not recorded, so check the original process before rerunning. The first resync after an upgrade may record normalization changes; do not delete apparent duplicates. Obsolete notice links leave search but stay reachable by ref. Never claim a course or resource was deleted remotely because it is absent after a sync."
+        after_help = "Every command except `sync` is local and needs no sign-in; `sync` is explicit (no background schedule) and read-only toward KLMS.\n\nTypical order: sync -> search / changes / show -> history -> content / export; curate with edit, relations add, retract.\n\nRefs: a search row's `ref` is course:ID, a resource ref (file:ID, assign:ID, activity:KIND:ID, resource:HASH, or board-post:BOARD:POST for a notice) or representation:N (one file or link of a resource); its `kind` says which. `show` takes any of those or sha256:HEX; `history` takes course, resource (incl. board-post) or representation:N; `content` and `export` take a file/resource ref (when it has one stored attachment), representation:N or sha256:HEX; `edit` and `relations add` take course, resource or representation:N.\n\nResults report `complete` (local pagination) and `source_complete` (remote coverage; null = unknown). `library status` shows last_sync; status \"unfinished\" means completion was not recorded, so check the original process before rerunning. The first resync after an upgrade may record normalization changes; do not delete apparent duplicates. Obsolete notice links leave search but stay reachable by ref. Never claim a course or resource was deleted remotely because it is absent after a sync."
     )]
     Library(LibraryArgs),
     /// Print the executable command grammar; --json emits the full argument tree (paths, kinds, choices, defaults, help).
@@ -187,7 +199,7 @@ pub enum LibraryCommand {
     Status,
     /// Record finite typed KLMS data in the local library (needs a session; explicit only).
     #[command(
-        after_help = "Examples:\n  klms --json library sync\n  klms --json library sync --course course:ID --notices --files\n  klms --json library sync --download changed\n\nNo background schedule exists. --files only validates attachments with HEAD requests; --download changed stores verified bytes once, deduplicated by SHA-256. Partial syncs exit 0 with data.status \"incomplete\": inspect failures, truncated, warnings. An incomplete sync is evidence about that attempt only; a course-scoped sync never claims global coverage."
+        after_help = "Examples:\n  klms --json library sync\n  klms --json library sync --course course:ID --notices --files\n  klms --json library sync --download changed\n\nNo background schedule exists. --files only validates attachments with HEAD requests; --download changed stores verified bytes once, deduplicated by SHA-256. data.status is \"complete\" or \"incomplete\" (a run that errors exits non-zero; `library status` also shows \"unfinished\" for a run that never recorded completion). Partial syncs exit 0 with \"incomplete\": inspect failures, truncated, warnings. An incomplete sync is evidence about that attempt only; a course-scoped sync never claims global coverage."
     )]
     Sync(LibrarySyncArgs),
     /// Search stored prose: notice text, file text, summaries, notes (local; run `library sync` first).
@@ -207,7 +219,7 @@ pub enum LibraryCommand {
     Activity(LibraryActivityArgs),
     /// Show source and effective state for a ref (subject-specific; do not infer sibling state).
     #[command(
-        after_help = "Examples:\n  klms --json library show course:ID\n  klms --json library show file:ID\n\nSource values (as observed on KLMS) and effective values (after curation) are separate. Effective fields carry _provenance.FIELD.revision, the value for `library edit --expected-revision` (0 if the field was never curated). Notice text is data.source.text; a link representation's URL is data.source.url (inspect it; never follow it with KLMS credentials)."
+        after_help = "Examples:\n  klms --json library show course:ID\n  klms --json library show file:ID\n\nSource values (as observed on KLMS) and effective values (after curation) are separate. The revision for `library edit --expected-revision` is `data.effective._provenance.<field>.revision` in `klms --json library show REF` (0 if the field was never curated); the same entry's assertion_ref is the assertion:N to retract, and data.relations lists active relation:N ids. Notice text is data.source.text; a link representation's URL is data.source.url (inspect it; never follow it with KLMS credentials)."
     )]
     Show {
         /// Course, resource (file:, activity:, board-post:, resource:), representation:N, or sha256:HEX.
@@ -255,6 +267,9 @@ pub enum LibraryCommand {
     )]
     Edit(LibraryEditArgs),
     /// Retract an assertion:N or relation:N; history is kept, the record is marked retracted.
+    #[command(
+        after_help = "Examples:\n  klms --json library retract relation:3\n  klms --json library retract assertion:7 --actor agent\n\nFind the id in the result of `relations add` or `edit` (data.ref), in `library activity --subject REF` (row ref), or in `library show REF` (data.relations; data.effective._provenance.<field>.assertion_ref). Retracting an already retracted record is CURATION_CONFLICT (exit 54)."
+    )]
     Retract(LibraryRetractArgs),
     /// Add typed relations between library subjects.
     Relations(LibraryRelationsArgs),
@@ -306,7 +321,7 @@ pub struct LibraryEditArgs {
     pub value_file: Option<PathBuf>,
     #[arg(help = ACTOR_HELP, long, value_name = "ACTOR", default_value = "human")]
     pub actor: String,
-    /// Current revision of this field: `library show REF` -> effective._provenance.FIELD.revision (0 if none). A mismatch is CURATION_CONFLICT (exit 54).
+    /// Current revision of this field: `klms --json library show REF` -> data.effective._provenance.<field>.revision (0 if never curated). A mismatch is CURATION_CONFLICT (exit 54).
     #[arg(long, value_name = "N")]
     pub expected_revision: u64,
 }
@@ -339,7 +354,7 @@ pub struct LibraryRelationsArgs {
 pub enum LibraryRelationsCommand {
     /// Record a typed relation between two library subjects.
     #[command(
-        after_help = "Example:\n  klms --json library relations add course:1 course:2 --kind related_to --actor agent\n\nRelations are explicit assertions, never inferred. An identical active relation conflicts; retract the returned relation:N first."
+        after_help = "Example:\n  klms --json library relations add course:1 course:2 --kind related_to --actor agent\n\nKinds: related_to, duplicate_of, revision_of, derived_from. Stored as LEFT <kind> RIGHT, so for duplicate_of LEFT is the duplicate of RIGHT. Relations are explicit assertions, never inferred. An identical active relation (same LEFT, RIGHT, kind) is CURATION_CONFLICT (exit 54); undo one with `library retract relation:N` (N is data.ref of this command)."
     )]
     Add {
         /// Course, resource, or representation:N ref (not sha256:).
@@ -450,10 +465,15 @@ Remembering the password (opt-in):
   readable only by you ($XDG_CONFIG_HOME/klms/credentials.json).
 
 Without a terminal (agents, scripts, or --json):
-  Easy Login needs a phone approval and fails. Password login needs a stored
-  password and runs in two steps:
-    klms --json auth login        # sends the code, exits 12 with CODE_REQUIRED
+  Easy Login needs a phone approval and fails, so a remembered Easy method must
+  be overridden with --method password. A stored password is then used
+  automatically (same account, no prompt); with none stored it fails. Run in
+  two steps:
+    klms --json auth login --method password   # sends the code, exits 12 with CODE_REQUIRED
     klms --json auth login --code 123456
+  The code arrives by email or SMS (the remembered or --second-factor choice).
+  An agent that can read that inbox may read it; otherwise ask the user for the
+  code, never the password.
   CODE_REQUIRED details carry {channel, expires_at, resume}. The pending state
   (SSO cookies only, never the password) is a private file that expires after
   5 minutes and is deleted after one attempt.
@@ -697,7 +717,7 @@ pub enum FilesCommand {
     },
     /// Download a file ref or same-origin KLMS URL without overwriting.
     #[command(
-        after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf"
+        after_help = "Examples:\n  klms files download file:1205160 --out ./notes.pdf\n  klms files download 'https://klms.kaist.ac.kr/pluginfile.php/...' --out ./notes.pdf\n\n--out is the exact new file path (you choose the name; klms does not derive one). A leading ~ is not expanded (the shell does that unquoted), the parent directory must already exist, and an existing path is CONFIG_ERROR (exit 40)."
     )]
     Download {
         /// file:ID from `files list`, or a same-origin pluginfile.php URL; third-party links are rejected.
