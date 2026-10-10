@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::error::AppError;
+use crate::{error::AppError, models::ResourceDetail};
 
 pub const SCHEMA_VERSION: &str = "4";
 
@@ -25,20 +25,21 @@ pub struct CommandResult {
 }
 
 #[derive(Serialize)]
-struct SuccessEnvelope<'a> {
-    schema_version: &'static str,
-    ok: bool,
-    command: &'a str,
-    data: &'a Value,
-    warnings: &'a [String],
-    meta: &'a Option<ListMeta>,
-}
-
-#[derive(Serialize)]
-struct ErrorEnvelope<'a> {
-    schema_version: &'static str,
-    ok: bool,
-    error: &'a AppError,
+#[serde(untagged)]
+enum Envelope<'a> {
+    Success {
+        schema_version: &'static str,
+        ok: bool,
+        command: &'a str,
+        data: &'a Value,
+        warnings: &'a [String],
+        meta: &'a Option<ListMeta>,
+    },
+    Failure {
+        schema_version: &'static str,
+        ok: bool,
+        error: &'a AppError,
+    },
 }
 
 pub fn result<T: Serialize>(
@@ -56,27 +57,22 @@ pub fn result<T: Serialize>(
     })
 }
 
-/// Truncate `rows` to `limit` and return how many existed before truncation.
-pub fn truncate_to_limit<T>(rows: &mut Vec<T>, limit: usize) -> usize {
+/// Truncate `rows` to `limit`, render them with `render(rows, available)`, and
+/// attach list metadata. `source_complete` says whether KLMS showed every row.
+pub fn listing<T: Serialize>(
+    command: &'static str,
+    mut rows: Vec<T>,
+    limit: usize,
+    source_complete: bool,
+    render: impl FnOnce(&[T], usize) -> String,
+) -> Result<CommandResult, AppError> {
     let available = rows.len();
     rows.truncate(limit);
-    available
-}
-
-pub fn collection<T: Serialize>(
-    command: &'static str,
-    rows: &[T],
-    human: String,
-    limit: usize,
-    available: usize,
-    source_complete: bool,
-) -> Result<CommandResult, AppError> {
-    let returned = rows.len();
-    let mut result = result(command, &rows, human)?;
+    let mut result = result(command, &rows, render(&rows, available))?;
     result.meta = Some(ListMeta {
-        returned,
+        returned: rows.len(),
         limit,
-        complete: source_complete && returned == available,
+        complete: source_complete && rows.len() == available,
         total: source_complete.then_some(available),
         next_cursor: None,
         fresh_through: None,
@@ -120,9 +116,75 @@ pub fn local_collection<T: Serialize>(
     Ok(result)
 }
 
+/// Tab-separated table headed "TITLE — showing N of AVAILABLE{unit}".
+pub fn body<T>(
+    rows: &[T],
+    available: usize,
+    (title, unit, header): (&str, &str, &str),
+    format_row: impl Fn(&T) -> String,
+) -> String {
+    let heading = format!("{title} — showing {} of {available}{unit}", rows.len());
+    let lines = rows.iter().map(format_row);
+    [heading, header.into()]
+        .into_iter()
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `body`, or "No <title> found." when there are no rows.
+pub fn table<T>(
+    rows: &[T],
+    avail: usize,
+    title: &str,
+    header: &str,
+    f: impl Fn(&T) -> String,
+) -> String {
+    match rows.is_empty() {
+        true => format!("No {} found.", title.to_lowercase()),
+        false => body(rows, avail, (title, "", header), f),
+    }
+}
+
+/// One tab-separated row.
+pub fn row(cells: &[&str]) -> String {
+    cells.join("\t")
+}
+
+/// An optional cell, with `fallback` when absent.
+pub fn cell<'a>(value: &'a Option<String>, fallback: &'a str) -> &'a str {
+    value.as_deref().unwrap_or(fallback)
+}
+
+pub fn detail(detail: &ResourceDetail) -> String {
+    let mut output = format!(
+        "{}\nType: {}\nRef: {}\nURL: {}",
+        detail.title,
+        detail.kind,
+        cell(&detail.reference, "-"),
+        detail.url
+    );
+    if !detail.text.is_empty() {
+        output.push_str(&format!("\n\n{}", detail.text));
+    }
+    if detail.text_truncated {
+        output.push_str("\n\n[Detail text truncated]");
+    }
+    if !detail.links.is_empty() {
+        output.push_str("\n\nLinks:");
+        for link in &detail.links {
+            output.push_str(&format!("\n{}\t{}", link.title, link.url));
+        }
+    }
+    if detail.links_truncated {
+        output.push_str("\n[Link list truncated]");
+    }
+    output
+}
+
 pub fn print_success(result: &CommandResult, json: bool) {
     if json {
-        let envelope = SuccessEnvelope {
+        let envelope = Envelope::Success {
             schema_version: SCHEMA_VERSION,
             ok: true,
             command: result.command,
@@ -144,7 +206,7 @@ pub fn print_success(result: &CommandResult, json: bool) {
 
 pub fn print_error(error: &AppError, json: bool) {
     if json {
-        let envelope = ErrorEnvelope {
+        let envelope = Envelope::Failure {
             schema_version: SCHEMA_VERSION,
             ok: false,
             error,

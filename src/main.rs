@@ -10,7 +10,6 @@ mod http;
 mod models;
 mod output;
 mod parse;
-mod present;
 mod reference;
 mod safe_url;
 mod spec;
@@ -19,48 +18,49 @@ mod url;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, error::ErrorKind};
 
 use crate::{cli::Cli, error::AppError};
 
-fn report_parse_error(error: clap::Error, json_requested: bool) -> ExitCode {
-    if json_requested
-        && matches!(
-            error.kind(),
-            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-        )
-    {
-        let (command, data) = match error.kind() {
-            clap::error::ErrorKind::DisplayVersion => (
-                "version",
-                serde_json::json!({"name": "klms", "version": env!("CARGO_PKG_VERSION")}),
-            ),
-            _ => ("help", serde_json::json!({"text": error.to_string()})),
-        };
-        let result = output::result(command, &data, error.to_string())
-            .expect("informational output is serializable");
-        output::print_success(&result, true);
-        return ExitCode::SUCCESS;
+fn report_parse_error(error: clap::Error, json: bool) -> ExitCode {
+    let informational = matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    );
+    match (json, informational) {
+        (true, true) => {
+            let (command, data) = match error.kind() {
+                ErrorKind::DisplayVersion => (
+                    "version",
+                    serde_json::json!({"name": "klms", "version": env!("CARGO_PKG_VERSION")}),
+                ),
+                _ => ("help", serde_json::json!({"text": error.to_string()})),
+            };
+            let result = output::result(command, &data, error.to_string())
+                .expect("informational output is serializable");
+            output::print_success(&result, true);
+            ExitCode::SUCCESS
+        }
+        (true, false) => {
+            let app_error = AppError::usage(error.to_string());
+            output::print_error(&app_error, true);
+            ExitCode::from(app_error.exit_code())
+        }
+        _ => {
+            let _ = error.print();
+            ExitCode::from(if error.use_stderr() { 2 } else { 0 })
+        }
     }
-    if json_requested {
-        let app_error = AppError::usage(error.to_string());
-        output::print_error(&app_error, true);
-        return ExitCode::from(app_error.exit_code());
-    }
-    let code = if error.use_stderr() { 2 } else { 0 };
-    let _ = error.print();
-    ExitCode::from(code)
 }
 
 fn main() -> ExitCode {
-    let json_requested = std::env::args_os()
+    let json = std::env::args_os()
         .take_while(|arg| arg != "--")
         .any(|arg| arg == "--json");
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) => return report_parse_error(error, json_requested),
+        Err(error) => return report_parse_error(error, json),
     };
-
     match commands::run(&cli) {
         Ok(result) => {
             output::print_success(&result, cli.json);

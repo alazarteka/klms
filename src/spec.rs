@@ -55,14 +55,12 @@ struct ArgSpec {
 
 pub fn run() -> Result<CommandResult, AppError> {
     let spec = build();
-    let grammar = grammar(&spec);
-    crate::output::result("spec", &spec, grammar)
+    crate::output::result("spec", &spec, grammar(&spec))
 }
 
 pub fn completions(shell: clap_complete::Shell) -> Result<CommandResult, AppError> {
-    let mut command = Cli::command();
     let mut script = Vec::new();
-    clap_complete::generate(shell, &mut command, "klms", &mut script);
+    clap_complete::generate(shell, &mut Cli::command(), "klms", &mut script);
     let script = String::from_utf8(script)
         .map_err(|error| AppError::internal(format!("completion script is not UTF-8: {error}")))?;
     let data = json!({"shell": shell.to_string(), "script": script});
@@ -72,75 +70,66 @@ pub fn completions(shell: clap_complete::Shell) -> Result<CommandResult, AppErro
 fn build() -> Spec {
     let mut root = Cli::command();
     root.build();
-    let global_args = root
-        .get_arguments()
-        .filter(|arg| arg.is_global_set() && visible(arg))
-        .map(arg_spec)
-        .collect();
     let mut commands = Vec::new();
     collect(&root, Vec::new(), &mut commands);
     Spec {
         name: root.get_name().to_owned(),
         version: root.get_version().unwrap_or_default().to_owned(),
         overview: root.get_after_long_help().map(ToString::to_string),
-        global_args,
+        global_args: (root.get_arguments())
+            .filter(|arg| arg.is_global_set() && visible(arg))
+            .map(arg_spec)
+            .collect(),
         commands,
     }
 }
 
 fn grammar(spec: &Spec) -> String {
-    spec.commands
-        .iter()
-        .map(|command| command.usage.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let usages: Vec<_> = spec.commands.iter().map(|c| c.usage.as_str()).collect();
+    usages.join("\n")
 }
 
 fn collect(command: &Command, path: Vec<String>, out: &mut Vec<CommandSpec>) {
-    let subcommands: Vec<_> = command
-        .get_subcommands()
-        .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
-        .collect();
-    if subcommands.is_empty() {
-        let args: Vec<ArgSpec> = command
-            .get_arguments()
+    let mut subcommands = command.get_subcommands();
+    if !subcommands.any(|sub| !sub.is_hide_set() && sub.get_name() != "help") {
+        let args: Vec<ArgSpec> = (command.get_arguments())
             .filter(|arg| !arg.is_global_set() && visible(arg))
             .map(arg_spec)
             .collect();
         // Clap derive adds one unconstrained group per flattened struct;
         // only groups that require or exclude something are contractual.
-        let groups: Vec<GroupSpec> = command
-            .get_groups()
+        let groups: Vec<GroupSpec> = (command.get_groups())
             .map(|group| group_spec(command, group))
             .filter(|group| !group.args.is_empty() && (group.required || !group.multiple))
             .collect();
+        let parts: Vec<_> = [
+            command.get_long_about(),
+            command.get_after_long_help().or(command.get_after_help()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(ToString::to_string)
+        .collect();
         out.push(CommandSpec {
             usage: usage(&path, &args, &groups),
             path,
             about: command.get_about().map(ToString::to_string),
-            details: details(command),
+            details: (!parts.is_empty()).then(|| parts.join("\n\n")),
             args,
             groups,
         });
         return;
     }
-    for sub in subcommands {
-        let mut sub_path = path.clone();
-        sub_path.push(sub.get_name().to_owned());
-        collect(sub, sub_path, out);
+    for sub in command
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+    {
+        collect(
+            sub,
+            [path.clone(), vec![sub.get_name().to_owned()]].concat(),
+            out,
+        );
     }
-}
-
-fn details(command: &Command) -> Option<String> {
-    let parts: Vec<String> = [
-        command.get_long_about(),
-        command.get_after_long_help().or(command.get_after_help()),
-    ]
-    .into_iter()
-    .flatten()
-    .map(ToString::to_string)
-    .collect();
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn visible(arg: &Arg) -> bool {
@@ -148,65 +137,56 @@ fn visible(arg: &Arg) -> bool {
 }
 
 fn arg_spec(arg: &Arg) -> ArgSpec {
-    let choices: Vec<String> = arg
-        .get_possible_values()
-        .iter()
+    let choices: Vec<String> = (arg.get_possible_values().iter())
         .filter(|value| !value.is_hide_set())
         .map(|value| value.get_name().to_owned())
         .collect();
     // Clap fills an unset value name with the upper-cased id at build time;
     // treat that placeholder as unset so enumerated choices show instead.
     let placeholder = arg.get_id().as_str().to_ascii_uppercase();
-    let named_value = arg
-        .get_value_names()
-        .and_then(|names| names.first())
+    let named = (arg.get_value_names().and_then(|names| names.first()))
         .map(ToString::to_string)
         .filter(|name| choices.is_empty() || *name != placeholder);
-    let kind = if arg.is_positional() {
-        "positional"
-    } else if matches!(
+    let positional = arg.is_positional();
+    let flag = matches!(
         arg.get_action(),
         ArgAction::SetTrue | ArgAction::SetFalse | ArgAction::Count
-    ) {
-        "flag"
-    } else {
-        "option"
+    );
+    let value = match (positional, flag) {
+        (false, true) => None,
+        _ => Some(named.unwrap_or_else(|| match choices.is_empty() {
+            true => placeholder,
+            false => choices.join("|"),
+        })),
     };
-    let value = match kind {
-        "flag" => None,
-        _ if named_value.is_some() => named_value,
-        _ if !choices.is_empty() => Some(choices.join("|")),
-        _ => Some(arg.get_id().as_str().to_ascii_uppercase()),
-    };
-    let name = if arg.is_positional() {
-        value.clone().unwrap_or_default()
-    } else {
-        format!("--{}", arg.get_long().unwrap_or(arg.get_id().as_str()))
+    let name = match positional {
+        true => value.clone().unwrap_or_default(),
+        false => format!("--{}", arg.get_long().unwrap_or(arg.get_id().as_str())),
     };
     ArgSpec {
         name,
-        kind,
+        kind: match (positional, flag) {
+            (true, _) => "positional",
+            (false, true) => "flag",
+            _ => "option",
+        },
         required: arg.is_required_set(),
         value,
         choices,
-        default: arg
-            .get_default_values()
-            .first()
+        default: (arg.get_default_values().first())
             .map(|value| value.to_string_lossy().into_owned()),
         help: arg.get_help().map(ToString::to_string),
     }
 }
 
 fn group_spec(command: &Command, group: &ArgGroup) -> GroupSpec {
-    let args = group
-        .get_args()
-        .filter_map(|id| command.get_arguments().find(|arg| arg.get_id() == id))
-        .filter(|arg| visible(arg))
-        .map(|arg| arg_spec(arg).name)
-        .collect();
     GroupSpec {
         name: group.get_id().to_string(),
-        args,
+        args: (group.get_args())
+            .filter_map(|id| command.get_arguments().find(|arg| arg.get_id() == id))
+            .filter(|arg| visible(arg))
+            .map(|arg| arg_spec(arg).name)
+            .collect(),
         required: group.is_required_set(),
         multiple: group.clone().is_multiple(),
     }
@@ -223,6 +203,7 @@ fn render(arg: &ArgSpec) -> String {
 /// exclusive group (`multiple` false) render once, at the first member's
 /// position, as `(a|b)` when required or `[a|b]` otherwise.
 fn usage(path: &[String], args: &[ArgSpec], groups: &[GroupSpec]) -> String {
+    let optional = |required: bool, text: String| if required { text } else { format!("[{text}]") };
     let mut words = vec!["klms".to_owned()];
     words.extend(path.iter().cloned());
     for arg in args.iter().filter(|arg| arg.kind == "positional") {
@@ -237,13 +218,11 @@ fn usage(path: &[String], args: &[ArgSpec], groups: &[GroupSpec]) -> String {
             Some(group) if rendered_groups.contains(&group.name) => {}
             Some(group) => {
                 rendered_groups.push(group.name.clone());
-                let members = group
-                    .args
-                    .iter()
+                let members: Vec<_> = (group.args.iter())
                     .filter_map(|name| args.iter().find(|arg| &arg.name == name))
                     .map(render)
-                    .collect::<Vec<_>>()
-                    .join("|");
+                    .collect();
+                let members = members.join("|");
                 words.push(if group.required {
                     format!("({members})")
                 } else {
@@ -254,10 +233,6 @@ fn usage(path: &[String], args: &[ArgSpec], groups: &[GroupSpec]) -> String {
         }
     }
     words.join(" ")
-}
-
-fn optional(required: bool, text: String) -> String {
-    if required { text } else { format!("[{text}]") }
 }
 
 #[cfg(test)]
