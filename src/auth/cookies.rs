@@ -32,12 +32,10 @@ pub fn valid_cookie(name: &str, value: &str) -> bool {
             .all(|byte| (0x20..0x7f).contains(&byte) && byte != b';')
 }
 
+/// Trusted-device identifiers follow the cookie-value rule: whatever KAIST
+/// sends is kept as long as it cannot break out of a header.
 fn valid_device(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && value
-            .bytes()
-            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b';')
+    valid_cookie("device", value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,7 +315,7 @@ mod tests {
         evil.cookies[0].value = "x; injected=y".into();
         assert!(evil.checked().is_err());
         let mut evil = jar;
-        evil.devices.push("bad device".into());
+        evil.devices.push("bad;device".into());
         assert!(evil.checked().is_err());
     }
 }
