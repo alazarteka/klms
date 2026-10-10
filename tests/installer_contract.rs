@@ -105,13 +105,17 @@ esac
             .unwrap()
     }
 
-    fn payload(&self) -> PathBuf {
-        self.root.path().join("test-data/klms/skills/klms/SKILL.md")
+    fn payload_dir(&self) -> PathBuf {
+        self.root.path().join("test-data/klms/skills/klms")
+    }
+
+    fn link(&self) -> PathBuf {
+        self.root.path().join("test-home/.agents/skills/klms")
     }
 }
 
 #[test]
-fn bootstrap_installs_and_replaces_binary_with_matching_skill() {
+fn bootstrap_installs_and_replaces_binary_and_removes_legacy_skill() {
     let fixture = InstallFixture::new();
     let first = fixture.run();
     assert!(
@@ -128,17 +132,11 @@ fn bootstrap_installs_and_replaces_binary_with_matching_skill() {
         String::from_utf8(version.stdout).unwrap().trim(),
         format!("klms {}", env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(
-        fs::read(fixture.payload()).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
-    );
-    assert_eq!(
-        fs::read_link(fixture.root.path().join("test-home/.agents/skills/klms")).unwrap(),
-        fixture.payload().parent().unwrap()
-    );
-
     fs::write(&fixture.destination, b"old executable bytes").unwrap();
-    fs::write(fixture.payload(), b"old embedded skill").unwrap();
+    fs::create_dir_all(fixture.payload_dir()).unwrap();
+    fs::write(fixture.payload_dir().join("SKILL.md"), b"legacy skill").unwrap();
+    fs::create_dir_all(fixture.link().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(fixture.payload_dir(), fixture.link()).unwrap();
     let second = fixture.run();
     assert!(
         second.status.success(),
@@ -149,10 +147,8 @@ fn bootstrap_installs_and_replaces_binary_with_matching_skill() {
         fs::read(&fixture.destination).unwrap(),
         fs::read(env!("CARGO_BIN_EXE_klms")).unwrap()
     );
-    assert_eq!(
-        fs::read(fixture.payload()).unwrap(),
-        include_bytes!("../skills/klms/SKILL.md")
-    );
+    assert!(fs::symlink_metadata(fixture.link()).is_err());
+    assert!(!fixture.payload_dir().exists());
 }
 
 #[test]
@@ -172,23 +168,22 @@ fn bootstrap_checksum_failure_preserves_existing_install() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("checksum"));
     assert_eq!(fs::read(&fixture.destination).unwrap(), b"old executable");
-    assert!(!fixture.payload().exists());
 }
 
 #[test]
-fn bootstrap_skill_conflict_preserves_binary_and_skill() {
+fn bootstrap_leaves_a_user_owned_skill_directory_alone() {
     let fixture = InstallFixture::new();
-    fs::create_dir_all(fixture.destination.parent().unwrap()).unwrap();
-    fs::write(&fixture.destination, b"old executable").unwrap();
-    let conflict = fixture.root.path().join("test-home/.agents/skills/klms");
+    let conflict = fixture.link();
     fs::create_dir_all(&conflict).unwrap();
     fs::write(conflict.join("SKILL.md"), b"user-managed skill").unwrap();
     let result = fixture.run();
-    assert!(!result.status.success());
-    assert_eq!(fs::read(&fixture.destination).unwrap(), b"old executable");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(
         fs::read(conflict.join("SKILL.md")).unwrap(),
         b"user-managed skill"
     );
-    assert!(!fixture.payload().exists());
 }

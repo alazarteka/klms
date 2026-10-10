@@ -678,7 +678,6 @@ fn top_level_help_exposes_the_agent_resource_surface() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "skill",
         "auth",
         "today",
         "upcoming",
@@ -723,71 +722,13 @@ fn long_help_is_self_documenting_for_agents() {
     assert!(help.contains("CURATION_CONFLICT"));
 }
 
-#[cfg(unix)]
 #[test]
-fn skill_install_materializes_embedded_payload_and_discovery_link() {
-    let home = TempDir::new().unwrap();
-    let data_home = home.path().join("data");
-    for _ in 0..2 {
-        let output = binary()
-            .env("HOME", home.path())
-            .env("XDG_DATA_HOME", &data_home)
-            .args(["--json", "skill", "install"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.stderr.is_empty());
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["command"], "skill.install");
-        assert_eq!(value["data"]["payload_current"], true);
-        assert_eq!(value["data"]["link_current"], true);
-    }
-
-    let payload_dir = data_home.join("klms/skills/klms");
-    let payload = fs::read_to_string(payload_dir.join("SKILL.md")).unwrap();
-    let source =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/skills/klms/SKILL.md")).unwrap();
-    assert_eq!(payload, source);
-    assert_eq!(
-        fs::read_link(home.path().join(".agents/skills/klms")).unwrap(),
-        payload_dir
-    );
-
-    let status = binary()
-        .env("HOME", home.path())
-        .env("XDG_DATA_HOME", &data_home)
-        .args(["--json", "skill", "status"])
-        .output()
-        .unwrap();
-    assert!(status.status.success());
-    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert_eq!(value["command"], "skill.status");
-    assert_eq!(value["data"]["payload_current"], true);
-    assert_eq!(value["data"]["link_current"], true);
-}
-
-#[cfg(unix)]
-#[test]
-fn skill_install_refuses_an_unexpected_discovery_path() {
-    let home = TempDir::new().unwrap();
-    let link = home.path().join(".agents/skills/klms");
-    fs::create_dir_all(&link).unwrap();
+fn the_skill_command_is_gone() {
     let output = binary()
-        .env("HOME", home.path())
-        .env("XDG_DATA_HOME", home.path().join("data"))
         .args(["--json", "skill", "install"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(40));
-    assert!(output.stdout.is_empty());
-    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(value["error"]["code"], "CONFIG_ERROR");
-    assert!(link.is_dir());
-    assert!(!home.path().join("data/klms").exists());
+    assert_eq!(output.status.code(), Some(2));
 }
 
 const LIBRARY_DASHBOARD: &str = "<a href='/course/view.php?id=42'>Compilers(CS.420_2026_2)</a>";

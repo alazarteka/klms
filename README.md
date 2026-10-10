@@ -1,197 +1,95 @@
 # klms
 
-`klms` puts KAIST's Learning Management System in your terminal. It can show
-what is due today, look through a course, read notices, inspect grades and
-attendance, and download course files. Normal use does not open a browser.
+`klms` puts KAIST's Learning Management System (KLMS) in your terminal: what is
+due, course notices, grades and attendance, and course file downloads, plus an
+optional private local library that keeps history across KLMS changes. It is
+read-only toward course data: it never submits work, starts quizzes, posts to a
+board, or checks you into class. Normal use does not open a browser.
 
-The client is deliberately read-oriented. It will not submit an assignment,
-start a quiz, post to a board, or check you into class.
+`klms --help` is the reference (workflow, JSON contract, exit codes, refs);
+`klms <command> --help` has the details and examples.
 
 ## Install
 
-The release page has binaries for Apple Silicon macOS and x86-64 Linux. Download
-the installer, have a look if you like, and run it:
+Release binaries exist for Apple Silicon macOS and x86-64 Linux. Download the
+installer, read it if you like, and run it:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSLo install-klms.sh \
   https://raw.githubusercontent.com/alazarteka/klms/main/scripts/install.sh
-less install-klms.sh
 bash install-klms.sh
 ```
 
-The script finds the latest release, downloads the archive and its published
-SHA-256 file, verifies the checksum, and installs `klms` under `~/.local/bin`.
-It also installs the matching companion Agent Skill embedded in that release.
-Set `KLMS_INSTALL_DIR` to choose another binary directory. From a cloned
-checkout, run `bash scripts/install.sh` instead.
-
-If `~/.local/bin` is not already on your `PATH`, add it in your shell setup:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-The archives and their checksums are also available on the
-[GitHub releases page](https://github.com/alazarteka/klms/releases).
-
-Check for and install updates directly:
-
-```bash
-klms update --check
-klms update
-```
-
-`upgrade` is an alias for `update`. It checks the latest stable GitHub release,
-never downgrades, updates the executable you invoked (following a symlink), and
-installs the matching embedded skill. No KLMS sign-in is needed, and nothing
-checks for updates unless you ask.
+It verifies the release archive's SHA-256 and installs `klms` in
+`~/.local/bin` (set `KLMS_INSTALL_DIR` to change that; make sure the directory
+is on your `PATH`). From source (Rust 1.86 or newer): `make build`, then
+`target/release/klms __install --destination ~/.local/bin/klms`.
 
 ## Sign in
-
-Easy Login is the default:
 
 ```bash
 klms auth login
 ```
 
-Enter your KAIST ID or email address, then approve the comparison
-number in the KAIST app. Password login works with either email or SMS
-verification:
+Easy Login (approve the number in the KAIST app) is the default. Password login
+uses an emailed or SMS six-digit code:
 
 ```bash
-klms auth login --method password --second-factor email
-klms auth login --method password --second-factor sms
+klms auth login --method password --second-factor email --remember-password
 ```
 
-Passwords and six-digit verification codes are read with terminal echo turned
-off. They are not accepted as flags or environment variables. If KAIST treats
-the client as a new device, `klms` registers it during login; there is no
-separate browser step.
+Passwords are read with terminal echo off and are never flags or environment
+variables. `--remember-password` stores the password in the macOS keychain or
+the Linux Secret Service (`--insecure-storage` opts in to a private plaintext
+file where there is neither).
 
-The saved session lives at `$XDG_STATE_HOME/klms/session.json`, or
-`~/.local/state/klms/session.json` when `XDG_STATE_HOME` is unset. See
-[SECURITY.md](SECURITY.md) for exactly what it contains.
-
-Useful checks:
+Agents and scripts have no terminal, so Easy Login cannot work. After one
+interactive `--remember-password` login, sign in in two steps:
 
 ```bash
-klms auth status       # describe the saved session without printing secrets
-klms doctor            # make a small live request and check that it still works
-klms auth time-left    # ask KLMS how much time remains
-klms auth logout       # remove the local session
+klms --json auth login --method password   # sends the code, exits 12 CODE_REQUIRED
+klms --json auth login --code 123456       # the code from the email or SMS
 ```
 
-`klms auth extend` refreshes an existing session timer. It cannot revive an
-expired session.
+An agent that can read that inbox may fetch the code itself; otherwise ask the
+user for the code (never the password). The session is saved at
+`$XDG_STATE_HOME/klms/session.json` (default `~/.local/state/klms/`), mode 0600.
+`klms auth status`, `doctor`, `auth logout` and `auth forget` inspect or clear
+local state.
 
 ## Use it
-
-Start with the day in front of you:
 
 ```bash
 klms today
 klms upcoming --through 7d
-klms dashboard
-```
-
-Then narrow things down by course:
-
-```bash
 klms courses list
-klms courses resolve "machine learning"
 klms assignments list --course course:12345
 klms notices list --course course:12345
-klms grades show --course course:12345
-klms attendance show --course course:12345
+klms files download file:1205160 --out /abs/path/notes.pdf
+klms library sync --notices --files   # explicit; builds the private local library
+klms library search "compiler"
 ```
 
-List commands return references such as `assign:1210516`,
-`board-post:1189554:439261`, and `file:1205160`. Pass a reference directly to a
-matching detail or download command:
+List commands print `ref` values (`assign:ID`, `board-post:BOARD:POST`,
+`file:ID`, ...); pass them back to the matching `show`/`download` command.
+Put `--json` before the command for one versioned JSON document;
+`klms --json spec` prints the full argument tree and `klms completions SHELL`
+generates completions.
 
-```bash
-klms assignments show assign:1210516
-klms notices show board-post:1189554:439261
-klms files download file:1205160 --out lecture-notes.pdf
-```
+## Upgrading
 
-Run `klms --help` or `klms <command> --help` for the rest of the command
-surface, including activities, quizzes, calendar events, boards, videos, and
-course files.
+`klms update --check` and `klms update` fetch the latest stable GitHub release,
+verify its SHA-256, and replace the executable you ran (following a symlink).
+Nothing checks for updates unless you ask. Earlier releases installed an Agent
+Skill copy of the help text; installing or updating removes that managed copy
+(`~/.local/share/klms/skills/klms` and the `~/.agents/skills/klms` symlink to
+it) and leaves anything else alone. The help text is the agent guidance now.
 
-Coursework indexes and grade/attendance report headers recognize English and
-Korean KLMS labels. Calendar cards prefer structural timestamps and their event
-heading, with English/Korean date text as a fallback in Asia/Seoul. Other text
-locales are not verified; an unrecognized dated event fails agenda generation
-rather than being silently omitted.
+## Development
 
-For a private history that survives KLMS changes, initialize and synchronize
-the local versioned library explicitly:
-
-```bash
-klms library status
-klms library sync --files
-klms library sync --notices --files --download changed
-klms library search "compiler" --limit 20
-klms library changes
-klms library activity --subject file:1205160
-```
-
-The library never syncs on its own and never writes to KLMS. See
-[docs/LOCAL_LIBRARY.md](docs/LOCAL_LIBRARY.md).
-
-## JSON and agent use
-
-Put `--json` before the command for stable machine-readable output:
-
-```bash
-klms --json today
-klms --json assignments list --course course:12345
-```
-
-`klms spec` prints the command grammar, and `klms --json spec` emits the full
-argument tree so agents can discover the interface without parsing `--help`.
-
-Shell completions are generated from the same declaration:
-
-```bash
-klms completions bash > ~/.local/share/bash-completion/completions/klms
-klms completions zsh > ~/.zfunc/_klms
-klms completions fish > ~/.config/fish/completions/klms.fish
-```
-
-`klms skill install` installs the companion Agent Skill embedded in the binary
-under `~/.local/share/klms/skills/klms` and links it from
-`~/.agents/skills/klms`. Set `XDG_DATA_HOME` to use another data root. Run
-`klms skill status` to inspect the installation.
-
-## Build from source
-
-This project uses Rust 1.86 or newer. Read [SECURITY.md](SECURITY.md) before
-changing dependencies.
-
-```bash
-make check
-make install-local
-```
-
-`make install-local` builds the release binary, installs it under
-`~/.local/bin` by default, and installs the matching companion skill.
-
-To check a release archive locally without touching your installed CLI or
-session (keep the matching `.sha256` file next to it):
-
-```bash
-python3 scripts/release_smoke.py path/to/klms-v0.2.1-aarch64-apple-darwin.tar.gz
-```
-
-## Documentation
-
-- [docs/COMMAND_CONTRACT.md](docs/COMMAND_CONTRACT.md): command grammar, references, safety rules
-- [docs/JSON.md](docs/JSON.md): JSON envelopes and error codes
-- [docs/LOCAL_LIBRARY.md](docs/LOCAL_LIBRARY.md): the versioned local library
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/AUTH_PROTOCOL.md](docs/AUTH_PROTOCOL.md), [docs/ENDPOINTS.md](docs/ENDPOINTS.md): internals
-- [SECURITY.md](SECURITY.md): security policy and verification
+`make check` runs fmt, tests, and clippy; see [AGENTS.md](AGENTS.md),
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/CONTRACT.md](docs/CONTRACT.md).
+`python3 scripts/release_smoke.py ARCHIVE.tar.gz` checks a release archive offline.
 
 ## License
 

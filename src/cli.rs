@@ -106,10 +106,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Update this executable and its companion skill from the latest release (contacts GitHub only).
+    /// Update this executable from the latest release (contacts GitHub only).
     #[command(
         visible_alias = "upgrade",
-        after_help = "Examples:\n  klms update --check\n  klms update\n  klms --json update --check\n\nContacts GitHub, not KLMS. --check makes no installation changes. Updates the executable you invoked and the companion skill; no sign-in is required."
+        after_help = "Examples:\n  klms update --check\n  klms update\n  klms --json update --check\n\nContacts GitHub, not KLMS. --check makes no installation changes. Updates the executable you invoked (following a symlink); no sign-in is required."
     )]
     Update(UpdateArgs),
     #[command(name = "__install", hide = true)]
@@ -118,8 +118,6 @@ pub enum Command {
         #[arg(long)]
         destination: PathBuf,
     },
-    /// Install or inspect the companion Agent Skill (a copy of this guidance for agent clients).
-    Skill(SkillArgs),
     /// Check configuration and the live session with one dashboard read (may refresh the timer).
     #[command(after_help = "Example:\n  klms --json doctor")]
     Doctor,
@@ -369,20 +367,6 @@ pub enum LibraryRelationsCommand {
         #[arg(help = ACTOR_HELP, long, value_name = "ACTOR", default_value = "human")]
         actor: String,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct SkillArgs {
-    #[command(subcommand)]
-    pub command: SkillCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SkillCommand {
-    /// Install the embedded skill and its cross-client discovery link.
-    Install,
-    /// Report the managed skill and discovery-link state.
-    Status,
 }
 
 #[derive(Debug, Clone, Args)]

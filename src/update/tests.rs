@@ -101,7 +101,7 @@ fn check_and_no_downgrade_only_fetch_metadata() {
     }
 }
 
-// This candidate records the subprocess protocol; actual binary/skill installation
+// This candidate records the subprocess protocol; actual binary installation
 // is exercised by tests/update_contract.rs using Cargo's real CLI executable.
 fn protocol_archive(root: &Path, candidate_version: &str, fail: bool) -> Vec<u8> {
     let package = format!(
@@ -133,6 +133,38 @@ exit 0
         .unwrap();
     assert!(output.status.success());
     output.stdout
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_skill_removal_touches_only_klms_managed_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let (home, data) = (root.path().join("home"), root.path().join("data"));
+    let payload_dir = data.join("klms/skills/klms");
+    let link = home.join(".agents/skills/klms");
+    fs::create_dir_all(&payload_dir).unwrap();
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    fs::write(payload_dir.join("SKILL.md"), b"legacy").unwrap();
+    std::os::unix::fs::symlink(&payload_dir, &link).unwrap();
+    remove_legacy_skill_at(&home, &data);
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(!data.join("klms/skills").exists());
+    assert!(data.join("klms").exists());
+
+    // A symlink to somewhere else, or an unknown file in the payload directory, stays.
+    let elsewhere = root.path().join("mine");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    fs::create_dir_all(&payload_dir).unwrap();
+    fs::write(payload_dir.join("SKILL.md"), b"legacy").unwrap();
+    fs::write(payload_dir.join("extra.md"), b"user file").unwrap();
+    remove_legacy_skill_at(&home, &data);
+    assert_eq!(fs::read_link(&link).unwrap(), elsewhere);
+    assert_eq!(
+        fs::read(payload_dir.join("extra.md")).unwrap(),
+        b"user file"
+    );
+    assert!(!payload_dir.join("SKILL.md").exists());
 }
 
 #[test]
