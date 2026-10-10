@@ -273,11 +273,11 @@ fn term_from_code(code: &str) -> Option<String> {
 }
 
 fn download_url(script: &str) -> Option<String> {
-    for marker in ["downloadFile('", "downloadFile(\""] {
-        let Some(rest) = script.split(marker).nth(1) else {
+    for quote in ['\'', '"'] {
+        let Some(rest) = script.split(&format!("downloadFile({quote}")).nth(1) else {
             continue;
         };
-        let value = rest.split(marker.chars().last()?).next()?.trim();
+        let value = rest.split(quote).next()?.trim();
         if value.starts_with('/') || value.starts_with("https://") {
             return Some(value.into());
         }

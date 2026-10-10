@@ -472,10 +472,6 @@ pub fn release_client(timeout: u64) -> Result<Client, AppError> {
 struct ReleasePolicy;
 
 impl http::Policy for ReleasePolicy {
-    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
-        Vec::new()
-    }
-
     fn allow(&mut self, url: &Url) -> Result<(), AppError> {
         if url.scheme() == "https" {
             Ok(())

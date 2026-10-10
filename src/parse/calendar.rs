@@ -15,11 +15,7 @@ pub struct CalendarPage {
     pub missing_course_ids: usize,
 }
 
-pub fn calendar_page(html: &str, base_url: &Url) -> Result<CalendarPage, AppError> {
-    calendar_page_on(html, base_url, &date::seoul_today())
-}
-
-fn calendar_page_on(html: &str, base_url: &Url, today: &str) -> Result<CalendarPage, AppError> {
+pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<CalendarPage, AppError> {
     let document = Html::parse_document(html);
     let titles = sel(".card-header .name, h3.name, [data-region=event-name]");
     let course_links = sel("a[href*='course/view.php']");
@@ -194,14 +190,19 @@ fn event_time(
 
 #[cfg(test)]
 mod tests {
-    use super::{calendar_page, calendar_page_on};
+    use super::calendar_page;
     use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 
     fn page(inner: &str) -> super::CalendarPage {
         let html = format!("<main class='calendarwrapper'>{inner}</main>");
-        calendar_page(&html, &Url::parse(BASE).unwrap()).unwrap()
+        calendar_page(
+            &html,
+            &Url::parse(BASE).unwrap(),
+            &crate::date::seoul_today(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -210,7 +211,7 @@ mod tests {
         let base = Url::parse(BASE).unwrap();
         for label in ["내일", "Tomorrow", "morgen"] {
             let html = fixture.replace("내일", label);
-            let page = calendar_page_on(&html, &base, "2030-03-16").unwrap();
+            let page = calendar_page(&html, &base, "2030-03-16").unwrap();
             let event = &page.events[0];
             assert_eq!(event.title, "Reading response is due");
             assert_eq!(event.reference.as_deref(), Some("assign:7"));
@@ -229,13 +230,13 @@ mod tests {
         let fixture = include_str!("../../tests/fixtures/localized/calendar.html")
             .replace("&amp;time=1899989400", "");
         let base = Url::parse(BASE).unwrap();
-        let page = calendar_page_on(&fixture, &base, "2030-12-31").unwrap();
+        let page = calendar_page(&fixture, &base, "2030-12-31").unwrap();
         assert_eq!(
             page.events[0].starts_at.as_deref(),
             Some("2031-01-01T23:50:00+09:00")
         );
         let html = fixture.replace("내일", "unknown date");
-        let unknown = calendar_page_on(&html, &base, "2030-12-31").unwrap();
+        let unknown = calendar_page(&html, &base, "2030-12-31").unwrap();
         assert_eq!((unknown.unparsed_times, unknown.undated_events), (1, 0));
         let when = unknown.events[0].when_text.as_deref().unwrap();
         assert!(when.contains("unknown date"));
@@ -245,9 +246,13 @@ mod tests {
     fn ambiguous_resources_and_empty_pages_fail_visibly() {
         let base = Url::parse(BASE).unwrap();
         let ambiguous = "<main class='calendarwrapper'><div class='event'><a href='/mod/assign/view.php?id=7'>Work</a><a href='/mod/assign/view.php?id=8'>Other work</a></div></main>";
-        assert!(calendar_page(ambiguous, &base).is_err());
-        assert!(calendar_page("<html><body>maintenance</body></html>", &base).is_err());
-        assert!(calendar_page("<main class='calendarwrapper'></main>", &base).is_ok());
+        assert!(calendar_page(ambiguous, &base, "2030-12-31").is_err());
+        assert!(
+            calendar_page("<html><body>maintenance</body></html>", &base, "2030-12-31").is_err()
+        );
+        assert!(
+            calendar_page("<main class='calendarwrapper'></main>", &base, "2030-12-31").is_ok()
+        );
     }
 
     #[test]
@@ -277,9 +282,13 @@ mod tests {
           <a href='/course/view.php?id=42'>Compilers</a>
           <time datetime='2026-09-01T23:59:00+09:00'>Tuesday, 1 September 2026, 11:59 PM</time>
           </div></main>"#;
-        let rows = calendar_page(html, &Url::parse(BASE).unwrap())
-            .unwrap()
-            .events;
+        let rows = calendar_page(
+            html,
+            &Url::parse(BASE).unwrap(),
+            &crate::date::seoul_today(),
+        )
+        .unwrap()
+        .events;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].reference.as_deref(), Some("assign:7"));
         assert_eq!(rows[0].course_id.as_deref(), Some("42"));

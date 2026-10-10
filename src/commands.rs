@@ -274,7 +274,11 @@ impl Ctx<'_> {
             ),
             Command::Calendar { command } => {
                 let CalendarCommand::List(list) = command;
-                let page = parse::calendar_page(&client.get(CALENDAR_PATH)?.text, base)?;
+                let page = parse::calendar_page(
+                    &client.get(CALENDAR_PATH)?.text,
+                    base,
+                    &date::seoul_today(),
+                )?;
                 let header = "WHEN\tREF\tCOURSE\tTITLE";
                 let events = page.events;
                 listing(
@@ -561,7 +565,7 @@ impl Ctx<'_> {
         let response = self.client.get(CALENDAR_PATH)?;
         let today = date::seoul_today();
         let through = date::add_days(&today, days as i64).expect("valid current date");
-        let page = parse::calendar_page(&response.text, self.base)?;
+        let page = parse::calendar_page(&response.text, self.base, &date::seoul_today())?;
         if !page.complete || page.unparsed_times > 0 {
             return Err(AppError::shape(
                 "cannot build a complete agenda from the current calendar page",
