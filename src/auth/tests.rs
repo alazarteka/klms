@@ -435,7 +435,7 @@ fn non_interactive_login_is_two_steps_through_a_pending_file() {
 }
 
 #[test]
-fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_never_reaches_kaist() {
+fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_is_rejected() {
     let fx = Fixture::new();
     fx.seed_remembered_password();
     let message = |options: &LoginOptions| failure(fx.login(false, true, options)).message;
@@ -453,14 +453,9 @@ fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_never_reaches_kais
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     pending.expires_at = epoch_now() as u64 - 1;
     store::save_json(&path, &pending, "pending login").unwrap();
-    let validations = fx.sso.count(VALIDATE);
+    // The deletion and no-network behavior is covered in store.rs; this pins
+    // that the real clock reaches the expiry check.
     assert!(message(&code("123456")).contains("expired"));
-    assert!(!path.exists());
-    assert_eq!(
-        fx.sso.count(VALIDATE),
-        validations,
-        "expired logins never reach KAIST"
-    );
 }
 
 #[test]
