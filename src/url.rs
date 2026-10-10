@@ -21,25 +21,11 @@ pub struct Url {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ParseError {
-    RelativeUrlWithoutBase,
-    UnsupportedScheme,
-    EmptyHost,
-    InvalidDomainCharacter,
-    InvalidPort,
-    InvalidIpv6Address,
-}
+pub struct ParseError(&'static str);
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::RelativeUrlWithoutBase => "relative URL without a base",
-            Self::UnsupportedScheme => "only http and https URLs are supported",
-            Self::EmptyHost => "empty host",
-            Self::InvalidDomainCharacter => "invalid domain character",
-            Self::InvalidPort => "invalid port number",
-            Self::InvalidIpv6Address => "invalid IPv6 address",
-        })
+        f.write_str(self.0)
     }
 }
 
@@ -55,8 +41,7 @@ pub struct Origin {
 
 impl Origin {
     pub fn ascii_serialization(&self) -> String {
-        let default = default_port(&self.scheme) == Some(self.port);
-        if default {
+        if default_port(&self.scheme) == Some(self.port) {
             format!("{}://{}", self.scheme, self.host)
         } else {
             format!("{}://{}:{}", self.scheme, self.host, self.port)
@@ -67,7 +52,8 @@ impl Origin {
 impl Url {
     pub fn parse(input: &str) -> Result<Self, ParseError> {
         let cleaned = clean(input);
-        let (scheme, rest) = split_scheme(&cleaned).ok_or(ParseError::RelativeUrlWithoutBase)?;
+        let (scheme, rest) =
+            split_scheme(&cleaned).ok_or(ParseError("relative URL without a base"))?;
         Self::from_parts(scheme, rest, true)
     }
 
@@ -76,15 +62,15 @@ impl Url {
         let cleaned = clean(reference);
         if let Some((scheme, rest)) = split_scheme(&cleaned) {
             // `https:x` against an https base is a relative reference.
-            if scheme == self.scheme {
-                return self.join(rest);
-            }
-            return Self::from_parts(scheme, rest, true);
+            return if scheme == self.scheme {
+                self.join(rest)
+            } else {
+                Self::from_parts(scheme, rest, true)
+            };
         }
+        let is_slash = |c: Option<char>| matches!(c, Some('/' | '\\'));
         let mut leading = cleaned.chars();
-        if leading.next().is_some_and(|c| matches!(c, '/' | '\\'))
-            && leading.next().is_some_and(|c| matches!(c, '/' | '\\'))
-        {
+        if is_slash(leading.next()) && is_slash(leading.next()) {
             // Exactly two slashes introduce an authority; more means no host.
             return Self::from_parts(self.scheme.clone(), &cleaned, false);
         }
@@ -92,18 +78,16 @@ impl Url {
         let (path_part, query) = split_once_char(rest, '?');
         let mut next = self.clone();
         next.fragment = fragment.map(|value| encode(value, FRAGMENT));
-        if path_part.is_empty() {
-            if query.is_some() {
-                next.query = query.map(|value| encode(value, QUERY));
-            }
-        } else {
+        if !path_part.is_empty() || query.is_some() {
             next.query = query.map(|value| encode(value, QUERY));
+        }
+        if !path_part.is_empty() {
             let slashed = path_part.replace('\\', "/");
+            let keep = self.path.rfind('/').map_or(0, |index| index + 1);
             let merged = if slashed.starts_with('/') {
                 slashed
             } else {
-                let keep = self.path.rfind('/').map_or(0, |index| index + 1);
-                format!("{}{}", &self.path[..keep], slashed)
+                format!("{}{slashed}", &self.path[..keep])
             };
             next.path = normalize_path(&encode(&merged, PATH));
         }
@@ -117,19 +101,16 @@ impl Url {
         skip_all_slashes: bool,
     ) -> Result<Self, ParseError> {
         if scheme != "http" && scheme != "https" {
-            return Err(ParseError::UnsupportedScheme);
+            return Err(ParseError("only http and https URLs are supported"));
         }
         let rest = if skip_all_slashes {
             after_scheme.trim_start_matches(['/', '\\'])
         } else {
             &after_scheme[2..]
         };
-        let authority_end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
-        let (authority, rest) = rest.split_at(authority_end);
-        let (userinfo, host_port) = match authority.rfind('@') {
-            Some(at) => (&authority[..at], &authority[at + 1..]),
-            None => ("", authority),
-        };
+        let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+        let (authority, rest) = rest.split_at(end);
+        let (userinfo, host_port) = authority.rsplit_once('@').unwrap_or(("", authority));
         let (username, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
         let (host, port) = parse_host_port(host_port, &scheme)?;
         let (rest, fragment) = split_once_char(rest, '#');
@@ -152,26 +133,22 @@ impl Url {
     fn reserialize(&mut self) {
         let mut out = format!("{}://", self.scheme);
         if !self.username.is_empty() || !self.password.is_empty() {
-            out.push_str(&self.username);
+            out += &self.username;
             if !self.password.is_empty() {
-                out.push(':');
-                out.push_str(&self.password);
+                out += &format!(":{}", self.password);
             }
             out.push('@');
         }
-        out.push_str(&self.host);
+        out += &self.host;
         if let Some(port) = self.port {
-            out.push(':');
-            out.push_str(&port.to_string());
+            out += &format!(":{port}");
         }
-        out.push_str(&self.path);
+        out += &self.path;
         if let Some(query) = &self.query {
-            out.push('?');
-            out.push_str(query);
+            out += &format!("?{query}");
         }
         if let Some(fragment) = &self.fragment {
-            out.push('#');
-            out.push_str(fragment);
+            out += &format!("#{fragment}");
         }
         self.serialization = out;
     }
@@ -195,10 +172,6 @@ impl Url {
     /// The host as serialized: IPv6 addresses keep their brackets.
     pub fn host_str(&self) -> Option<&str> {
         Some(&self.host)
-    }
-
-    pub fn port(&self) -> Option<u16> {
-        self.port
     }
 
     pub fn port_or_known_default(&self) -> Option<u16> {
@@ -227,22 +200,15 @@ impl Url {
 
     /// Decoded `application/x-www-form-urlencoded` pairs of the query.
     pub fn query_pairs(&self) -> impl Iterator<Item = (Cow<'_, str>, Cow<'_, str>)> {
-        self.query
-            .as_deref()
-            .unwrap_or("")
-            .split('&')
-            .filter(|pair| !pair.is_empty())
-            .map(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                (Cow::Owned(form_decode(key)), Cow::Owned(form_decode(value)))
-            })
+        let pairs = self.query.as_deref().unwrap_or("").split('&');
+        pairs.filter(|pair| !pair.is_empty()).map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (Cow::Owned(form_decode(key)), Cow::Owned(form_decode(value)))
+        })
     }
 
     pub fn query_pairs_mut(&mut self) -> QueryPairs<'_> {
-        QueryPairs {
-            buffer: self.query.clone().unwrap_or_default(),
-            url: self,
-        }
+        QueryPairs(self)
     }
 
     pub fn set_path(&mut self, path: &str) {
@@ -261,24 +227,20 @@ impl Url {
         self.reserialize();
     }
 
-    /// The path's `/`-separated segments, without the leading slash.
-    pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
-        Some(self.path.strip_prefix('/')?.split('/'))
-    }
-
     pub fn set_fragment(&mut self, fragment: Option<&str>) {
         self.fragment = fragment.map(|value| encode(value, FRAGMENT));
         self.reserialize();
     }
 
-    pub fn set_username(&mut self, username: &str) {
-        self.username = encode(username, USERINFO);
+    pub fn clear_userinfo(&mut self) {
+        self.username.clear();
+        self.password.clear();
         self.reserialize();
     }
 
-    pub fn set_password(&mut self, password: Option<&str>) {
-        self.password = password.map_or_else(String::new, |value| encode(value, USERINFO));
-        self.reserialize();
+    /// The path's `/`-separated segments, without the leading slash.
+    pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
+        Some(self.path.strip_prefix('/')?.split('/'))
     }
 }
 
@@ -294,127 +256,78 @@ impl From<Url> for String {
     }
 }
 
-/// Appends or replaces query pairs; the URL is updated when this is dropped.
-pub struct QueryPairs<'a> {
-    url: &'a mut Url,
-    buffer: String,
-}
+/// Appends form-encoded query pairs to the URL.
+pub struct QueryPairs<'a>(&'a mut Url);
 
 impl QueryPairs<'_> {
     pub fn append_pair(&mut self, key: &str, value: &str) -> &mut Self {
-        if !self.buffer.is_empty() {
-            self.buffer.push('&');
+        let query = self.0.query.get_or_insert_with(String::new);
+        if !query.is_empty() {
+            query.push('&');
         }
-        self.buffer.push_str(&form_encode_pair(key, value));
+        query.push_str(&form_urlencode([(key, value)]));
+        self.0.reserialize();
         self
-    }
-
-    pub fn extend_pairs<K: AsRef<str>, V: AsRef<str>>(
-        &mut self,
-        pairs: impl IntoIterator<Item = (K, V)>,
-    ) -> &mut Self {
-        for (key, value) in pairs {
-            self.append_pair(key.as_ref(), value.as_ref());
-        }
-        self
-    }
-
-    pub fn clear(&mut self) -> &mut Self {
-        self.buffer.clear();
-        self
-    }
-}
-
-impl Drop for QueryPairs<'_> {
-    fn drop(&mut self) {
-        let buffer = std::mem::take(&mut self.buffer);
-        self.url.query = (!buffer.is_empty()).then_some(buffer);
-        self.url.reserialize();
     }
 }
 
 /// `application/x-www-form-urlencoded` body from key/value pairs.
 pub fn form_urlencode<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
-    pairs
+    let encode = |value: &str| {
+        value.bytes().fold(String::new(), |mut out, byte| {
+            match byte {
+                b'*' | b'-' | b'.' | b'_' => out.push(byte as char),
+                b' ' => out.push('+'),
+                _ if byte.is_ascii_alphanumeric() => out.push(byte as char),
+                _ => out += &format!("%{byte:02X}"),
+            }
+            out
+        })
+    };
+    let pairs: Vec<String> = pairs
         .into_iter()
-        .map(|(key, value)| form_encode_pair(key, value))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn form_encode_pair(key: &str, value: &str) -> String {
-    format!("{}={}", form_encode(key), form_encode(value))
-}
-
-fn form_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'*' | b'-' | b'.' | b'_' => out.push(byte as char),
-            b' ' => out.push('+'),
-            byte if byte.is_ascii_alphanumeric() => out.push(byte as char),
-            byte => push_percent(&mut out, byte),
-        }
-    }
-    out
+        .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
+        .collect();
+    pairs.join("&")
 }
 
 fn form_decode(value: &str) -> String {
     let bytes = value.as_bytes();
+    let hex = |index: usize| bytes.get(index).and_then(|&b| (b as char).to_digit(16));
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        match bytes[index] {
-            b'+' => out.push(b' '),
-            b'%' if index + 2 < bytes.len()
-                && hex(bytes[index + 1]).is_some()
-                && hex(bytes[index + 2]).is_some() =>
-            {
-                out.push(
-                    hex(bytes[index + 1]).unwrap_or(0) * 16 + hex(bytes[index + 2]).unwrap_or(0),
-                );
+        match (bytes[index], hex(index + 1), hex(index + 2)) {
+            (b'+', ..) => out.push(b' '),
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
                 index += 2;
             }
-            byte => out.push(byte),
+            (byte, ..) => out.push(byte),
         }
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn hex(byte: u8) -> Option<u8> {
-    (byte as char).to_digit(16).map(|digit| digit as u8)
-}
-
-fn push_percent(out: &mut String, byte: u8) {
-    out.push_str(&format!("%{byte:02X}"));
-}
-
-type EncodeSet = fn(u8) -> bool;
-
-const FRAGMENT: EncodeSet = |b| matches!(b, b' ' | b'"' | b'<' | b'>' | b'`');
-const QUERY: EncodeSet = |b| matches!(b, b' ' | b'"' | b'#' | b'<' | b'>' | b'\'');
-const PATH: EncodeSet = |b| FRAGMENT(b) || matches!(b, b'#' | b'?' | b'{' | b'}');
-const USERINFO: EncodeSet = |b| {
-    PATH(b)
-        || matches!(
-            b,
-            b'/' | b':' | b';' | b'=' | b'@' | b'[' | b'\\' | b']' | b'^' | b'|'
-        )
-};
+// Bytes (besides controls and non-ASCII) each component percent-encodes; the
+// sets nest as in the WHATWG URL standard.
+const FRAGMENT: &str = " \"<>`";
+const QUERY: &str = " \"#<>'";
+const PATH: &str = " \"<>`#?{}";
+const USERINFO: &str = " \"<>`#?{}/:;=@[\\]^|";
 
 /// Percent-encodes controls, non-ASCII bytes and the set's bytes; existing
 /// `%` sequences are left alone.
-fn encode(input: &str, set: EncodeSet) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        if !(0x20..0x7F).contains(&byte) || set(byte) {
-            push_percent(&mut out, byte);
-        } else {
+fn encode(input: &str, set: &str) -> String {
+    input.bytes().fold(String::new(), |mut out, byte| {
+        if (0x20..0x7F).contains(&byte) && !set.contains(byte as char) {
             out.push(byte as char);
+        } else {
+            out += &format!("%{byte:02X}");
         }
-    }
-    out
+        out
+    })
 }
 
 /// Removes tab and newline anywhere, and C0 controls or spaces at the ends.
@@ -427,13 +340,11 @@ fn clean(input: &str) -> String {
 }
 
 fn split_scheme(input: &str) -> Option<(String, &str)> {
-    let colon = input.find(':')?;
-    let scheme = &input[..colon];
+    let (scheme, rest) = input.split_once(':')?;
     let mut chars = scheme.chars();
-    let first = chars.next()?;
-    (first.is_ascii_alphabetic()
+    (chars.next()?.is_ascii_alphabetic()
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-    .then(|| (scheme.to_ascii_lowercase(), &input[colon + 1..]))
+    .then(|| (scheme.to_ascii_lowercase(), rest))
 }
 
 fn split_once_char(input: &str, separator: char) -> (&str, Option<&str>) {
@@ -452,47 +363,45 @@ fn default_port(scheme: &str) -> Option<u16> {
 }
 
 fn parse_host_port(input: &str, scheme: &str) -> Result<(String, Option<u16>), ParseError> {
+    const BAD_PORT: ParseError = ParseError("invalid port number");
     let (host, port) = if let Some(rest) = input.strip_prefix('[') {
-        let end = rest.find(']').ok_or(ParseError::InvalidIpv6Address)?;
-        let address = &rest[..end];
-        if address.is_empty()
-            || !address.contains(':')
+        let invalid = ParseError("invalid IPv6 address");
+        let (address, tail) = rest.split_once(']').ok_or(invalid.clone())?;
+        if !address.contains(':')
             || !address
                 .chars()
                 .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'))
         {
-            return Err(ParseError::InvalidIpv6Address);
+            return Err(invalid);
         }
-        let port = match &rest[end + 1..] {
+        let port = match tail {
             "" => None,
-            tail => Some(tail.strip_prefix(':').ok_or(ParseError::InvalidPort)?),
+            tail => Some(tail.strip_prefix(':').ok_or(BAD_PORT)?),
         };
         (format!("[{}]", address.to_ascii_lowercase()), port)
     } else {
-        let (host, port) = match input.rfind(':') {
-            Some(colon) => (&input[..colon], Some(&input[colon + 1..])),
+        let (host, port) = match input.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
             None => (input, None),
         };
         if host.is_empty() {
-            return Err(ParseError::EmptyHost);
+            return Err(ParseError("empty host"));
         }
         if !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
         {
-            return Err(ParseError::InvalidDomainCharacter);
+            return Err(ParseError("invalid domain character"));
         }
         (host.to_ascii_lowercase(), port)
     };
     let port = match port {
         None | Some("") => None,
-        Some(digits) => {
-            if !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(ParseError::InvalidPort);
-            }
-            let value: u16 = digits.parse().map_err(|_| ParseError::InvalidPort)?;
+        Some(digits) if digits.bytes().all(|b| b.is_ascii_digit()) => {
+            let value: u16 = digits.parse().map_err(|_| BAD_PORT)?;
             (default_port(scheme) != Some(value)).then_some(value)
         }
+        Some(_) => return Err(BAD_PORT),
     };
     Ok((host, port))
 }
@@ -500,25 +409,21 @@ fn parse_host_port(input: &str, scheme: &str) -> Result<(String, Option<u16>), P
 /// Resolves `.` and `..` segments (including `%2e` spellings). An empty path
 /// becomes `/`.
 fn normalize_path(path: &str) -> String {
-    let path = path.strip_prefix('/').unwrap_or(path);
     let mut segments: Vec<&str> = Vec::new();
-    let mut parts = path.split('/').peekable();
+    let mut parts = path.strip_prefix('/').unwrap_or(path).split('/').peekable();
     while let Some(part) = parts.next() {
-        let lower = part.to_ascii_lowercase();
-        let last = parts.peek().is_none();
-        match lower.as_str() {
-            ".." | ".%2e" | "%2e." | "%2e%2e" => {
-                segments.pop();
-                if last {
-                    segments.push("");
-                }
-            }
-            "." | "%2e" => {
-                if last {
-                    segments.push("");
-                }
-            }
-            _ => segments.push(part),
+        let dots = match part.to_ascii_lowercase().as_str() {
+            ".." | ".%2e" | "%2e." | "%2e%2e" => 2,
+            "." | "%2e" => 1,
+            _ => 0,
+        };
+        if dots == 2 {
+            segments.pop();
+        }
+        if dots == 0 {
+            segments.push(part);
+        } else if parts.peek().is_none() {
+            segments.push("");
         }
     }
     format!("/{}", segments.join("/"))
@@ -528,48 +433,35 @@ fn normalize_path(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn parse(input: &str) -> String {
-        Url::parse(input).unwrap().to_string()
+    fn url(input: &str) -> Url {
+        Url::parse(input).unwrap()
     }
 
     fn join(base: &str, reference: &str) -> String {
-        Url::parse(base)
-            .unwrap()
-            .join(reference)
-            .unwrap()
-            .to_string()
+        url(base).join(reference).unwrap().to_string()
     }
 
     #[test]
-    fn normalizes_scheme_host_port_and_path() {
-        assert_eq!(
-            parse("HTTPS://KLMS.Kaist.AC.kr:443"),
-            "https://klms.kaist.ac.kr/"
-        );
-        assert_eq!(parse("http://127.0.0.1:80/a"), "http://127.0.0.1/a");
-        assert_eq!(parse("http://127.0.0.1:8080"), "http://127.0.0.1:8080/");
-        assert_eq!(parse("http://[::1]:9/x"), "http://[::1]:9/x");
-        assert_eq!(
-            parse("  https://a.test/p q\t/r\n"),
-            "https://a.test/p%20q/r"
-        );
-        assert_eq!(
-            parse("https://a.test/a/./b/../c/%2e%2E/d"),
-            "https://a.test/a/d"
-        );
-        assert_eq!(parse("https://a.test\\x\\y"), "https://a.test/x/y");
-        assert_eq!(
-            parse("https://a.test/%7Efoo/\u{d55c}"),
-            "https://a.test/%7Efoo/%ED%95%9C"
-        );
-        assert_eq!(
-            parse("https://a.test/a b?q=a b&r='#f g"),
-            "https://a.test/a%20b?q=a%20b&r=%27#f%20g"
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_or_malformed_urls() {
+    fn parse_normalizes_scheme_host_port_path_and_encoding() {
+        for (input, want) in [
+            ("HTTPS://KLMS.Kaist.AC.kr:443", "https://klms.kaist.ac.kr/"),
+            ("http://127.0.0.1:80/a", "http://127.0.0.1/a"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080/"),
+            ("http://[::1]:9/x", "http://[::1]:9/x"),
+            ("  https://a.test/p q\t/r\n", "https://a.test/p%20q/r"),
+            ("https://a.test/a/./b/../c/%2e%2E/d", "https://a.test/a/d"),
+            ("https://a.test\\x\\y", "https://a.test/x/y"),
+            (
+                "https://a.test/%7Efoo/\u{d55c}",
+                "https://a.test/%7Efoo/%ED%95%9C",
+            ),
+            (
+                "https://a.test/a b?q=a b&r='#f g",
+                "https://a.test/a%20b?q=a%20b&r=%27#f%20g",
+            ),
+        ] {
+            assert_eq!(url(input).to_string(), want, "{input:?}");
+        }
         for input in [
             "",
             "/relative",
@@ -591,127 +483,84 @@ mod tests {
     }
 
     #[test]
-    fn userinfo_is_split_at_the_last_at_sign() {
-        let url = Url::parse("https://user:p%40ss@evil.test@klms.kaist.ac.kr/x").unwrap();
-        assert_eq!(url.host_str(), Some("klms.kaist.ac.kr"));
-        assert_eq!(url.username(), "user");
-        assert_eq!(url.password(), Some("p%40ss%40evil.test"));
-        let spoof = Url::parse("https://klms.kaist.ac.kr@evil.test/").unwrap();
+    fn userinfo_is_split_at_the_last_at_sign_and_origin_compares_effective_port() {
+        let parsed = url("https://user:p%40ss@evil.test@klms.kaist.ac.kr/x");
+        assert_eq!(parsed.host_str(), Some("klms.kaist.ac.kr"));
+        assert_eq!(parsed.username(), "user");
+        assert_eq!(parsed.password(), Some("p%40ss%40evil.test"));
+        let base = url("https://klms.kaist.ac.kr/");
+        let spoof = url("https://klms.kaist.ac.kr@evil.test/");
         assert_eq!(spoof.host_str(), Some("evil.test"));
         assert_eq!(spoof.username(), "klms.kaist.ac.kr");
-        assert_ne!(
-            spoof.origin(),
-            Url::parse("https://klms.kaist.ac.kr/").unwrap().origin()
-        );
-    }
-
-    #[test]
-    fn origin_compares_scheme_host_and_effective_port() {
-        let base = Url::parse("https://klms.kaist.ac.kr/").unwrap();
+        assert_ne!(spoof.origin(), base.origin());
         assert_eq!(
             base.origin(),
-            Url::parse("https://KLMS.kaist.ac.kr:443/z")
-                .unwrap()
-                .origin()
+            url("https://KLMS.kaist.ac.kr:443/z").origin()
         );
-        assert_ne!(
-            base.origin(),
-            Url::parse("http://klms.kaist.ac.kr/").unwrap().origin()
-        );
-        assert_ne!(
-            base.origin(),
-            Url::parse("https://klms.kaist.ac.kr:444/")
-                .unwrap()
-                .origin()
-        );
+        assert_ne!(base.origin(), url("http://klms.kaist.ac.kr/").origin());
+        assert_ne!(base.origin(), url("https://klms.kaist.ac.kr:444/").origin());
         assert_eq!(
             base.origin().ascii_serialization(),
             "https://klms.kaist.ac.kr"
         );
-        assert_eq!(
-            Url::parse("http://127.0.0.1:8080/")
-                .unwrap()
-                .origin()
-                .ascii_serialization(),
-            "http://127.0.0.1:8080"
-        );
+        let local = url("http://127.0.0.1:8080/").origin().ascii_serialization();
+        assert_eq!(local, "http://127.0.0.1:8080");
         assert_eq!(base.port_or_known_default(), Some(443));
-        assert_eq!(base.port(), None);
     }
 
     #[test]
     fn joins_references_like_rfc_3986() {
         let base = "https://klms.kaist.ac.kr/a/b/c.php?x=1#frag";
-        assert_eq!(join(base, "d.php"), "https://klms.kaist.ac.kr/a/b/d.php");
-        assert_eq!(
-            join(base, "./d.php?y=2"),
-            "https://klms.kaist.ac.kr/a/b/d.php?y=2"
-        );
-        assert_eq!(join(base, "../d.php"), "https://klms.kaist.ac.kr/a/d.php");
-        assert_eq!(join(base, "../../../../d"), "https://klms.kaist.ac.kr/d");
-        assert_eq!(
-            join(base, "/root?z=3#h"),
-            "https://klms.kaist.ac.kr/root?z=3#h"
-        );
-        assert_eq!(
-            join(base, "?only=query"),
-            "https://klms.kaist.ac.kr/a/b/c.php?only=query"
-        );
-        assert_eq!(
-            join(base, "#new"),
-            "https://klms.kaist.ac.kr/a/b/c.php?x=1#new"
-        );
-        assert_eq!(join(base, ""), "https://klms.kaist.ac.kr/a/b/c.php?x=1");
-        assert_eq!(join(base, "//other.test/p"), "https://other.test/p");
-        assert_eq!(join(base, "\\\\other.test\\p"), "https://other.test/p");
-        assert_eq!(join(base, "http://other.test:80/p"), "http://other.test/p");
-        assert_eq!(join(base, "x/.."), "https://klms.kaist.ac.kr/a/b/");
+        for (reference, want) in [
+            ("d.php", "https://klms.kaist.ac.kr/a/b/d.php"),
+            ("./d.php?y=2", "https://klms.kaist.ac.kr/a/b/d.php?y=2"),
+            ("../d.php", "https://klms.kaist.ac.kr/a/d.php"),
+            ("../../../../d", "https://klms.kaist.ac.kr/d"),
+            ("/root?z=3#h", "https://klms.kaist.ac.kr/root?z=3#h"),
+            (
+                "?only=query",
+                "https://klms.kaist.ac.kr/a/b/c.php?only=query",
+            ),
+            ("#new", "https://klms.kaist.ac.kr/a/b/c.php?x=1#new"),
+            ("", "https://klms.kaist.ac.kr/a/b/c.php?x=1"),
+            ("//other.test/p", "https://other.test/p"),
+            ("\\\\other.test\\p", "https://other.test/p"),
+            ("http://other.test:80/p", "http://other.test/p"),
+            ("x/..", "https://klms.kaist.ac.kr/a/b/"),
+            ("https:x", "https://klms.kaist.ac.kr/a/b/x"),
+            ("https:/x", "https://klms.kaist.ac.kr/x"),
+        ] {
+            assert_eq!(join(base, reference), want, "{reference:?}");
+        }
         assert_eq!(join("https://a.test", "b"), "https://a.test/b");
-        assert_eq!(join(base, "https:x"), "https://klms.kaist.ac.kr/a/b/x");
-        assert_eq!(join(base, "https:/x"), "https://klms.kaist.ac.kr/x");
-        assert!(Url::parse(base).unwrap().join("///h.test/p").is_err());
-        assert!(
-            Url::parse(base)
-                .unwrap()
-                .join("javascript:alert(1)")
-                .is_err()
-        );
-        assert!(Url::parse(base).unwrap().join("mailto:a@b.test").is_err());
+        for bad in ["///h.test/p", "javascript:alert(1)", "mailto:a@b.test"] {
+            assert!(url(base).join(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
-    fn query_pairs_decode_and_append_round_trip() {
-        let mut url = Url::parse("https://a.test/p?a=1&b=x%20y+z&flag&=v&&c=%zz").unwrap();
-        let pairs: Vec<(String, String)> = url
+    fn query_pairs_and_form_bodies_use_urlencoded_rules() {
+        let mut parsed = url("https://a.test/p?a=1&b=x%20y+z&flag&=v&&c=%zz");
+        let pairs: Vec<(String, String)> = parsed
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
-        assert_eq!(
-            pairs,
-            [
-                ("a".into(), "1".into()),
-                ("b".into(), "x y z".into()),
-                ("flag".into(), "".into()),
-                ("".into(), "v".into()),
-                ("c".into(), "%zz".into()),
-            ]
-        );
-        url.query_pairs_mut()
-            .clear()
-            .append_pair("k", "a b&c=d/\u{d55c}");
-        assert_eq!(url.query(), Some("k=a+b%26c%3Dd%2F%ED%95%9C"));
-        let (key, value) = url.query_pairs().next().unwrap();
+        let want = [
+            ("a", "1"),
+            ("b", "x y z"),
+            ("flag", ""),
+            ("", "v"),
+            ("c", "%zz"),
+        ];
+        assert_eq!(pairs, want.map(|(k, v)| (k.to_owned(), v.to_owned())));
+        let mut fresh = url("https://a.test/p");
+        fresh.query_pairs_mut().append_pair("k", "a b&c=d/\u{d55c}");
+        assert_eq!(fresh.query(), Some("k=a+b%26c%3Dd%2F%ED%95%9C"));
+        let (key, value) = fresh.query_pairs().next().unwrap();
         assert_eq!((&*key, &*value), ("k", "a b&c=d/\u{d55c}"));
-        let mut empty = Url::parse("https://a.test/p?old=1").unwrap();
-        empty.query_pairs_mut().clear();
-        assert_eq!(empty.as_str(), "https://a.test/p");
-        let mut appended = Url::parse("https://a.test/p?old=1").unwrap();
-        appended.query_pairs_mut().append_pair("sesskey", "s e");
-        assert_eq!(appended.as_str(), "https://a.test/p?old=1&sesskey=s+e");
-    }
-
-    #[test]
-    fn form_bodies_use_urlencoded_rules() {
+        parsed.set_query(Some("old=1"));
+        parsed.query_pairs_mut().append_pair("sesskey", "s e");
+        assert_eq!(parsed.as_str(), "https://a.test/p?old=1&sesskey=s+e");
         assert_eq!(form_urlencode([]), "");
         assert_eq!(
             form_urlencode([("u", "a b"), ("p", "x&y=z*~\u{d55c}")]),
@@ -721,14 +570,15 @@ mod tests {
 
     #[test]
     fn setters_renormalize() {
-        let mut url = Url::parse("https://u:p@a.test/x?q=1#f").unwrap();
-        url.set_username("");
-        url.set_password(None);
-        url.set_fragment(None);
-        assert_eq!(url.as_str(), "https://a.test/x?q=1");
-        url.set_path("/");
-        assert_eq!(url.as_str(), "https://a.test/?q=1");
-        url.set_path("a/../b c");
-        assert_eq!(url.as_str(), "https://a.test/b%20c?q=1");
+        let mut parsed = url("https://u:p@a.test/x?q=1#f");
+        parsed.clear_userinfo();
+        parsed.set_fragment(None);
+        assert_eq!(parsed.as_str(), "https://a.test/x?q=1");
+        parsed.set_path("/");
+        assert_eq!(parsed.as_str(), "https://a.test/?q=1");
+        parsed.set_path("a/../b c");
+        assert_eq!(parsed.as_str(), "https://a.test/b%20c?q=1");
+        parsed.set_query(None);
+        assert_eq!(parsed.as_str(), "https://a.test/b%20c");
     }
 }

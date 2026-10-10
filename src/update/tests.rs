@@ -1,5 +1,3 @@
-use sha2::{Digest, Sha256};
-
 use super::*;
 #[test]
 fn stable_versions_and_no_downgrade_comparison() {
@@ -11,13 +9,7 @@ fn stable_versions_and_no_downgrade_comparison() {
 }
 #[test]
 fn checksum_requires_exact_archive_and_bytes() {
-    let checksum = format!(
-        "{}  release.tar.gz\n",
-        Sha256::digest(b"archive")
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
+    let checksum = format!("{}  release.tar.gz\n", sha256_hex(b"archive"));
     assert!(verify_checksum(b"archive", checksum.as_bytes(), "release.tar.gz").is_ok());
     assert!(verify_checksum(b"partial", checksum.as_bytes(), "release.tar.gz").is_err());
     assert!(verify_checksum(b"archive", checksum.as_bytes(), "other.tar.gz").is_err());
@@ -39,14 +31,7 @@ fn release_server(archive: Vec<u8>, checksum_ok: bool, status: &'static str) -> 
                 ),
             )
         } else if request.target.ends_with(".sha256") {
-            let digest = Sha256::digest(if checksum_ok {
-                archive.as_slice()
-            } else {
-                b"wrong"
-            })
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            let digest = sha256_hex(if checksum_ok { &archive } else { b"wrong" });
             let name = request
                 .target
                 .rsplit('/')
