@@ -729,6 +729,31 @@ mod tests {
     }
 
     #[test]
+    fn the_timeout_bounds_the_whole_redirect_chain_not_each_hop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Each hop answers well inside the 1s timeout; together they exceed it.
+        thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                thread::sleep(std::time::Duration::from_millis(450));
+                let _ = stream.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let client = KlmsClient::new(&format!("http://{address}"), None, 1).unwrap();
+        let started = std::time::Instant::now();
+        let error = client.get_bytes("/slow", 16).err().unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(started.elapsed() < std::time::Duration::from_millis(1600));
+    }
+
+    #[test]
     fn head_stops_after_the_cap_on_endless_redirects() {
         let redirect = "HTTP/1.1 302 Found\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let (address, server) = serve_once(vec![redirect.to_owned(); 6]);

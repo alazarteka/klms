@@ -1,6 +1,9 @@
 //! The one blocking HTTP transport. The library never follows redirects:
 //! every caller supplies its own origin policy to [`follow`].
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use crate::url::Url;
 use ureq::{
@@ -96,6 +99,30 @@ pub fn send_once(
     headers: &[(&'static str, String)],
     payload: Option<&Payload>,
 ) -> Result<Response, Failure> {
+    send_until(agent, method, url, headers, payload, None)
+}
+
+/// [`send_once`] bounded by `deadline` instead of the agent's per-request
+/// timeout, so a redirect chain shares one overall time budget.
+fn send_until(
+    agent: &Agent,
+    method: Method,
+    url: &Url,
+    headers: &[(&'static str, String)],
+    payload: Option<&Payload>,
+    deadline: Option<Instant>,
+) -> Result<Response, Failure> {
+    let remaining = match deadline {
+        Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+            Some(left) if !left.is_zero() => Some(left),
+            _ => {
+                return Err(Failure::Transport(
+                    "timeout: request deadline elapsed".into(),
+                ));
+            }
+        },
+        None => None,
+    };
     let transport = |message: String| Failure::Transport(message.replace(url.as_str(), "<url>"));
     let mut builder = http::Request::builder().method(method).uri(url.as_str());
     for (name, value) in headers {
@@ -107,13 +134,29 @@ pub fn send_once(
                 .header("content-type", payload.content_type)
                 .body(payload.bytes.clone())
                 .map_err(|error| transport(error.to_string()))?;
-            agent.run(request)
+            match remaining {
+                Some(left) => agent.run(
+                    agent
+                        .configure_request(request)
+                        .timeout_global(Some(left))
+                        .build(),
+                ),
+                None => agent.run(request),
+            }
         }
         None => {
             let request = builder
                 .body(())
                 .map_err(|error| transport(error.to_string()))?;
-            agent.run(request)
+            match remaining {
+                Some(left) => agent.run(
+                    agent
+                        .configure_request(request)
+                        .timeout_global(Some(left))
+                        .build(),
+                ),
+                None => agent.run(request),
+            }
         }
     };
     let response = result.map_err(|error| transport(error.to_string()))?;
@@ -150,7 +193,8 @@ pub struct Follow {
 }
 
 /// Sends the request and follows redirects by hand. 307/308 keep the method
-/// and body; every other redirect becomes a body-less GET.
+/// and body; every other redirect becomes a body-less GET. The agent's global
+/// timeout bounds the whole chain, not each hop.
 pub fn follow(
     agent: &Agent,
     request: Follow,
@@ -163,10 +207,22 @@ pub fn follow(
         max_redirects,
         strict,
     } = request;
+    let deadline = agent
+        .config()
+        .timeouts()
+        .global
+        .map(|timeout| Instant::now() + timeout);
     let mut redirects = 0;
     loop {
         let extra = policy.headers(&method, &url);
-        let response = send_once(agent, method.clone(), &url, &extra, payload.as_ref())?;
+        let response = send_until(
+            agent,
+            method.clone(),
+            &url,
+            &extra,
+            payload.as_ref(),
+            deadline,
+        )?;
         policy.inspect(&response).map_err(Failure::Refused)?;
         let status = response.status();
         let redirect = if strict {
