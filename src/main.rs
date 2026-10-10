@@ -6,6 +6,10 @@ mod corpus;
 mod course_pages;
 mod date;
 mod error;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/fixture/server.rs"]
+mod fixture_server;
 mod http;
 mod models;
 mod output;
