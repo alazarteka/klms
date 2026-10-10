@@ -45,6 +45,16 @@ impl SsoTransport {
     pub fn sso_url(&self, path: &str) -> Result<Url, AppError> {
         self.join(&self.sso, path)
     }
+    pub fn document_url(&self) -> Option<&Url> {
+        self.document_url.as_ref()
+    }
+
+    pub fn set_document_url(&mut self, url: Url) -> Result<(), AppError> {
+        self.ensure_allowed(&url)?;
+        self.document_url = Some(url);
+        Ok(())
+    }
+
     pub fn klms(&self) -> &Url {
         &self.klms
     }

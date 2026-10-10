@@ -30,6 +30,27 @@ impl AppError {
         Self::auth(message, AUTH_RECOVERY_HINT)
     }
 
+    /// A password login sent a verification code and stopped; the caller
+    /// resumes with `klms auth login --code CODE`. Exit code 12.
+    pub fn code_required(channel: &str, expires_at: u64) -> Self {
+        const RESUME: &str = "klms auth login --code CODE";
+        let mut error = Self::new(
+            "CODE_REQUIRED",
+            format!("KAIST sent a verification code by {channel}; enter it to finish signing in"),
+            Some(format!(
+                "Run `{RESUME}` with the six-digit code before the pending login expires."
+            )),
+            false,
+            12,
+        );
+        error.details = Some(serde_json::json!({
+            "channel": channel,
+            "expires_at": expires_at,
+            "resume": RESUME,
+        }));
+        error
+    }
+
     pub fn network(message: impl Into<String>) -> Self {
         Self::new("NETWORK_ERROR", message, None, true, 20)
     }

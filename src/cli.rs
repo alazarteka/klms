@@ -310,11 +310,24 @@ pub struct AuthArgs {
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     /// Sign in directly through KAIST SSO and save a private KLMS session.
+    #[command(after_help = LOGIN_HELP)]
     Login(AuthLoginArgs),
-    /// Remove the locally saved KLMS session.
+    /// Remove the locally saved KLMS session (the remembered login stays).
+    #[command(
+        long_about = "Remove the locally saved KLMS session and any pending verification code. The remembered login (user, method, second factor) and any stored password are kept so the next `klms auth login` needs no typing; use `klms auth forget` to delete those."
+    )]
     Logout,
-    /// Report owned-session metadata without exposing secrets.
-    #[command(after_help = "Example:\n  klms --json auth status")]
+    /// Delete the remembered login and any stored password.
+    #[command(
+        long_about = "Delete the remembered login file (login.json) and the stored password from whichever place holds it: the macOS keychain, the Linux Secret Service, or the plaintext credentials file. Also discards a pending verification code. Safe to repeat; with nothing remembered it succeeds and reports nothing removed. The saved KLMS session is not touched; `klms auth logout` removes that.",
+        after_help = "Example:\n  klms auth forget"
+    )]
+    Forget,
+    /// Report session metadata and the remembered login without exposing secrets.
+    #[command(
+        long_about = "Report the saved session (path, cookie and trusted-device counts, creation time) plus the remembered login: user, method, second factor, and which password backend holds the password (none, keychain, secret-service, or plaintext-file). Passwords and cookie values are never printed.",
+        after_help = "Example:\n  klms --json auth status"
+    )]
     Status,
     /// Ask KLMS for the server-authoritative time remaining.
     #[command(after_help = "Example:\n  klms --json auth time-left")]
@@ -324,15 +337,78 @@ pub enum AuthCommand {
     Extend,
 }
 
+const LOGIN_HELP: &str = "\
+Remembered login:
+  After a successful sign-in, klms remembers your KAIST ID, method and second
+  factor in a private file (login.json in $XDG_CONFIG_HOME/klms, or
+  ~/.config/klms). `klms auth logout` keeps it; `klms auth forget` deletes it.
+  A bare `klms auth login` then prints \"Signing in as <id> (<method>)\" and
+  skips the ID prompt. Flags override the remembered values and update them.
+
+Remembering the password (opt-in):
+  klms auth login --method password --remember-password
+  Backends are chosen automatically: macOS keychain, or the Linux Secret
+  Service (needs `secret-tool`). With neither (headless Linux) klms refuses and
+  explains; add --insecure-storage to keep the password in a plaintext file
+  readable only by you ($XDG_CONFIG_HOME/klms/credentials.json).
+
+Without a terminal (agents, scripts, or --json):
+  Easy Login needs a phone approval and fails. Password login needs a stored
+  password and runs in two steps:
+    klms --json auth login        # sends the code, exits 12 with CODE_REQUIRED
+    klms --json auth login --code 123456
+  CODE_REQUIRED details carry {channel, expires_at, resume}. The pending state
+  (SSO cookies only, never the password) is a private file that expires after
+  5 minutes and is deleted after one attempt.
+
+Exit codes: 0 signed in; 12 CODE_REQUIRED (resume with --code); 10 sign-in
+rejected or code missing/expired; 2 bad flags; 11 KAIST protocol changed.
+
+Examples:
+  klms auth login
+  klms auth login --method password --second-factor sms --remember-password
+  klms auth login --user 20201234
+  klms --json auth login --code 123456";
+
 #[derive(Debug, Args)]
 pub struct AuthLoginArgs {
-    /// KAIST sign-in method.
+    /// KAIST ID or email to sign in as; switches the remembered account.
+    #[arg(long, value_name = "ID")]
+    pub user: Option<String>,
+
+    /// KAIST sign-in method (default: the remembered one, else easy).
     #[arg(long, value_enum)]
     pub method: Option<AuthMethodArg>,
 
-    /// Password-login verification channel.
-    #[arg(long, value_enum, requires = "method")]
+    /// Where password login sends its six-digit code (default: the remembered
+    /// one, else email). Applies only to password login.
+    #[arg(long, value_enum)]
     pub second_factor: Option<AuthSecondFactorArg>,
+
+    /// Remember the password after a successful password login.
+    ///
+    /// Stored in the macOS keychain or the Linux Secret Service, handed over
+    /// on standard input only. Needs a terminal. Refused where there is no
+    /// keyring unless --insecure-storage is also given.
+    #[arg(long)]
+    pub remember_password: bool,
+
+    /// With --remember-password on a machine without an OS keyring, store the
+    /// password in a plaintext file readable only by you.
+    #[arg(long, requires = "remember_password")]
+    pub insecure_storage: bool,
+
+    /// Finish a password login with the six-digit CODE sent by the previous
+    /// `klms auth login` (the second step of the non-interactive flow).
+    ///
+    /// Fails if no login is pending or it expired (5 minutes); the pending
+    /// state is deleted after this attempt, successful or not.
+    #[arg(
+        long,
+        value_name = "CODE",
+        conflicts_with_all = ["user", "method", "second_factor", "remember_password", "insecure_storage"]
+    )]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

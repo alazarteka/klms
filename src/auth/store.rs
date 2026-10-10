@@ -1,7 +1,5 @@
 use std::{
     env, fs,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -11,7 +9,11 @@ use crate::date::epoch_now;
 
 use crate::error::AppError;
 
-use super::model::{AuthSession, AuthStatus, SESSION_VERSION, StoredCookie, StoredSession};
+use super::{
+    cookie_rules::{self, Rules},
+    fsutil,
+    model::{AuthSession, AuthStatus, SESSION_VERSION, StoredCookie, StoredSession},
+};
 
 pub fn path() -> Result<PathBuf, AppError> {
     env::var_os("XDG_STATE_HOME")
@@ -22,7 +24,10 @@ pub fn path() -> Result<PathBuf, AppError> {
 }
 
 pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
-    let path = path()?;
+    load_at(&path()?, base_url)
+}
+
+pub fn load_at(path: &Path, base_url: &Url) -> Result<AuthSession, AppError> {
     if !path.is_file() {
         return Ok(AuthSession {
             status: AuthStatus {
@@ -32,12 +37,14 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
                 cookie_count: 0,
                 device_count: 0,
                 created_at: None,
+                remembered: None,
+                remembered_error: None,
             },
             cookie_header: None,
             devices: Vec::new(),
         });
     }
-    let bytes = fs::read(&path).map_err(|error| {
+    let bytes = fs::read(path).map_err(|error| {
         AppError::config(format!(
             "cannot read KLMS session {}: {error}",
             path.display()
@@ -58,7 +65,8 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
         ));
     }
     for cookie in &stored.cookies {
-        validate_cookie(cookie)?;
+        // Older releases saved under a looser value rule; keep reading them.
+        validate_cookie(cookie, Rules::Saved)?;
     }
     let header = (!stored.cookies.is_empty()).then(|| {
         stored
@@ -76,33 +84,28 @@ pub fn load(base_url: &Url) -> Result<AuthSession, AppError> {
             cookie_count: stored.cookies.len(),
             device_count: stored.devices.len(),
             created_at: Some(stored.created_at),
+            remembered: None,
+            remembered_error: None,
         },
         cookie_header: header,
         devices: stored.devices,
     })
 }
 
-pub fn save(
+pub fn save_at(
+    path: &Path,
     base_url: &Url,
     cookies: Vec<StoredCookie>,
     devices: Vec<String>,
-) -> Result<PathBuf, AppError> {
+) -> Result<(), AppError> {
     if cookies.is_empty() {
         return Err(AppError::auth_protocol(
             "KAIST SSO completed without issuing a KLMS session cookie",
         ));
     }
     for cookie in &cookies {
-        validate_cookie(cookie)?;
+        validate_cookie(cookie, Rules::Rfc6265)?;
     }
-    let path = path()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::internal("invalid session path"))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        AppError::config(format!("cannot create {}: {error}", parent.display()))
-    })?;
-    set_private_dir(parent)?;
     let stored = StoredSession {
         version: SESSION_VERSION,
         origin: origin(base_url),
@@ -112,31 +115,7 @@ pub fn save(
     };
     let bytes = serde_json::to_vec_pretty(&stored)
         .map_err(|error| AppError::internal(format!("failed to encode session: {error}")))?;
-    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temp).map_err(|error| {
-        AppError::config(format!("cannot create private session file: {error}"))
-    })?;
-    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
-        let _ = fs::remove_file(&temp);
-        return Err(AppError::config(format!(
-            "cannot write session file: {error}"
-        )));
-    }
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&temp);
-        return Err(AppError::config(format!(
-            "cannot install session file: {error}"
-        )));
-    }
-    set_private_file(&path)?;
-    Ok(path)
+    fsutil::write_private(path, &bytes, "session")
 }
 
 pub fn remove() -> Result<(PathBuf, bool), AppError> {
@@ -153,25 +132,15 @@ pub fn remove() -> Result<(PathBuf, bool), AppError> {
     Ok((path, true))
 }
 
-fn validate_cookie(cookie: &StoredCookie) -> Result<(), AppError> {
-    let valid_name = !cookie.name.is_empty()
-        && cookie
-            .name
-            .bytes()
-            .all(|byte| byte > 0x20 && byte < 0x7f && !b"()<>@,;:\\\"/[]?={} \t".contains(&byte));
-    let valid_value = !cookie.value.is_empty()
-        && cookie.value.len() <= 4096
-        && cookie
-            .value
-            .bytes()
-            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b';');
-    if !valid_name || !valid_value {
-        return Err(AppError::config("saved session contains an invalid cookie"));
+fn validate_cookie(cookie: &StoredCookie, rules: Rules) -> Result<(), AppError> {
+    if cookie_rules::valid_cookie(&cookie.name, &cookie.value, rules) {
+        Ok(())
+    } else {
+        Err(AppError::config("saved session contains an invalid cookie"))
     }
-    Ok(())
 }
 
-fn origin(url: &Url) -> String {
+pub(super) fn origin(url: &Url) -> String {
     format!(
         "{}://{}:{}",
         url.scheme(),
@@ -180,7 +149,7 @@ fn origin(url: &Url) -> String {
     )
 }
 
-fn stored_origin_matches(stored: &str, current: &Url) -> bool {
+pub(super) fn stored_origin_matches(stored: &str, current: &Url) -> bool {
     if stored == origin(current) {
         return true;
     }
@@ -194,56 +163,88 @@ fn is_loopback(url: &Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
 }
 
-#[cfg(unix)]
-fn set_private_dir(path: &Path) -> Result<(), AppError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| AppError::config(format!("cannot secure {}: {error}", path.display())))
-}
-
-#[cfg(not(unix))]
-fn set_private_dir(_path: &Path) -> Result<(), AppError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file(path: &Path) -> Result<(), AppError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| AppError::config(format!("cannot secure {}: {error}", path.display())))
-}
-
-#[cfg(not(unix))]
-fn set_private_file(_path: &Path) -> Result<(), AppError> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn cookie(name: &str, value: &str) -> StoredCookie {
+        StoredCookie {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
     #[test]
     fn rejects_header_injection() {
-        assert!(
-            validate_cookie(&StoredCookie {
-                name: "MoodleSession".into(),
-                value: "abc123".into()
-            })
-            .is_ok()
+        for rules in [Rules::Rfc6265, Rules::Saved] {
+            assert!(validate_cookie(&cookie("MoodleSession", "abc123"), rules).is_ok());
+            assert!(validate_cookie(&cookie("bad\r\n", "x"), rules).is_err());
+            assert!(validate_cookie(&cookie("ok", "x; injected=y"), rules).is_err());
+            assert!(validate_cookie(&cookie("ok", ""), rules).is_err());
+        }
+    }
+
+    fn klms() -> Url {
+        Url::parse("https://klms.kaist.ac.kr/").unwrap()
+    }
+
+    #[test]
+    fn session_saved_under_the_old_rules_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("klms/session.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Values the previous release accepted: commas, quotes, backslashes.
+        fs::write(
+            &path,
+            r#"{"version":1,"origin":"https://klms.kaist.ac.kr:443","created_at":7,
+               "cookies":[{"name":"MoodleSession","value":"abc,def\\x\"y"},
+                          {"name":"other","value":"plain"}],
+               "devices":["dev1"]}"#,
+        )
+        .unwrap();
+        let session = load_at(&path, &klms()).unwrap();
+        assert!(session.status.configured);
+        assert_eq!(session.status.cookie_count, 2);
+        assert_eq!(
+            session.cookie_header.as_deref(),
+            Some("MoodleSession=abc,def\\x\"y; other=plain")
         );
-        assert!(
-            validate_cookie(&StoredCookie {
-                name: "bad\r\n".into(),
-                value: "x".into()
-            })
-            .is_err()
+        assert_eq!(session.devices, vec!["dev1"]);
+    }
+
+    #[test]
+    fn load_still_rejects_unsafe_saved_cookies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        for value in ["", "a;b", "a b"] {
+            let body = format!(
+                r#"{{"version":1,"origin":"https://klms.kaist.ac.kr:443","created_at":1,
+                   "cookies":[{{"name":"n","value":"{value}"}}],"devices":[]}}"#
+            );
+            fs::write(&path, body).unwrap();
+            assert_eq!(load_at(&path, &klms()).unwrap_err().code, "CONFIG_ERROR");
+        }
+    }
+
+    #[test]
+    fn save_uses_strict_rules_and_round_trips_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("klms/session.json");
+        save_at(&path, &klms(), vec![cookie("MoodleSession", "abc")], vec![]).unwrap();
+        assert_eq!(
+            load_at(&path, &klms()).unwrap().cookie_header.as_deref(),
+            Some("MoodleSession=abc")
         );
-        assert!(
-            validate_cookie(&StoredCookie {
-                name: "ok".into(),
-                value: "x; injected=y".into()
-            })
-            .is_err()
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+        }
+        for value in ["a,b", "", "a\"b"] {
+            let result = save_at(&path, &klms(), vec![cookie("n", value)], vec![]);
+            assert_eq!(result.unwrap_err().code, "CONFIG_ERROR", "{value:?}");
+        }
     }
 }
