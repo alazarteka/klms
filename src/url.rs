@@ -243,7 +243,6 @@ impl Url {
         self.reserialize();
     }
 
-    /// The path's `/`-separated segments, without the leading slash.
     /// The first query parameter called `name`, decoded.
     pub fn query_value(&self, name: &str) -> Option<String> {
         self.query_pairs()
@@ -256,6 +255,7 @@ impl Url {
         segments.nth(1)
     }
 
+    /// The path's `/`-separated segments, without the leading slash.
     pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
         Some(self.path.strip_prefix('/')?.split('/'))
     }

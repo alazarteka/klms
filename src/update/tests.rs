@@ -78,6 +78,11 @@ fn check_and_no_downgrade_only_fetch_metadata() {
             fs::read(home.path().join("klms")).unwrap(),
             b"old executable"
         );
+        let entries: Vec<_> = fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["klms"], "nothing is created or installed");
     }
 }
 

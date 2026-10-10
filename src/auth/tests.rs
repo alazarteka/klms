@@ -453,9 +453,14 @@ fn a_wrong_code_consumes_the_pending_login_and_an_expired_one_is_rejected() {
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     pending.expires_at = epoch_now() as u64 - 1;
     store::save_json(&path, &pending, "pending login").unwrap();
-    // The deletion and no-network behavior is covered in store.rs; this pins
-    // that the real clock reaches the expiry check.
+    let validations = fx.sso.count(VALIDATE);
     assert!(message(&code("123456")).contains("expired"));
+    assert!(!path.exists());
+    assert_eq!(
+        fx.sso.count(VALIDATE),
+        validations,
+        "expired logins never reach KAIST"
+    );
 }
 
 #[test]
