@@ -1,26 +1,13 @@
 //! The single cookie-acceptance predicate shared by capture and storage.
 //!
-//! Names must be RFC 6265 tokens. Values must be RFC 6265 `cookie-value`s:
-//! cookie-octets (`0x21`, `0x23-0x2b`, `0x2d-0x3a`, `0x3c-0x5b`, `0x5d-0x7e`),
-//! optionally wrapped in one pair of double quotes, at most 4096 bytes. An
-//! empty value never passes: a server sends one to delete a cookie, so capture
-//! treats it as a deletion and nothing empty is ever stored.
-//!
-//! Sessions saved by earlier releases were validated with a looser value rule
-//! (any byte `0x21-0x7e` except `;`). [`Rules::Saved`] keeps reading those
-//! files; [`Rules::Rfc6265`] is what everything newly captured or written
-//! must satisfy. Both tiers forbid every byte that could break out of a
-//! `Cookie` header (`;`, whitespace, controls, non-ASCII).
+//! Names must be RFC 6265 tokens. Values may hold any printable ASCII byte
+//! (`0x20-0x7e`) except `;`, up to 4096 bytes: nothing that could break out of
+//! a `Cookie` header, while still accepting everything earlier releases
+//! captured or saved. An empty value never passes: a server sends one to
+//! delete a cookie, so capture treats it as a deletion and nothing empty is
+//! ever stored.
 
 pub const MAX_VALUE_BYTES: usize = 4096;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rules {
-    /// Strict RFC 6265: required for capturing and for writing sessions.
-    Rfc6265,
-    /// Also accepts `"`, `,` and `\` inside values, as older releases saved.
-    Saved,
-}
 
 /// Whether `name` is an RFC 6265 cookie name (an RFC 2616 token).
 pub fn valid_name(name: &str) -> bool {
@@ -30,33 +17,14 @@ pub fn valid_name(name: &str) -> bool {
             .all(|byte| (0x21..0x7f).contains(&byte) && !b"()<>@,;:\\\"/[]?={}".contains(&byte))
 }
 
-/// Whether a non-empty `value` is acceptable under `rules`.
-pub fn valid_value(value: &str, rules: Rules) -> bool {
-    if value.is_empty() || value.len() > MAX_VALUE_BYTES {
-        return false;
-    }
-    match rules {
-        Rules::Saved => value
-            .bytes()
-            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b';'),
-        Rules::Rfc6265 => {
-            let inner = value
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-                .filter(|_| value.len() >= 2)
-                .unwrap_or(value);
-            inner.bytes().all(cookie_octet)
-        }
-    }
-}
-
 /// The one predicate: a cookie is storable when both parts pass.
-pub fn valid_cookie(name: &str, value: &str, rules: Rules) -> bool {
-    valid_name(name) && valid_value(value, rules)
-}
-
-fn cookie_octet(byte: u8) -> bool {
-    matches!(byte, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e)
+pub fn valid_cookie(name: &str, value: &str) -> bool {
+    valid_name(name)
+        && !value.is_empty()
+        && value.len() <= MAX_VALUE_BYTES
+        && value
+            .bytes()
+            .all(|byte| (0x20..0x7f).contains(&byte) && byte != b';')
 }
 
 #[cfg(test)]
@@ -82,46 +50,15 @@ mod tests {
     }
 
     #[test]
-    fn rfc_values_follow_cookie_octets() {
-        for good in ["abc123", "a=b", "\"quoted\"", "x/y+z==", "a:b"] {
-            assert!(valid_value(good, Rules::Rfc6265), "{good:?}");
+    fn values_accept_everything_older_releases_did_but_never_break_the_header() {
+        for good in ["abc123", "a=b", "\"quoted\"", "a b", "a,b", "a\\b", "a\"b"] {
+            assert!(valid_cookie("n", good), "{good:?}");
         }
-        for bad in [
-            "",
-            "a b",
-            "a;b",
-            "a,b",
-            "a\\b",
-            "a\"b",
-            "\"",
-            "\"a",
-            "a\r",
-            "caf\u{e9}",
-        ] {
-            assert!(!valid_value(bad, Rules::Rfc6265), "{bad:?}");
+        for bad in ["", "a;b", "a\r\nX: y", "a\tb", "caf\u{e9}"] {
+            assert!(!valid_cookie("n", bad), "{bad:?}");
         }
-        assert!(valid_value(&"a".repeat(4096), Rules::Rfc6265));
-        assert!(!valid_value(&"a".repeat(4097), Rules::Rfc6265));
-    }
-
-    #[test]
-    fn saved_tier_is_a_superset_that_still_blocks_header_injection() {
-        for value in ["a,b", "a\\b", "a\"b", "plain"] {
-            assert!(valid_value(value, Rules::Saved), "{value:?}");
-        }
-        for bad in ["", "a;b", "a b", "a\r\nX: y", "caf\u{e9}"] {
-            assert!(!valid_value(bad, Rules::Saved), "{bad:?}");
-        }
-        // Everything strict accepts, the saved tier accepts.
-        for value in ["abc", "\"q\"", "a=b"] {
-            assert!(valid_value(value, Rules::Rfc6265) && valid_value(value, Rules::Saved));
-        }
-    }
-
-    #[test]
-    fn one_predicate_covers_both_parts() {
-        assert!(valid_cookie("n", "v", Rules::Rfc6265));
-        assert!(!valid_cookie("n", "", Rules::Saved));
-        assert!(!valid_cookie("n;", "v", Rules::Saved));
+        assert!(valid_cookie("n", &"a".repeat(4096)));
+        assert!(!valid_cookie("n", &"a".repeat(4097)));
+        assert!(!valid_cookie("n;", "v"));
     }
 }

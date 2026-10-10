@@ -19,7 +19,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::AppError;
 
@@ -412,9 +412,15 @@ struct CredentialFile {
     passwords: BTreeMap<String, String>,
 }
 
+impl Drop for CredentialFile {
+    fn drop(&mut self) {
+        self.passwords.values_mut().for_each(Zeroize::zeroize);
+    }
+}
+
 impl PlaintextFile {
     fn read(&self) -> Result<CredentialFile, AppError> {
-        match fs::read(&self.path) {
+        match fs::read(&self.path).map(Zeroizing::new) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
                 AppError::config(format!(
                     "invalid credentials file {}: {error}",
