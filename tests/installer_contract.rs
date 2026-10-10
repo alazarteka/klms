@@ -101,18 +101,10 @@ impl InstallFixture {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-
-    fn payload_dir(&self) -> PathBuf {
-        self.root.path().join("test-data/klms/skills/klms")
-    }
-
-    fn link(&self) -> PathBuf {
-        self.root.path().join("test-home/.agents/skills/klms")
-    }
 }
 
 #[test]
-fn bootstrap_installs_and_replaces_binary_and_removes_legacy_skill() {
+fn bootstrap_installs_and_replaces_binary() {
     let fixture = InstallFixture::new();
     fixture.run_ok();
     let version = Command::new(&fixture.destination)
@@ -123,17 +115,11 @@ fn bootstrap_installs_and_replaces_binary_and_removes_legacy_skill() {
     let expected = format!("klms {}", env!("CARGO_PKG_VERSION"));
     assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), expected);
     fs::write(&fixture.destination, b"old executable bytes").unwrap();
-    fs::create_dir_all(fixture.payload_dir()).unwrap();
-    fs::write(fixture.payload_dir().join("SKILL.md"), b"legacy skill").unwrap();
-    fs::create_dir_all(fixture.link().parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(fixture.payload_dir(), fixture.link()).unwrap();
     fixture.run_ok();
     assert_eq!(
         fs::read(&fixture.destination).unwrap(),
         fs::read(BINARY).unwrap()
     );
-    assert!(fs::symlink_metadata(fixture.link()).is_err());
-    assert!(!fixture.payload_dir().exists());
 }
 
 #[test]
@@ -154,16 +140,4 @@ fn bootstrap_checksum_failure_preserves_existing_install() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("checksum"));
     assert_eq!(fs::read(&fixture.destination).unwrap(), b"old executable");
-}
-
-#[test]
-fn bootstrap_leaves_a_user_owned_skill_directory_alone() {
-    let fixture = InstallFixture::new();
-    fs::create_dir_all(fixture.link()).unwrap();
-    fs::write(fixture.link().join("SKILL.md"), b"user-managed skill").unwrap();
-    fixture.run_ok();
-    assert_eq!(
-        fs::read(fixture.link().join("SKILL.md")).unwrap(),
-        b"user-managed skill"
-    );
 }

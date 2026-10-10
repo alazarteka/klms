@@ -150,6 +150,13 @@ fn legacy_skill_removal_touches_only_klms_managed_paths() {
         b"user file"
     );
     assert!(!payload_dir.join("SKILL.md").exists());
+
+    // A real directory at the link path is the user's own and is kept.
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(&link).unwrap();
+    fs::write(link.join("SKILL.md"), b"user skill").unwrap();
+    remove_legacy_skill_at(&home, &data);
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), b"user skill");
 }
 
 #[test]
