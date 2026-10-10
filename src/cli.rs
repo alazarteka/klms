@@ -45,7 +45,7 @@ Reference formats (pass the `ref` from output; do not scrape URLs):
   assertion:N  relation:N    curation records (retract targets)      sync:N  one sync attempt
 
 Safety:
-  Remote access is read-only except `auth extend`. klms never submits work, starts quizzes,
+  Course data is read-only: klms never submits work, starts quizzes,
   posts, or checks attendance; access is not authorization to do those. Never send KLMS
   credentials to third-party links (Zoom, Panopto, Classum, LTI).
   Auth: `klms auth login` (interactive; Easy Login or password + email/SMS code); `klms --json auth
@@ -56,7 +56,7 @@ Local library (durable across sessions; sync is explicit, no background schedule
   Library commands except `sync` are local and need no sign-in. A course or resource missing after
   a sync means only \"not observed in a complete collection\", not remote deletion. See `klms library --help`.";
 const COURSE_HELP: &str = "Course ref (course:ID), numeric id, exact code or title, or an unambiguous fragment. Ambiguous matches are listed, never guessed.";
-const ACTOR_HELP: &str = "Provenance label (free text, non-empty): human or agent. Records who edited; grants no permission.";
+const ACTOR_HELP: &str = "Provenance label: any non-empty text, conventionally `human` (default) or `agent`. Records who edited; grants no permission.";
 const FILE_PREVIEW_HELP: &str = "Needs bytes stored by `klms library sync --download changed`. Several attachments give CONTENT_UNAVAILABLE (exit 55); choose a candidate from error.details.representations. Stored notice text is available through `klms library show REF` (JSON: data.source.text). Non-file links are metadata: inspect their URL with `klms library show REF`. This command does not download files or follow links; local absence does not prove remote absence.";
 
 #[derive(Debug, Parser)]
@@ -64,7 +64,7 @@ const FILE_PREVIEW_HELP: &str = "Needs bytes stored by `klms library sync --down
     name = "klms",
     version,
     about = "Fast, agent-friendly access to KAIST KLMS",
-    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one versioned document for agents and scripts. Remote reads are read-only except `auth extend`; the CLI never submits work, starts quizzes, posts, or checks attendance.",
+    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one versioned document for agents and scripts. Course data is read-only: the CLI never submits work, starts quizzes, posts, or checks attendance. Only `auth` commands change remote state (sign-in, code delivery, session timer).",
     after_help = "Run `klms --help` for the workflow, JSON/exit-code contract, and ref formats; `klms <command> --help` for details; `klms --json spec` for the full argument tree.",
     after_long_help = TOP_HELP,
     arg_required_else_help = true
@@ -429,7 +429,7 @@ pub enum AuthCommand {
     /// Ask KLMS for the server-reported time remaining (may itself refresh the timer).
     #[command(after_help = "Example:\n  klms --json auth time-left")]
     TimeLeft,
-    /// Refresh the session timer if still valid (the only non-read-only call; safe to retry; cannot revive an expired session).
+    /// Refresh the session timer if still valid (safe to retry; cannot revive an expired session).
     #[command(after_help = "Example:\n  klms --json auth extend")]
     Extend,
 }
@@ -740,7 +740,7 @@ pub enum RequestCommand {
         after_help = "Example:\n  klms --json request get '/mod/assign/view.php?id=1210516' --max-bytes 65536"
     )]
     Get {
-        /// Same-origin path or URL, GET only. Action/delete/confirm/logout routes and secret query parameters are refused.
+        /// Same-origin path or URL, GET only. Only allowlisted read paths are accepted; query keys such as action, delete, confirm, logout, and secret-bearing parameters are refused.
         #[arg(value_name = "PATH")]
         path: String,
         /// Preview byte cap (1-1048576).
