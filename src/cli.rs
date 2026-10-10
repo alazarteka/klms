@@ -402,32 +402,16 @@ pub struct ListArgs {
 
 /// Row `kind` values `today`/`upcoming` can produce: the Moodle module name
 /// of the event's activity (calendar.rs), or `event` when it has none.
-pub const AGENDA_KINDS: [&str; 13] = [
-    "assign",
-    "quiz",
-    "courseboard",
-    "resource",
-    "coursefile",
-    "page",
-    "folder",
-    "url",
-    "vod",
-    "lti",
-    "panopto",
-    "panoptocourseembed",
-    "event",
-];
-
-const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate): assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, panoptocourseembed, event (no activity). Case-insensitive.";
+const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate), matched against each row's `kind`. Common kinds: assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, event; any other Moodle module name also works. Case-insensitive.";
 
 fn parse_agenda_kind(value: &str) -> Result<String, String> {
     let kind = value.trim().to_ascii_lowercase();
-    match AGENDA_KINDS.contains(&kind.as_str()) {
-        true => Ok(kind),
-        false => Err(format!(
-            "unknown kind {value:?}; valid kinds: {}",
-            AGENDA_KINDS.join(", ")
-        )),
+    if !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        Ok(kind)
+    } else {
+        Err(format!(
+            "invalid kind {value:?}: use a module name such as assign or quiz"
+        ))
     }
 }
 

@@ -248,13 +248,10 @@ fn agenda_kind_filters_rows_and_rejects_unknown_kinds() {
         assert_eq!(rows(" --kind quiz"), 0);
         assert_eq!(rows(" --kind event,quiz"), 0);
 
-        let (exit, error) = env.fail(&format!("{command} --kind bogus"));
+        // Kinds are open-ended Moodle module names; an unlisted one just matches nothing.
+        assert_eq!(rows(" --kind zoom"), 0);
+        let (exit, error) = env.fail(&format!("{command} --kind 'a b'"));
         assert_eq!((exit, &error["code"]), (2, &json!("USAGE")));
-        let message = error["message"].as_str().unwrap();
-        assert!(
-            message.contains("valid kinds: assign, quiz, courseboard"),
-            "{message}"
-        );
     }
 }
 
@@ -587,7 +584,7 @@ fn help_is_the_agent_manual() {
     }
     for command in ["today", "upcoming"] {
         let text = help(&[command, "--help"]);
-        assert!(text.contains("--kind") && text.contains("courseboard, resource"));
+        assert!(text.contains("--kind") && text.contains("Common kinds: assign, quiz"));
     }
 }
 
