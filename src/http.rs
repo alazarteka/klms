@@ -91,52 +91,34 @@ pub enum Failure {
     Refused(AppError),
 }
 
-/// One request without redirect handling. The status may be any HTTP status.
-pub fn send_once(
-    agent: &Agent,
-    method: Method,
-    url: &Url,
-    headers: &[(&'static str, String)],
-    payload: Option<&Payload>,
-) -> Result<Response, Failure> {
-    send_until(agent, method, url, headers, payload, None)
-}
-
 fn run<B: ureq::AsSendBody>(
     agent: &Agent,
     request: http::Request<B>,
-    remaining: Option<Duration>,
+    remaining: Duration,
 ) -> Result<http::Response<ureq::Body>, ureq::Error> {
-    match remaining {
-        Some(left) => agent.run(
-            agent
-                .configure_request(request)
-                .timeout_global(Some(left))
-                .build(),
-        ),
-        None => agent.run(request),
-    }
+    agent.run(
+        agent
+            .configure_request(request)
+            .timeout_global(Some(remaining))
+            .build(),
+    )
 }
 
-/// [`send_once`] bounded by `deadline` instead of the agent's per-request
-/// timeout, so a redirect chain shares one overall time budget.
+/// One request without redirect handling, bounded by `deadline` so a redirect
+/// chain shares one overall time budget. The status may be any HTTP status.
 fn send_until(
     agent: &Agent,
     method: Method,
     url: &Url,
     headers: &[(&'static str, String)],
     payload: Option<&Payload>,
-    deadline: Option<Instant>,
+    deadline: Instant,
 ) -> Result<Response, Failure> {
-    let remaining = match deadline.map(|d| d.checked_duration_since(Instant::now())) {
-        Some(None | Some(Duration::ZERO)) => {
-            return Err(Failure::Transport(
-                "timeout: request deadline elapsed".into(),
-            ));
-        }
-        other => other.flatten(),
-    };
     let transport = |message: String| Failure::Transport(message.replace(url.as_str(), "<url>"));
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| transport("timeout: request deadline elapsed".into()))?;
     let mut builder = http::Request::builder().method(method).uri(url.as_str());
     for (name, value) in headers {
         builder = builder.header(*name, value.as_str());
@@ -200,11 +182,12 @@ pub fn follow(
         max_redirects,
         strict,
     } = request;
-    let deadline = agent
-        .config()
-        .timeouts()
-        .global
-        .map(|timeout| Instant::now() + timeout);
+    let deadline = Instant::now()
+        + agent
+            .config()
+            .timeouts()
+            .global
+            .unwrap_or(Duration::from_secs(3600));
     let mut redirects = 0;
     loop {
         let extra = policy.headers(&method, &url);

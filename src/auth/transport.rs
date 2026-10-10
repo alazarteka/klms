@@ -111,22 +111,15 @@ impl SsoTransport {
             sso: &self.sso,
             ajax,
         };
-        let response = if ajax {
-            let headers = http::Policy::headers(&mut policy, &method, &url);
-            let response = http::send_once(&self.client, method, &url, &headers, payload.as_ref())
-                .map_err(failure)?;
-            http::Policy::inspect(&mut policy, &response)?;
-            response
-        } else {
-            let request = Follow {
-                method,
-                url,
-                payload,
-                max_redirects: 8,
-                strict: true,
-            };
-            http::follow(&self.client, request, &mut policy).map_err(failure)?
+        // AJAX answers are never redirected: any redirect is a protocol error.
+        let request = Follow {
+            method,
+            url,
+            payload,
+            max_redirects: if ajax { 0 } else { 8 },
+            strict: !ajax,
         };
+        let response = http::follow(&self.client, request, &mut policy).map_err(failure)?;
         if !ajax {
             self.document_url = Some(response.url().clone());
         }
