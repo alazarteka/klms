@@ -147,7 +147,9 @@ fn send_until(
 /// Per-hop behavior supplied by the caller of [`follow`].
 pub trait Policy {
     /// Extra headers for one hop, computed from that hop's method and URL.
-    fn headers(&mut self, method: &Method, url: &Url) -> Vec<(&'static str, String)>;
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
     /// Origin policy applied to every redirect target before it is requested.
     fn allow(&mut self, url: &Url) -> Result<(), AppError>;
     /// Observes every hop's response, redirects included.
