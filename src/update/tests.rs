@@ -15,10 +15,7 @@ fn checksum_requires_exact_archive_and_bytes() {
     assert!(verify_checksum(b"archive", checksum.as_bytes(), "other.tar.gz").is_err());
 }
 
-#[allow(dead_code)]
-#[path = "../../tests/fixture/server.rs"]
-mod fixture;
-use fixture::{Response, Server};
+use crate::fixture_server::{Response, Server};
 
 fn release_server(archive: Vec<u8>, checksum_ok: bool, status: &'static str) -> Server {
     Server::new(move |request| {

@@ -4,77 +4,39 @@
 use std::{
     cell::RefCell,
     fs,
-    io::{Read, Write},
-    net::TcpListener,
     rc::Rc,
     sync::{Arc, Mutex},
-    thread,
 };
 
 use tempfile::TempDir;
 
 use super::*;
+use crate::fixture_server::{Request, Response, Server};
 
-/// Serves `route(method, path) -> raw response` from a detached thread and
-/// logs every request as `(path, lowercased head and body)`.
-struct Server {
+/// A fixture server plus its base URL; requests are logged as the lowercased
+/// request line, headers and body.
+struct Site {
+    server: Server,
     url: Url,
-    log: Arc<Mutex<Vec<(String, String)>>>,
 }
 
-fn http(status: &str, headers: &[&str], body: &str) -> String {
-    let headers: String = headers.iter().map(|h| format!("{h}\r\n")).collect();
-    let length = body.len();
-    format!(
-        "HTTP/1.1 {status}\r\n{headers}Content-Length: {length}\r\nConnection: close\r\n\r\n{body}"
-    )
-}
-
-impl Server {
-    fn start(route: impl Fn(&str, &str) -> String + Send + 'static) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let record = log.clone();
-        thread::spawn(move || {
-            for mut stream in listener.incoming().map(Result::unwrap) {
-                let (mut raw, mut chunk) = (Vec::new(), [0_u8; 4096]);
-                let request = loop {
-                    let read = stream.read(&mut chunk).unwrap();
-                    assert!(read > 0, "incomplete request");
-                    raw.extend_from_slice(&chunk[..read]);
-                    let text = String::from_utf8_lossy(&raw).into_owned();
-                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-                        continue;
-                    };
-                    let length = head.lines().find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().ok())?
-                    });
-                    if body.len() >= length.unwrap_or(0) {
-                        break text;
-                    }
-                };
-                let mut line = request.split_whitespace();
-                let (method, target) = (line.next().unwrap(), line.next().unwrap());
-                let path = target.split('?').next().unwrap().to_owned();
-                let response = route(method, &path);
-                record
-                    .lock()
-                    .unwrap()
-                    .push((path, request.to_ascii_lowercase()));
-                stream.write_all(response.as_bytes()).unwrap();
-            }
-        });
-        Self { url, log }
+impl Site {
+    fn start(route: impl Fn(&Request) -> Response + Send + Sync + 'static) -> Self {
+        let server = Server::new(route);
+        let url = Url::parse(&format!("{}/", server.url())).unwrap();
+        Self { server, url }
     }
 
     /// Every logged request to `path`.
     fn requests(&self, path: &str) -> Vec<String> {
-        let log = self.log.lock().unwrap();
-        let hits = log.iter().filter(|(logged, _)| logged == path);
-        hits.map(|(_, request)| request.clone()).collect()
+        let logged = self.server.recorded().into_iter();
+        let hits =
+            logged.filter(|r| r.line.split_whitespace().nth(1).map(strip_query) == Some(path));
+        hits.map(|r| {
+            format!("{}\r\n{}\r\n\r\n{}", r.line, r.headers.join("\r\n"), r.body)
+                .to_ascii_lowercase()
+        })
+        .collect()
     }
 
     fn count(&self, path: &str) -> usize {
@@ -82,14 +44,24 @@ impl Server {
     }
 
     fn total(&self) -> usize {
-        self.log.lock().unwrap().len()
+        self.server.recorded().len()
     }
+}
+
+fn strip_query(target: &str) -> &str {
+    target.split('?').next().unwrap_or_default()
 }
 
 const SEND_MAIL: &str = "/auth/kaist/user/login/second/ajaxSendMail";
 const VALIDATE: &str = "/auth/kaist/user/login/second/ajaxValidCrtfcNo";
 const DEVICE_VIEW: &str = "/auth/kaist/user/device/view";
-const COOKIE: &str = "Set-Cookie: MoodleSession=owned; Path=/; HttpOnly";
+const COOKIE: &str = "MoodleSession=owned; Path=/; HttpOnly";
+
+fn redirect(location: &str) -> Response {
+    Response::html("")
+        .status("302 Found")
+        .header("Location", location)
+}
 
 /// KAIST SSO. `device` makes the password step demand a trusted-device
 /// registration (and a KLMS handoff form) instead of a second factor.
@@ -97,13 +69,13 @@ fn sso_route(
     klms: String,
     otp: Arc<Mutex<&'static str>>,
     device: bool,
-) -> impl Fn(&str, &str) -> String + Send {
-    move |method, path| {
-        let ok = |body: &str| http("200 OK", &[], body);
-        let json = |key: &str, value: &str| ok(&format!(r#"{{"{key}":"{value}"}}"#));
-        match (method, path) {
+) -> impl Fn(&Request) -> Response + Send + Sync {
+    move |request| {
+        let path = strip_query(&request.target);
+        let json = |key: &str, value: &str| Response::html(format!(r#"{{"{key}":"{value}"}}"#));
+        match (request.method.as_str(), path) {
             (_, "/auth/kaist/user/login/view") => {
-                http("200 OK", &["Set-Cookie: sso-session=one; Path=/"], "login")
+                Response::html("login").header("Set-Cookie", "sso-session=one; Path=/")
             }
             (_, "/auth/user/login/init") => json("result_data", &"00".repeat(48)),
             (_, "/auth/user/login/auth") => {
@@ -111,32 +83,30 @@ fn sso_route(
             }
             (_, SEND_MAIL) => json("errorCode", "SS0001"),
             (_, VALIDATE) => json("result_code", *otp.lock().unwrap()),
-            (_, DEVICE_VIEW) => ok(
+            (_, DEVICE_VIEW) => Response::html(
                 "<script>fetch('/auth/kaist/user/device/ajaxRegist'); location.href='/auth/kaist/user/device/login';</script>",
             ),
             (_, "/auth/kaist/user/device/ajaxRegist") => {
-                ok(r#"{"code":"","device_cd":"trusted-device"}"#)
+                Response::html(r#"{"code":"","device_cd":"trusted-device"}"#)
             }
-            (_, "/auth/kaist/user/device/login") => {
-                http("302 Found", &["Location: /auth/user/login/link"], "")
-            }
-            ("POST", "/auth/user/login/link") if device => ok(&format!(
+            (_, "/auth/kaist/user/device/login") => redirect("/auth/user/login/link"),
+            ("POST", "/auth/user/login/link") if device => Response::html(format!(
                 r#"<form action="{klms}login/ssologin.php"><input type="hidden" name="ticket" value="opaque"></form>"#
             )),
-            ("POST", "/auth/user/login/link") => {
-                http("302 Found", &[&format!("Location: {klms}")], "")
+            ("POST", "/auth/user/login/link") => redirect(&klms),
+            (_, "/auth/kaist/user/login/second/view" | "/auth/user/login/link") => {
+                Response::html("page")
             }
-            (_, "/auth/kaist/user/login/second/view" | "/auth/user/login/link") => ok("page"),
             _ => panic!("unexpected SSO request {path}"),
         }
     }
 }
 
-fn klms_route(_: &str, path: &str) -> String {
-    match path {
-        "/login/ssologin.php" => http("302 Found", &["Location: /", COOKIE], ""),
-        "/" => http("200 OK", &[COOKIE], "ok"),
-        _ => panic!("unexpected KLMS request {path}"),
+fn klms_route(request: &Request) -> Response {
+    match strip_query(&request.target) {
+        "/login/ssologin.php" => redirect("/").header("Set-Cookie", COOKIE),
+        "/" => Response::html("ok").header("Set-Cookie", COOKIE),
+        path => panic!("unexpected KLMS request {path}"),
     }
 }
 
@@ -163,8 +133,8 @@ impl AuthPrompt for Terminal {
 }
 
 struct Fixture {
-    sso: Server,
-    klms: Server,
+    sso: Site,
+    klms: Site,
     otp: Arc<Mutex<&'static str>>,
     dirs: Dirs,
     secrets: Secrets,
@@ -212,8 +182,8 @@ impl Fixture {
             file: dirs.credentials(),
         };
         let otp = Arc::new(Mutex::new("SS0001"));
-        let klms = Server::start(klms_route);
-        let sso = Server::start(sso_route(klms.url.to_string(), otp.clone(), device));
+        let klms = Site::start(klms_route);
+        let sso = Site::start(sso_route(klms.url.to_string(), otp.clone(), device));
         Self {
             sso,
             klms,
