@@ -46,3 +46,54 @@ impl AuthPrompt for TerminalPrompt {
         eprintln!("{message}");
     }
 }
+
+/// Wraps another prompt with answers already known (a remembered or
+/// `--user` identifier, a stored password) and records what was actually used
+/// so the caller can remember it after a successful sign-in.
+pub struct KnownAnswers<P: AuthPrompt> {
+    inner: P,
+    identifier: Option<String>,
+    password: Option<Zeroizing<String>>,
+    pub identifier_used: Option<String>,
+    pub password_used: Option<Zeroizing<String>>,
+}
+
+impl<P: AuthPrompt> KnownAnswers<P> {
+    pub fn new(inner: P, identifier: Option<String>, password: Option<Zeroizing<String>>) -> Self {
+        Self {
+            inner,
+            identifier,
+            password,
+            identifier_used: None,
+            password_used: None,
+        }
+    }
+}
+
+impl<P: AuthPrompt> AuthPrompt for KnownAnswers<P> {
+    fn identifier(&mut self) -> Result<String, AppError> {
+        let value = match self.identifier.take() {
+            Some(value) => value,
+            None => self.inner.identifier()?,
+        };
+        self.identifier_used = Some(value.clone());
+        Ok(value)
+    }
+
+    fn password(&mut self) -> Result<Zeroizing<String>, AppError> {
+        let value = match self.password.take() {
+            Some(value) => value,
+            None => self.inner.password()?,
+        };
+        self.password_used = Some(value.clone());
+        Ok(value)
+    }
+
+    fn otp(&mut self, channel: &str) -> Result<Zeroizing<String>, AppError> {
+        self.inner.otp(channel)
+    }
+
+    fn notice(&mut self, message: &str) {
+        self.inner.notice(message);
+    }
+}

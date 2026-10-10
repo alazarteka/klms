@@ -8,8 +8,10 @@ use crate::error::AppError;
 
 use super::{
     codes::{self, EasyPoll, Next, PrimaryNext},
+    cookies::TransientCookies,
     crypto::encrypt_user_data,
     model::{LoginMethod, SecondFactor, StoredCookie},
+    pending::PendingLogin,
     prompt::AuthPrompt,
     transport::SsoTransport,
 };
@@ -21,29 +23,103 @@ pub struct CompletedLogin {
     pub devices: Vec<String>,
 }
 
-pub fn login(
-    klms: &Url,
-    sso: &Url,
-    timeout: u64,
-    method: LoginMethod,
-    factor: Option<SecondFactor>,
-    previous_devices: &[String],
-    prompt: &mut impl AuthPrompt,
-) -> Result<CompletedLogin, AppError> {
+/// What to do once KAIST has sent the second-factor code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtpMode {
+    /// Ask the prompt for the code and finish in this process.
+    Prompt,
+    /// Stop after the code is sent and return the state needed to resume.
+    Defer,
+}
+
+pub enum Outcome {
+    Complete(CompletedLogin),
+    CodeRequired(PendingLogin),
+}
+
+enum PasswordStep {
+    Complete,
+    CodeSent {
+        channel: &'static str,
+        factor: SecondFactor,
+    },
+}
+
+/// Everything one login attempt needs besides its prompt.
+pub struct Attempt<'a> {
+    pub klms: &'a Url,
+    pub sso: &'a Url,
+    pub timeout: u64,
+    pub method: LoginMethod,
+    pub factor: Option<SecondFactor>,
+    pub previous_devices: &'a [String],
+    pub otp_mode: OtpMode,
+}
+
+pub fn begin(attempt: &Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Outcome, AppError> {
+    let Attempt {
+        klms,
+        sso,
+        timeout,
+        method,
+        factor,
+        previous_devices,
+        otp_mode,
+    } = *attempt;
     let mut transport = SsoTransport::new(klms.clone(), sso.clone(), timeout)?;
     let entry = login_entry(&transport)?;
     transport.get_text(entry)?;
     let identifier = Zeroizing::new(prompt.identifier()?);
     match method {
-        LoginMethod::Password => password_login(
-            &mut transport,
-            &identifier,
-            factor.unwrap_or(SecondFactor::Email),
-            previous_devices,
-            prompt,
-        )?,
+        LoginMethod::Password => {
+            let step = password_login(
+                &mut transport,
+                &identifier,
+                factor.unwrap_or(SecondFactor::Email),
+                previous_devices,
+                prompt,
+                otp_mode,
+            )?;
+            if let PasswordStep::CodeSent { channel, factor } = step {
+                return Ok(Outcome::CodeRequired(PendingLogin::new(
+                    klms,
+                    &identifier,
+                    factor.as_str(),
+                    channel,
+                    transport.document_url(),
+                    previous_devices.to_vec(),
+                    transport.cookies.snapshot(),
+                )));
+            }
+        }
         LoginMethod::Easy => easy_login(&mut transport, &identifier, previous_devices, prompt)?,
     }
+    finish(&transport, previous_devices).map(Outcome::Complete)
+}
+
+/// Finish a login whose code was requested by an earlier process.
+pub fn resume(
+    klms: &Url,
+    sso: &Url,
+    timeout: u64,
+    pending: &PendingLogin,
+    code: &str,
+) -> Result<CompletedLogin, AppError> {
+    let mut transport = SsoTransport::new(klms.clone(), sso.clone(), timeout)?;
+    transport.cookies = TransientCookies::restore(&pending.jar)?;
+    if let Some(document) = &pending.document_url {
+        let url = Url::parse(document)
+            .map_err(|_| AppError::config("saved login state has an invalid document URL"))?;
+        transport.set_document_url(url)?;
+    }
+    verify_code(&mut transport, code)?;
+    finish(&transport, &pending.previous_devices)
+}
+
+fn finish(
+    transport: &SsoTransport,
+    previous_devices: &[String],
+) -> Result<CompletedLogin, AppError> {
     let cookies = transport.cookies.klms_cookies(transport.klms());
     let mut devices = previous_devices.to_vec();
     devices.extend(transport.cookies.device_values());
@@ -63,7 +139,8 @@ fn password_login(
     factor: SecondFactor,
     devices: &[String],
     prompt: &mut impl AuthPrompt,
-) -> Result<(), AppError> {
+    otp_mode: OtpMode,
+) -> Result<PasswordStep, AppError> {
     let password = prompt.password()?;
     if password.is_empty() {
         return Err(AppError::usage("password cannot be empty"));
@@ -83,9 +160,9 @@ fn password_login(
     let url = transport.sso_url("/auth/user/login/auth")?;
     let response = transport.post_form_json(url, &[("user_data", encrypted.to_string())])?;
     match codes::password_primary(result_code(&response)?)? {
-        PrimaryNext::Link => link(transport),
-        PrimaryNext::SecondFactor => second_factor(transport, factor, prompt),
-        PrimaryNext::Device => register_device(transport),
+        PrimaryNext::Link => link(transport).map(|()| PasswordStep::Complete),
+        PrimaryNext::SecondFactor => second_factor(transport, factor, prompt, otp_mode),
+        PrimaryNext::Device => register_device(transport).map(|()| PasswordStep::Complete),
     }
 }
 
@@ -93,7 +170,8 @@ fn second_factor(
     transport: &mut SsoTransport,
     factor: SecondFactor,
     prompt: &mut impl AuthPrompt,
-) -> Result<(), AppError> {
+    otp_mode: OtpMode,
+) -> Result<PasswordStep, AppError> {
     let view = transport.sso_url("/auth/kaist/user/login/second/view")?;
     transport.post_form_follow(
         view,
@@ -126,21 +204,35 @@ fn second_factor(
             ))),
         };
     }
+    if otp_mode == OtpMode::Defer {
+        return Ok(PasswordStep::CodeSent { channel, factor });
+    }
     prompt.notice("KAIST sent a verification code. It expires in three minutes.");
     let otp = prompt.otp(channel)?;
-    if otp.len() != 6 || !otp.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(AppError::usage(
-            "verification code must contain exactly six digits",
-        ));
-    }
+    verify_code(transport, &otp)?;
+    Ok(PasswordStep::Complete)
+}
+
+/// Check a six-digit code with KAIST and finish the link/device step.
+fn verify_code(transport: &mut SsoTransport, otp: &str) -> Result<(), AppError> {
+    check_code_format(otp)?;
     let response = transport.post_form_json(
         transport.sso_url("/auth/kaist/user/login/second/ajaxValidCrtfcNo")?,
-        &[("crtfc_no", otp.to_string())],
+        &[("crtfc_no", otp.to_owned())],
     )?;
     match codes::otp(result_code(&response)?)? {
         Next::Link => link(transport),
         Next::Device => register_device(transport),
     }
+}
+
+pub fn check_code_format(otp: &str) -> Result<(), AppError> {
+    if otp.len() != 6 || !otp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AppError::usage(
+            "verification code must contain exactly six digits",
+        ));
+    }
+    Ok(())
 }
 
 // 60 polls x 3 s = the "three minutes" quoted to the user.
@@ -386,6 +478,13 @@ mod tests {
         fn notice(&mut self, _message: &str) {}
     }
 
+    fn complete(outcome: Result<Outcome, AppError>) -> CompletedLogin {
+        match outcome.unwrap() {
+            Outcome::Complete(completed) => completed,
+            Outcome::CodeRequired(_) => panic!("expected a completed login"),
+        }
+    }
+
     #[test]
     fn password_email_flow_crosses_only_sso_and_klms_origins() {
         let sso_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -457,16 +556,18 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: MoodleSession=owned; Path=/; HttpOnly\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
         });
 
-        let completed = login(
-            &Url::parse(&format!("http://{klms_address}/")).unwrap(),
-            &Url::parse(&format!("http://{sso_address}/")).unwrap(),
-            5,
-            LoginMethod::Password,
-            Some(SecondFactor::Email),
-            &[],
+        let completed = complete(begin(
+            &Attempt {
+                klms: &Url::parse(&format!("http://{klms_address}/")).unwrap(),
+                sso: &Url::parse(&format!("http://{sso_address}/")).unwrap(),
+                timeout: 5,
+                method: LoginMethod::Password,
+                factor: Some(SecondFactor::Email),
+                previous_devices: &[],
+                otp_mode: OtpMode::Prompt,
+            },
             &mut FakePrompt,
-        )
-        .unwrap();
+        ));
         sso.join().unwrap();
         klms.join().unwrap();
         assert_eq!(
@@ -591,16 +692,18 @@ mod tests {
             .unwrap();
         });
 
-        let completed = login(
-            &Url::parse(&format!("http://{klms_address}/")).unwrap(),
-            &Url::parse(&format!("http://{sso_address}/")).unwrap(),
-            5,
-            LoginMethod::Password,
-            Some(SecondFactor::Email),
-            &[],
+        let completed = complete(begin(
+            &Attempt {
+                klms: &Url::parse(&format!("http://{klms_address}/")).unwrap(),
+                sso: &Url::parse(&format!("http://{sso_address}/")).unwrap(),
+                timeout: 5,
+                method: LoginMethod::Password,
+                factor: Some(SecondFactor::Email),
+                previous_devices: &[],
+                otp_mode: OtpMode::Prompt,
+            },
             &mut FakePrompt,
-        )
-        .unwrap();
+        ));
         sso.join().unwrap();
         klms.join().unwrap();
         assert_eq!(completed.devices, vec!["trusted-device"]);

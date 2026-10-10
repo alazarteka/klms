@@ -1,9 +1,13 @@
 use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::AppError;
 
-use super::model::StoredCookie;
+use super::{
+    cookie_rules::{self, Rules},
+    model::StoredCookie,
+};
 
 #[derive(Debug, Clone)]
 struct Cookie {
@@ -42,13 +46,19 @@ impl TransientCookies {
         let (name, cookie_value) = pair
             .split_once('=')
             .ok_or_else(|| AppError::auth_protocol("SSO returned a malformed cookie"))?;
-        if !valid_name(name) || !valid_value(cookie_value) {
+        // An empty value is how a server deletes a cookie; it is never stored.
+        let mut remove = cookie_value.is_empty();
+        let acceptable = if remove {
+            cookie_rules::valid_name(name)
+        } else {
+            cookie_rules::valid_cookie(name, cookie_value, Rules::Rfc6265)
+        };
+        if !acceptable {
             return Err(AppError::auth_protocol("SSO returned an unsafe cookie"));
         }
         let mut domain = host.to_ascii_lowercase();
         let mut path = default_path(request_path);
         let mut secure = false;
-        let mut remove = false;
         for attribute in parts {
             let attribute = attribute.trim();
             let (key, attr_value) = attribute.split_once('=').unwrap_or((attribute, ""));
@@ -66,7 +76,7 @@ impl TransientCookies {
                 }
                 "path" if attr_value.starts_with('/') => path = attr_value.to_owned(),
                 "secure" => secure = true,
-                "max-age" if attr_value == "0" => remove = true,
+                "max-age" if attr_value.parse::<i64>().is_ok_and(|age| age <= 0) => remove = true,
                 _ => {}
             }
         }
@@ -84,6 +94,63 @@ impl TransientCookies {
             });
         }
         Ok(())
+    }
+
+    /// Everything needed to rebuild this jar in a later process.
+    pub fn snapshot(&self) -> CookieSnapshot {
+        CookieSnapshot {
+            cookies: self
+                .cookies
+                .iter()
+                .map(|cookie| SavedCookie {
+                    name: cookie.name.clone(),
+                    value: cookie.value.clone(),
+                    domain: cookie.domain.clone(),
+                    path: cookie.path.clone(),
+                    secure: cookie.secure,
+                    source_origin: cookie.source_origin.ascii_serialization(),
+                })
+                .collect(),
+            devices: self.devices.clone(),
+        }
+    }
+
+    /// Rebuild a jar from a snapshot, re-checking every cookie because the
+    /// snapshot file is untrusted input.
+    pub fn restore(snapshot: &CookieSnapshot) -> Result<Self, AppError> {
+        let corrupt = || AppError::config("saved login state contains an invalid cookie");
+        let mut cookies = Vec::new();
+        for saved in &snapshot.cookies {
+            if !cookie_rules::valid_cookie(&saved.name, &saved.value, Rules::Rfc6265)
+                || saved.domain.is_empty()
+                || !saved.path.starts_with('/')
+                || saved
+                    .domain
+                    .contains(|c: char| c.is_whitespace() || c == ';')
+            {
+                return Err(corrupt());
+            }
+            let origin = Url::parse(&saved.source_origin)
+                .map_err(|_| corrupt())?
+                .origin();
+            cookies.push(Cookie {
+                name: saved.name.clone(),
+                value: saved.value.clone(),
+                domain: saved.domain.clone(),
+                path: saved.path.clone(),
+                secure: saved.secure,
+                source_origin: origin,
+            });
+        }
+        for device in &snapshot.devices {
+            if !valid_device(device) {
+                return Err(corrupt());
+            }
+        }
+        Ok(Self {
+            cookies,
+            devices: snapshot.devices.clone(),
+        })
     }
 
     pub fn header(&self, url: &Url) -> Option<String> {
@@ -135,12 +202,7 @@ impl TransientCookies {
     }
 
     pub fn remember_device(&mut self, value: &str) -> Result<(), AppError> {
-        if value.is_empty()
-            || value.len() > 512
-            || !value
-                .bytes()
-                .all(|byte| (0x21..0x7f).contains(&byte) && byte != b';')
-        {
+        if !valid_device(value) {
             return Err(AppError::auth_protocol(
                 "KAIST returned an invalid trusted-device identifier",
             ));
@@ -148,6 +210,31 @@ impl TransientCookies {
         self.devices.push(value.to_owned());
         Ok(())
     }
+}
+
+fn valid_device(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b';')
+}
+
+/// Serializable form of the transient SSO jar (used for the pending login).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CookieSnapshot {
+    pub cookies: Vec<SavedCookie>,
+    pub devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub source_origin: String,
 }
 
 fn default_path(path: &str) -> String {
@@ -163,20 +250,6 @@ fn default_path(path: &str) -> String {
 
 fn path_matches(request: &str, cookie: &str) -> bool {
     request == cookie || request.starts_with(&format!("{}/", cookie.trim_end_matches('/')))
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte > 0x20 && byte < 0x7f && !b"()<>@,;:\\\"/[]?={} \t".contains(&byte))
-}
-
-fn valid_value(value: &str) -> bool {
-    value.len() <= 4096
-        && value
-            .bytes()
-            .all(|byte| (0x20..0x7f).contains(&byte) && byte != b';')
 }
 
 #[cfg(test)]
@@ -209,5 +282,104 @@ mod tests {
             }]
         );
         assert!(jar.header(&klms).unwrap().contains("central=secret"));
+    }
+
+    fn capture_header(
+        jar: &mut TransientCookies,
+        url: &str,
+        set_cookie: &str,
+    ) -> Result<(), AppError> {
+        let mut headers = HeaderMap::new();
+        headers.append(SET_COOKIE, HeaderValue::from_str(set_cookie).unwrap());
+        jar.capture(&Url::parse(url).unwrap(), &headers)
+    }
+
+    #[test]
+    fn empty_value_deletes_and_is_never_stored() {
+        let mut jar = TransientCookies::default();
+        let klms = Url::parse("https://klms.kaist.ac.kr/").unwrap();
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "MoodleSession=owned; Path=/",
+        )
+        .unwrap();
+        assert_eq!(jar.klms_cookies(&klms).len(), 1);
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "MoodleSession=; Path=/; Max-Age=0",
+        )
+        .unwrap();
+        assert!(jar.klms_cookies(&klms).is_empty());
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "MoodleSession=owned; Path=/",
+        )
+        .unwrap();
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "MoodleSession=; Path=/",
+        )
+        .unwrap();
+        assert!(jar.klms_cookies(&klms).is_empty());
+        assert!(jar.header(&klms).is_none());
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "fresh=1; Path=/; Max-Age=-5",
+        )
+        .unwrap();
+        assert!(jar.klms_cookies(&klms).is_empty());
+    }
+
+    #[test]
+    fn capture_applies_the_shared_rfc_predicate() {
+        let mut jar = TransientCookies::default();
+        for bad in [
+            "a=b c", "a=b,c", "a=b\\c", "a=\"b", "a b=c", "=v", "novalue",
+        ] {
+            let result = capture_header(&mut jar, "https://sso.kaist.ac.kr/", bad);
+            assert!(result.is_err(), "{bad:?}");
+        }
+        capture_header(&mut jar, "https://sso.kaist.ac.kr/", "q=\"quoted\"; Path=/").unwrap();
+        assert!(
+            jar.header(&Url::parse("https://sso.kaist.ac.kr/").unwrap())
+                .unwrap()
+                .contains("q=\"quoted\"")
+        );
+    }
+
+    #[test]
+    fn snapshot_round_trips_and_rejects_tampering() {
+        let mut jar = TransientCookies::default();
+        capture_header(
+            &mut jar,
+            "https://sso.kaist.ac.kr/auth/x",
+            "s=1; Domain=kaist.ac.kr; Path=/auth; Secure",
+        )
+        .unwrap();
+        capture_header(
+            &mut jar,
+            "https://klms.kaist.ac.kr/",
+            "MoodleSession=owned; Path=/",
+        )
+        .unwrap();
+        jar.remember_device("dev").unwrap();
+        let snapshot = jar.snapshot();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: CookieSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = TransientCookies::restore(&back).unwrap();
+        assert_eq!(restored.snapshot(), snapshot);
+        let klms = Url::parse("https://klms.kaist.ac.kr/").unwrap();
+        assert_eq!(restored.klms_cookies(&klms), jar.klms_cookies(&klms));
+        let mut evil = snapshot.clone();
+        evil.cookies[0].value = "x; injected=y".into();
+        assert!(TransientCookies::restore(&evil).is_err());
+        let mut evil = snapshot;
+        evil.devices.push("bad device".into());
+        assert!(TransientCookies::restore(&evil).is_err());
     }
 }

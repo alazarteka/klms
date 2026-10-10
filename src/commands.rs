@@ -42,30 +42,36 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
         Command::Auth(AuthArgs {
             command: AuthCommand::Login(login),
         }) => {
-            let method = match login.method.unwrap_or(AuthMethodArg::Easy) {
-                AuthMethodArg::Easy => auth::LoginMethod::Easy,
-                AuthMethodArg::Password => auth::LoginMethod::Password,
+            let options = auth::LoginOptions {
+                user: login.user.clone(),
+                method: login.method.map(|method| match method {
+                    AuthMethodArg::Easy => auth::LoginMethod::Easy,
+                    AuthMethodArg::Password => auth::LoginMethod::Password,
+                }),
+                factor: login.second_factor.map(|factor| match factor {
+                    AuthSecondFactorArg::Email => auth::SecondFactor::Email,
+                    AuthSecondFactorArg::Sms => auth::SecondFactor::Sms,
+                }),
+                remember_password: login.remember_password,
+                insecure_storage: login.insecure_storage,
+                code: login.code.clone(),
             };
-            if login.second_factor.is_some() && method != auth::LoginMethod::Password {
-                return Err(AppError::usage(
-                    "--second-factor applies only to password login",
-                ));
-            }
-            let factor = login.second_factor.map(|factor| match factor {
-                AuthSecondFactorArg::Email => auth::SecondFactor::Email,
-                AuthSecondFactorArg::Sms => auth::SecondFactor::Sms,
-            });
             let sso_url = if base_url.host_str() == Some("klms.kaist.ac.kr") {
                 Url::parse("https://sso.kaist.ac.kr/").expect("valid built-in SSO URL")
             } else {
                 base_url.clone()
             };
-            return auth::login(&base_url, &sso_url, cli.timeout, method, factor);
+            return auth::login(&base_url, &sso_url, cli.timeout, &options, cli.json);
         }
         Command::Auth(AuthArgs {
             command: AuthCommand::Logout,
         }) => {
             return auth::logout();
+        }
+        Command::Auth(AuthArgs {
+            command: AuthCommand::Forget,
+        }) => {
+            return auth::forget();
         }
         _ => {}
     }
@@ -87,7 +93,7 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
 }
 
 fn auth_status(status: &auth::AuthStatus) -> Result<CommandResult, AppError> {
-    let human = if status.configured {
+    let mut human = if status.configured {
         format!(
             "Owned session: {}\nSource: {}\nCookies: {}\nTrusted devices: {}",
             status.path, status.source, status.cookie_count, status.device_count,
@@ -98,6 +104,21 @@ fn auth_status(status: &auth::AuthStatus) -> Result<CommandResult, AppError> {
             status.path
         )
     };
+    match (&status.remembered, &status.remembered_error) {
+        (Some(login), _) => {
+            let factor = login
+                .second_factor
+                .as_deref()
+                .map(|factor| format!(", {factor} code"))
+                .unwrap_or_default();
+            human.push_str(&format!(
+                "\nRemembered login: {} ({}{factor})\nStored password: {}",
+                login.username, login.method, login.password_backend
+            ));
+        }
+        (None, Some(error)) => human.push_str(&format!("\nRemembered login: unreadable ({error})")),
+        (None, None) => human.push_str("\nRemembered login: none"),
+    }
     output::result("auth.status", status, human)
 }
 
@@ -190,7 +211,7 @@ fn live(command: &Command, client: &KlmsClient, base_url: &Url) -> Result<Comman
             unreachable!("handled before authenticated dispatch")
         }
         Command::Auth(args) => match args.command {
-            AuthCommand::Login(_) | AuthCommand::Logout => {
+            AuthCommand::Login(_) | AuthCommand::Logout | AuthCommand::Forget => {
                 unreachable!("handled before live dispatch")
             }
             AuthCommand::Status => unreachable!("handled before live dispatch"),
