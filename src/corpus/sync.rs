@@ -1,4 +1,7 @@
-use super::{Corpus, SyncSummary, object_store, query::refresh_subject};
+use super::{
+    Corpus, SyncSummary, object_store,
+    query::{refresh_subject, row, rows},
+};
 use crate::date::epoch_now as now;
 use crate::url::Url;
 use crate::{
@@ -7,20 +10,23 @@ use crate::{
     models::{Activity, Course, LinkItem},
     parse,
 };
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Params, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
 const MAX_DOWNLOAD: usize = 128 * 1024 * 1024;
+
 #[derive(Clone, Copy)]
 pub struct SyncOptions {
     pub notices: bool,
     pub files: bool,
     pub download_changed: bool,
 }
+
+#[derive(Default)]
 struct PendingResource {
     reference: String,
-    course_ref: String,
     kind: String,
     title: String,
     url: Option<String>,
@@ -34,26 +40,102 @@ struct PendingResource {
     complete: bool,
     representations_complete: bool,
 }
-struct CourseCollection {
-    course: Course,
-    resources: Vec<PendingResource>,
-    manifest_complete: bool,
-}
+
+/// A course with its resources and whether its manifest was fetched completely.
+type Collection = (Course, Vec<PendingResource>, bool);
+/// Newest content observation of a representation: sha256, etag, last-modified, length.
+type Bound = (String, Option<String>, Option<String>, i64);
+
 struct Existing {
     id: i64,
     state: String,
     digest: Option<String>,
 }
-struct ValidationTarget {
+
+/// The write context of one sync run: connection, run id and observation time.
+struct Run<'a> {
+    c: &'a Connection,
     id: i64,
-    url: String,
+    at: i64,
 }
-struct BoundContent {
-    sha256: String,
-    etag: Option<String>,
-    last_modified: Option<String>,
-    length: i64,
+
+impl Run<'_> {
+    fn change(
+        &self,
+        kind: &str,
+        subject: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        details: Option<Value>,
+    ) -> Result<(), AppError> {
+        self.c.execute(
+            "INSERT INTO remote_changes(
+               sync_run_id,occurred_at,kind,subject_ref,before_ref,after_ref,details_json
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                self.id,
+                self.at,
+                kind,
+                subject,
+                before,
+                after,
+                details.map_or_else(|| "{}".to_owned(), |value| value.to_string())
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The row of `table` matching `filter` (alias `t`), with its newest observation digest.
+    fn existing(
+        &self,
+        (table, observations, key): (&str, &str, &str),
+        filter: &str,
+        p: impl Params,
+    ) -> Result<Option<Existing>, AppError> {
+        let sql = format!(
+            "SELECT t.id,t.remote_state,(SELECT digest FROM {observations}
+                WHERE {key}=t.id ORDER BY id DESC LIMIT 1) FROM {table} t WHERE {filter}"
+        );
+        row(self.c, &sql, p, |r| {
+            Ok(Existing {
+                id: r.get(0)?,
+                state: r.get(1)?,
+                digest: r.get(2)?,
+            })
+        })
+    }
+
+    fn insert_id(&self, sql: &str, p: impl Params) -> Result<i64, AppError> {
+        self.c.execute(sql, p)?;
+        Ok(self.c.last_insert_rowid())
+    }
+
+    /// Rows selected as (`id`, `key`, `subject`) whose key `seen` does not claim
+    /// are marked missing by `update`, with one recorded change each.
+    fn mark_missing(
+        &self,
+        select: &str,
+        select_params: impl Params,
+        (update, kind, details): (&str, &str, Option<Value>),
+        seen: impl Fn(&str) -> bool,
+    ) -> Result<(), AppError> {
+        let found = rows(self.c, select, select_params, |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for (id, key, subject) in found {
+            if !seen(&key) {
+                self.c.execute(update, params![self.at, id])?;
+                self.change(kind, &subject, None, None, details.clone())?;
+            }
+        }
+        Ok(())
+    }
 }
+
 impl Corpus {
     pub fn sync(
         &mut self,
@@ -63,22 +145,20 @@ impl Corpus {
         options: SyncOptions,
     ) -> Result<SyncSummary, AppError> {
         let started_at = now();
-        self.storage.connection.execute(
+        self.connection.execute(
             "INSERT INTO sync_runs(started_at,scope,status) VALUES(?1,?2,'running')",
             params![started_at, filter.unwrap_or("all")],
         )?;
-        let run_id = self.storage.connection.last_insert_rowid();
-        match self.collect_sync(client, base_url, filter, options, run_id, started_at) {
-            Ok(summary) => Ok(summary),
-            Err(error) => {
-                let _ = self.storage.connection.execute(
+        let run_id = self.connection.last_insert_rowid();
+        self.collect_sync(client, base_url, filter, options, run_id, started_at)
+            .inspect_err(|_| {
+                let _ = self.connection.execute(
                     "UPDATE sync_runs SET finished_at=?1,status='failed' WHERE id=?2",
                     params![now(), run_id],
                 );
-                Err(error)
-            }
-        }
+            })
     }
+
     fn collect_sync(
         &mut self,
         client: &KlmsClient,
@@ -89,67 +169,49 @@ impl Corpus {
         observed_at: i64,
     ) -> Result<SyncSummary, AppError> {
         let response = client.get("/my/")?;
-        let dashboard = parse::dashboard(&response.text, base_url)?;
-        let mut courses = dashboard.courses;
+        let mut courses = parse::dashboard(&response.text, base_url)?.courses;
         if let Some(value) = filter {
             courses = resolve_course(courses, value)?;
-            self.storage.connection.execute(
+            self.connection.execute(
                 "UPDATE sync_runs SET scope=?1 WHERE id=?2",
                 params![courses[0].reference, run_id],
             )?;
         }
-        let mut collections = Vec::new();
+        let mut collections: Vec<Collection> = Vec::new();
         let mut failures = Vec::new();
         for course in courses {
-            match collect_course(client, base_url, course.clone(), options) {
+            match collect_course(client, base_url, &course, options) {
                 Ok((resources, mut detail_failures)) => {
                     failures.append(&mut detail_failures);
-                    collections.push(CourseCollection {
-                        course,
-                        resources,
-                        manifest_complete: true,
-                    });
+                    collections.push((course, resources, true));
                 }
                 Err(error) => {
                     failures.push(format!("{}: {}", course.reference, error.message));
-                    collections.push(CourseCollection {
-                        course,
-                        resources: Vec::new(),
-                        manifest_complete: false,
-                    });
+                    collections.push((course, Vec::new(), false));
                 }
             }
         }
         let transaction = self
-            .storage
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut course_ids = HashSet::new();
-        let mut resources_seen: HashMap<String, HashSet<String>> = HashMap::new();
+        let x = Run {
+            c: &transaction,
+            id: run_id,
+            at: observed_at,
+        };
+        let mut listed = HashSet::new();
         let mut frontier = HashSet::new();
-        let mut resource_count = 0_u64;
-        let mut representation_count = 0_u64;
-        let mut truncated_count = 0_u64;
-        for collection in &collections {
-            let course_id = upsert_course(&transaction, run_id, observed_at, &collection.course)?;
-            course_ids.insert(course_id);
-            refresh_subject(&transaction, &collection.course.reference)?;
-            for resource in &collection.resources {
-                resources_seen
-                    .entry(resource.course_ref.clone())
-                    .or_default()
-                    .insert(resource.reference.clone());
-                let resource_id =
-                    upsert_resource(&transaction, run_id, observed_at, course_id, resource)?;
+        let (mut resource_count, mut representation_count, mut truncated_count) = (0_u64, 0_u64, 0);
+        for (course, resources, _) in &collections {
+            let course_id = upsert_course(&x, course)?;
+            listed.insert(course.reference.clone());
+            refresh_subject(x.c, &course.reference)?;
+            for resource in resources {
+                let resource_id = upsert_resource(&x, course_id, resource)?;
                 resource_count += 1;
-                if resource.observe && !resource.complete {
-                    truncated_count += 1;
-                }
+                truncated_count += (resource.observe && !resource.complete) as u64;
                 let mut links = resource.links.clone();
-                if let Some(url) = resource
-                    .url
-                    .as_deref()
-                    .filter(|url| !activity_container(url))
+                if let Some(url) = (resource.url.as_deref()).filter(|url| !activity_container(url))
                 {
                     links.push(LinkItem {
                         title: resource.title.clone(),
@@ -162,42 +224,40 @@ impl Corpus {
                         continue;
                     };
                     seen_urls.insert(url.as_str().to_owned());
-                    let representation_id = upsert_representation(
-                        &transaction,
-                        run_id,
-                        observed_at,
-                        resource_id,
-                        &url,
-                        &link.title,
-                    )?;
-                    frontier.insert(representation_id);
+                    frontier.insert(upsert_representation(&x, resource_id, &url, &link.title)?);
                     representation_count += 1;
                 }
                 if resource.representations_complete {
-                    mark_missing_representations(
-                        &transaction,
-                        run_id,
-                        observed_at,
-                        resource_id,
-                        &seen_urls,
-                    )?;
+                    mark_missing_representations(&x, resource_id, &seen_urls)?;
                 }
-                refresh_subject(&transaction, &resource.reference)?;
+                refresh_subject(x.c, &resource.reference)?;
             }
         }
         if filter.is_none() {
-            mark_missing_courses(&transaction, run_id, observed_at, &course_ids)?;
+            x.mark_missing(
+                "SELECT id,ref,ref FROM courses WHERE remote_state='listed'",
+                [],
+                (
+                    "UPDATE courses SET remote_state='not_listed',not_listed_since=?1 WHERE id=?2",
+                    "course_not_listed",
+                    None,
+                ),
+                |key| listed.contains(key),
+            )?;
         }
-        for collection in &collections {
-            if collection.manifest_complete {
-                mark_missing_resources(
-                    &transaction,
-                    run_id,
-                    observed_at,
-                    &collection.course.reference,
-                    resources_seen.get(&collection.course.reference),
-                )?;
-            }
+        for (course, resources, _) in collections.iter().filter(|c| c.2) {
+            let seen: HashSet<&str> = resources.iter().map(|r| r.reference.as_str()).collect();
+            x.mark_missing(
+                "SELECT r.id,r.ref,r.ref FROM resources r JOIN courses c ON c.id=r.course_id
+                  WHERE c.ref=?1 AND r.remote_state='present' AND r.kind!='notice'",
+                [&course.reference],
+                (
+                    "UPDATE resources SET remote_state='not_observed',not_observed_since=?1 WHERE id=?2",
+                    "resource_not_observed",
+                    Some(json!({"collection": "course_manifest"})),
+                ),
+                |key| seen.contains(key),
+            )?;
         }
         transaction.commit()?;
         let (blobs_added, mut validation_failures) = if options.files || options.download_changed {
@@ -212,14 +272,14 @@ impl Corpus {
             "incomplete"
         };
         let source_complete = failures.is_empty() && filter.is_none();
-        let changes = self.storage.connection.query_row(
+        let changes = self.connection.query_row(
             "SELECT COUNT(*) FROM remote_changes WHERE sync_run_id=?1",
             [run_id],
             |row| row.get::<_, i64>(0),
         )? as u64;
-        self.storage.connection.execute(
+        self.connection.execute(
             "UPDATE sync_runs SET finished_at=?1,status=?2,source_complete=?3 WHERE id=?4",
-            params![now(), status, source_complete as i64, run_id],
+            params![now(), status, source_complete, run_id],
         )?;
         Ok(SyncSummary {
             reference: format!("sync:{run_id}"),
@@ -234,6 +294,9 @@ impl Corpus {
             failures,
         })
     }
+
+    /// HEAD every observed file representation and, when `download` is set,
+    /// fetch the ones whose validators no longer match the stored bytes.
     fn validate_frontier(
         &mut self,
         client: &KlmsClient,
@@ -241,43 +304,27 @@ impl Corpus {
         download: bool,
         frontier: &HashSet<i64>,
     ) -> Result<(u64, Vec<String>), AppError> {
-        let targets = {
-            let mut statement = self
-                .storage
-                .connection
-                .prepare("SELECT id,url FROM representations WHERE id=?1 AND kind='file'")?;
-            let mut values = Vec::new();
-            for id in frontier {
-                if let Some(target) = statement
-                    .query_row([id], |row| {
-                        Ok(ValidationTarget {
-                            id: row.get(0)?,
-                            url: row.get(1)?,
-                        })
-                    })
-                    .optional()?
-                {
-                    values.push(target);
-                }
-            }
-            values.sort_by_key(|target| target.id);
-            values
-        };
+        let targets = rows(
+            &self.connection,
+            "SELECT id,url FROM representations WHERE kind='file' ORDER BY id",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )?;
         let mut blobs_added = 0_u64;
         let mut failures = Vec::new();
-        for target in targets {
-            let metadata = match client.head(&target.url) {
+        for (id, url) in targets.into_iter().filter(|(id, _)| frontier.contains(id)) {
+            let metadata = match client.head(&url) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    failures.push(format!("representation:{}: {}", target.id, error.message));
+                    failures.push(format!("representation:{id}: {}", error.message));
                     continue;
                 }
             };
-            self.update_metadata(target.id, &metadata)?;
+            self.update_mime(id, &metadata)?;
             if !download {
                 continue;
             }
-            let bound = latest_bound_content(&self.storage.connection, target.id)?;
+            let bound = latest_bound_content(&self.connection, id)?;
             if bound
                 .as_ref()
                 .is_some_and(|bound| validators_match(bound, &metadata))
@@ -285,66 +332,62 @@ impl Corpus {
                 continue;
             }
             let conditional = client.get_conditional(
-                &target.url,
-                bound.as_ref().and_then(|row| row.etag.as_deref()),
-                bound.as_ref().and_then(|row| row.last_modified.as_deref()),
+                &url,
+                bound.as_ref().and_then(|b| b.1.as_deref()),
+                bound.as_ref().and_then(|b| b.2.as_deref()),
                 MAX_DOWNLOAD,
             );
             let response = match conditional {
                 Ok(response) => response,
                 Err(error) => {
-                    failures.push(format!("representation:{}: {}", target.id, error.message));
+                    failures.push(format!("representation:{id}: {}", error.message));
                     continue;
                 }
             };
-            self.update_metadata(target.id, &response.metadata)?;
+            self.update_mime(id, &response.metadata)?;
             let Some(bytes) = response.bytes else {
                 continue;
             };
-            let object = object_store::store(&self.storage.paths.objects, &bytes)?;
+            let sha256 = object_store::store(&self.objects, &bytes)?;
             let transaction = self
-                .storage
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let inserted = transaction.execute(
-                "INSERT OR IGNORE INTO blobs(sha256,byte_length,mime,stored_at)
-                 VALUES(?1,?2,?3,?4)",
-                params![
-                    object.sha256,
-                    object.bytes as i64,
-                    response.metadata.content_type,
-                    now()
-                ],
-            )?;
-            blobs_added += inserted as u64;
-            let previous = latest_bound_content(&transaction, target.id)?;
+            let x = Run {
+                c: &transaction,
+                id: run_id,
+                at: now(),
+            };
+            let length = bytes.len() as i64;
+            blobs_added += transaction.execute(
+                "INSERT OR IGNORE INTO blobs(sha256,byte_length,mime,stored_at) VALUES(?1,?2,?3,?4)",
+                params![sha256, length, response.metadata.content_type, x.at],
+            )? as u64;
+            let previous = latest_bound_content(&transaction, id)?;
             // A successful download binds its validators to these bytes even
             // when their digest has not changed. Keep that observation so the
             // next sync does not download the same content again.
             transaction.execute(
                 "INSERT INTO content_observations(
-                       representation_id,sync_run_id,observed_at,sha256,etag,
-                       last_modified,byte_length,mime
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                   representation_id,sync_run_id,observed_at,sha256,etag,
+                   last_modified,byte_length,mime
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
-                    target.id,
+                    id,
                     run_id,
-                    now(),
-                    object.sha256,
+                    x.at,
+                    sha256,
                     response.metadata.etag,
                     response.metadata.last_modified,
-                    object.bytes as i64,
+                    length,
                     response.metadata.content_type
                 ],
             )?;
-            if let Some(previous) = previous.filter(|row| row.sha256 != object.sha256) {
-                change(
-                    &transaction,
-                    (run_id, now()),
+            if let Some((before, ..)) = previous.filter(|bound| bound.0 != sha256) {
+                x.change(
                     "verified_content_changed",
-                    &format!("representation:{}", target.id),
-                    Some(&format!("sha256:{}", previous.sha256)),
-                    Some(&format!("sha256:{}", object.sha256)),
+                    &format!("representation:{id}"),
+                    Some(&format!("sha256:{before}")),
+                    Some(&format!("sha256:{sha256}")),
                     None,
                 )?;
             }
@@ -352,24 +395,23 @@ impl Corpus {
         }
         Ok((blobs_added, failures))
     }
-    fn update_metadata(&self, id: i64, metadata: &RemoteMetadata) -> Result<(), AppError> {
-        self.storage.connection.execute(
+
+    fn update_mime(&self, id: i64, metadata: &RemoteMetadata) -> Result<(), AppError> {
+        self.connection.execute(
             "UPDATE representations SET observed_mime=?1 WHERE id=?2",
             params![metadata.content_type, id],
         )?;
         Ok(())
     }
 }
+
 fn resolve_course(courses: Vec<Course>, filter: &str) -> Result<Vec<Course>, AppError> {
     let matched: Vec<_> = courses
         .into_iter()
         .filter(|course| {
             course.id == filter
                 || course.reference == filter
-                || course
-                    .code
-                    .as_deref()
-                    .is_some_and(|code| code.eq_ignore_ascii_case(filter))
+                || (course.code.as_deref()).is_some_and(|code| code.eq_ignore_ascii_case(filter))
                 || course.title.eq_ignore_ascii_case(filter)
         })
         .collect();
@@ -381,78 +423,73 @@ fn resolve_course(courses: Vec<Course>, filter: &str) -> Result<Vec<Course>, App
         )))
     }
 }
+
 fn collect_course(
     client: &KlmsClient,
     base_url: &Url,
-    course: Course,
+    course: &Course,
     options: SyncOptions,
 ) -> Result<(Vec<PendingResource>, Vec<String>), AppError> {
     let activities = crate::course_pages::activities(client, base_url, &course.id)?;
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     for activity in activities {
-        let reference = library_resource_reference(&course, &activity)?;
-        let activity_source = serde_json::to_value(&activity)
-            .map_err(|error| AppError::internal(error.to_string()))?;
+        let reference = resource_reference(course, &activity)?;
         let mut row = PendingResource {
             reference: reference.clone(),
-            course_ref: course.reference.clone(),
             kind: activity.kind.clone(),
             title: activity.title.clone(),
             url: activity.url.clone(),
             week: activity.week,
             section: activity.section.clone(),
-            text: None,
-            source: json!({"activity": activity_source, "detail": {"state": "not_requested"}}),
-            links: Vec::new(),
+            source: json!({"activity": activity, "detail": {"state": "not_requested"}}),
             observe: true,
-            access_lost: false,
             complete: true,
-            representations_complete: activity
-                .url
-                .as_deref()
+            representations_complete: (activity.url.as_deref())
                 .is_some_and(|url| !activity_container(url)),
+            ..Default::default()
         };
-        let detail_wanted = !activity.external
-            && activity.url.as_deref().is_some_and(activity_container)
-            && matches!(
-                activity.kind.as_str(),
-                "assign" | "quiz" | "page" | "folder" | "resource" | "coursefile"
-            );
-        if detail_wanted {
-            if let Some(url) = &activity.url {
-                match client.get(url).and_then(|response| {
-                    parse::resource_detail(&response.text, base_url, &response.url, &activity.kind)
-                }) {
-                    Ok(detail) => {
-                        row.complete = !detail.text_truncated && !detail.links_truncated;
-                        row.representations_complete = !detail.links_truncated;
-                        row.text = Some(detail.text.clone());
-                        row.links = detail.links.clone();
-                        row.source = json!({"activity": activity, "detail": detail});
-                    }
-                    Err(error) => {
-                        row.observe = false;
-                        row.complete = false;
-                        row.source["detail"]["state"] = json!("incomplete");
-                        row.access_lost = error.code == "PERMISSION_DENIED";
-                        failures.push(format!("{reference}: {}", error.message));
-                    }
+        let detail_url = (activity.url.as_deref()).filter(|url| {
+            !activity.external
+                && activity_container(url)
+                && matches!(
+                    activity.kind.as_str(),
+                    "assign" | "quiz" | "page" | "folder" | "resource" | "coursefile"
+                )
+        });
+        if let Some(url) = detail_url {
+            let detail = client.get(url).and_then(|response| {
+                parse::resource_detail(&response.text, base_url, &response.url, &activity.kind)
+            });
+            match detail {
+                Ok(detail) => {
+                    row.complete = !detail.text_truncated && !detail.links_truncated;
+                    row.representations_complete = !detail.links_truncated;
+                    row.text = Some(detail.text.clone());
+                    row.links = detail.links.clone();
+                    row.source = json!({"activity": activity, "detail": detail});
+                }
+                Err(error) => {
+                    row.observe = false;
+                    row.complete = false;
+                    row.source["detail"]["state"] = json!("incomplete");
+                    row.access_lost = error.code == "PERMISSION_DENIED";
+                    failures.push(format!("{reference}: {}", error.message));
                 }
             }
         }
-        if options.notices && activity.kind == "courseboard" {
-            if let Some(url) = &activity.url {
-                let (mut notices, mut notice_failures) =
-                    collect_board(client, base_url, &course, url);
-                rows.append(&mut notices);
-                failures.append(&mut notice_failures);
-            }
+        if let (true, "courseboard", Some(url)) =
+            (options.notices, activity.kind.as_str(), &activity.url)
+        {
+            let (mut notices, mut notice_failures) = collect_board(client, base_url, course, url);
+            rows.append(&mut notices);
+            failures.append(&mut notice_failures);
         }
         rows.push(row);
     }
     Ok((rows, failures))
 }
+
 fn collect_board(
     client: &KlmsClient,
     base_url: &Url,
@@ -461,6 +498,9 @@ fn collect_board(
 ) -> (Vec<PendingResource>, Vec<String>) {
     let mut rows = Vec::new();
     let mut failures = Vec::new();
+    let fail = |failures: &mut Vec<String>, message: &str| {
+        failures.push(format!("{}: {message}", course.reference));
+    };
     let mut next = Some(start.to_owned());
     let mut visited = HashSet::new();
     for _ in 0..20 {
@@ -468,24 +508,20 @@ fn collect_board(
             return (rows, failures);
         };
         if !visited.insert(url.clone()) {
-            failures.push(format!(
-                "{}: notice pagination cycle detected",
-                course.reference
-            ));
+            fail(&mut failures, "notice pagination cycle detected");
             break;
         }
         let page = match client.get(&url) {
             Ok(page) => page,
             Err(error) => {
-                failures.push(format!("{}: {}", course.reference, error.message));
+                fail(&mut failures, &error.message);
                 break;
             }
         };
-        let board_id = query(&page.url, "id");
-        let posts = match parse::board_posts(&page.text, base_url, board_id) {
+        let posts = match parse::board_posts(&page.text, base_url, query(&page.url, "id")) {
             Ok(posts) => posts,
             Err(error) => {
-                failures.push(format!("{}: {}", course.reference, error.message));
+                fail(&mut failures, &error.message);
                 break;
             }
         };
@@ -493,103 +529,84 @@ fn collect_board(
             let Some(reference) = post.reference else {
                 continue;
             };
-            let detail = match client.get(&post.url).and_then(|response| {
+            let detail = client.get(&post.url).and_then(|response| {
                 parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")
-            }) {
+            });
+            let detail = match detail {
                 Ok(detail) => detail,
                 Err(error) => {
                     failures.push(format!("{reference}: {}", error.message));
                     continue;
                 }
             };
-            let complete = !detail.text_truncated && !detail.links_truncated;
             rows.push(PendingResource {
                 reference,
-                course_ref: course.reference.clone(),
                 kind: "notice".into(),
                 title: detail.title.clone(),
                 url: Some(detail.url.clone()),
-                week: None,
-                section: None,
                 text: Some(detail.text.clone()),
                 source: serde_json::to_value(&detail).unwrap_or(Value::Null),
-                links: detail.links,
                 observe: true,
-                access_lost: false,
-                complete,
+                complete: !detail.text_truncated && !detail.links_truncated,
                 representations_complete: !detail.links_truncated,
+                links: detail.links,
+                ..Default::default()
             });
         }
         next = match parse::next_page_url(&page.text, base_url) {
             Ok(next) => next,
             Err(error) => {
-                failures.push(format!("{}: {}", course.reference, error.message));
+                fail(&mut failures, &error.message);
                 break;
             }
         };
     }
     if next.is_some() {
-        failures.push(format!(
-            "{}: notice pagination exceeded 20 pages",
-            course.reference
-        ));
+        fail(&mut failures, "notice pagination exceeded 20 pages");
     }
     (rows, failures)
 }
-fn upsert_course(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
-    course: &Course,
-) -> Result<i64, AppError> {
+
+fn upsert_course(x: &Run, course: &Course) -> Result<i64, AppError> {
     let digest = digest_json(course)?;
-    let existing = transaction
-        .query_row(
-            "SELECT c.id,c.remote_state,
-                (SELECT digest FROM course_observations
-                  WHERE course_id=c.id ORDER BY id DESC LIMIT 1)
-           FROM courses c WHERE c.ref=?1",
-            [&course.reference],
-            |row| {
-                Ok(Existing {
-                    id: row.get(0)?,
-                    state: row.get(1)?,
-                    digest: row.get(2)?,
-                })
-            },
-        )
-        .optional()?;
-    let (id, event) = if let Some(existing) = &existing {
-        transaction.execute(
-            "UPDATE courses SET remote_state='listed',last_seen=?1,not_listed_since=NULL
-              WHERE id=?2",
-            params![at, existing.id],
-        )?;
-        let event = if existing.state != "listed" {
-            Some("course_reappeared")
-        } else if existing.digest.as_deref() != Some(&digest) {
-            Some("course_source_changed")
-        } else {
-            None
-        };
-        (existing.id, event)
-    } else {
-        transaction.execute(
-            "INSERT INTO courses(ref,first_seen,last_seen) VALUES(?1,?2,?2)",
-            params![course.reference, at],
-        )?;
-        (transaction.last_insert_rowid(), Some("course_appeared"))
+    let existing = x.existing(
+        ("courses", "course_observations", "course_id"),
+        "t.ref=?1",
+        [&course.reference],
+    )?;
+    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+    let changed = previous != Some(digest.as_str());
+    let (id, event) = match &existing {
+        Some(e) => {
+            x.c.execute(
+                "UPDATE courses SET remote_state='listed',last_seen=?1,not_listed_since=NULL
+                  WHERE id=?2",
+                params![x.at, e.id],
+            )?;
+            let event = if e.state != "listed" {
+                Some("course_reappeared")
+            } else {
+                changed.then_some("course_source_changed")
+            };
+            (e.id, event)
+        }
+        None => {
+            let id = x.insert_id(
+                "INSERT INTO courses(ref,first_seen,last_seen) VALUES(?1,?2,?2)",
+                params![course.reference, x.at],
+            )?;
+            (id, Some("course_appeared"))
+        }
     };
-    let previous = existing.as_ref().and_then(|row| row.digest.as_deref());
-    if previous != Some(digest.as_str()) {
-        transaction.execute(
+    if changed {
+        x.c.execute(
             "INSERT INTO course_observations(
                course_id,sync_run_id,observed_at,digest,title,code,term,url
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 id,
-                run_id,
-                at,
+                x.id,
+                x.at,
                 digest,
                 course.title,
                 course.code,
@@ -599,87 +616,66 @@ fn upsert_course(
         )?;
     }
     if let Some(kind) = event {
-        change(
-            transaction,
-            (run_id, at),
+        let details = json!({"title": course.title});
+        x.change(
             kind,
             &course.reference,
             previous,
             Some(&digest),
-            Some(json!({"title": course.title})),
+            Some(details),
         )?;
     }
     Ok(id)
 }
-fn upsert_resource(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
-    course_id: i64,
-    resource: &PendingResource,
-) -> Result<i64, AppError> {
-    let existing = transaction
-        .query_row(
-            "SELECT r.id,r.remote_state,
-                (SELECT digest FROM resource_observations
-                  WHERE resource_id=r.id ORDER BY id DESC LIMIT 1)
-           FROM resources r WHERE r.ref=?1",
-            [&resource.reference],
-            |row| {
-                Ok(Existing {
-                    id: row.get(0)?,
-                    state: row.get(1)?,
-                    digest: row.get(2)?,
-                })
-            },
-        )
-        .optional()?;
+
+fn upsert_resource(x: &Run, course_id: i64, resource: &PendingResource) -> Result<i64, AppError> {
+    let existing = x.existing(
+        ("resources", "resource_observations", "resource_id"),
+        "t.ref=?1",
+        [&resource.reference],
+    )?;
     let desired = if resource.access_lost {
         Some("access_lost")
-    } else if resource.observe {
-        Some("present")
     } else {
-        None
+        resource.observe.then_some("present")
     };
-    let previous_state = existing.as_ref().map(|row| row.state.clone());
-    let id = if let Some(existing) = &existing {
-        if let Some(state) = desired {
-            transaction.execute(
-                "UPDATE resources SET last_seen=?1,remote_state=?2,
-                        not_observed_since=NULL WHERE id=?3",
-                params![at, state, existing.id],
-            )?;
+    let id = match &existing {
+        Some(e) => {
+            if let Some(state) = desired {
+                x.c.execute(
+                    "UPDATE resources SET last_seen=?1,remote_state=?2,not_observed_since=NULL
+                      WHERE id=?3",
+                    params![x.at, state, e.id],
+                )?;
+            }
+            e.id
         }
-        existing.id
-    } else {
-        transaction.execute(
-            "INSERT INTO resources(
-               ref,course_id,kind,remote_state,first_seen,last_seen
-             ) VALUES(?1,?2,?3,?4,?5,?5)",
+        None => x.insert_id(
+            "INSERT INTO resources(ref,course_id,kind,remote_state,first_seen,last_seen)
+             VALUES(?1,?2,?3,?4,?5,?5)",
             params![
                 resource.reference,
                 course_id,
                 resource.kind,
                 desired.unwrap_or("present"),
-                at
+                x.at
             ],
-        )?;
-        transaction.last_insert_rowid()
+        )?,
     };
     let digest = digest_json(&resource.source)?;
-    let previous = existing.as_ref().and_then(|row| row.digest.as_deref());
-    if (resource.observe || previous.is_none()) && previous != Some(&digest) {
-        transaction.execute(
+    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+    if (resource.observe || previous.is_none()) && previous != Some(digest.as_str()) {
+        x.c.execute(
             "INSERT INTO resource_observations(
                resource_id,sync_run_id,observed_at,digest,complete,title,url,
                week,section,text,source_json
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 id,
-                run_id,
-                at,
+                x.id,
+                x.at,
                 digest,
-                resource.complete as i64,
+                resource.complete,
                 resource.title,
                 resource.url,
                 resource.week,
@@ -688,226 +684,110 @@ fn upsert_resource(
                 resource.source.to_string()
             ],
         )?;
-        change(
-            transaction,
-            (run_id, at),
-            if previous.is_some() {
-                "source_changed"
-            } else {
-                "resource_appeared"
-            },
+        let kind = match previous {
+            Some(_) => "source_changed",
+            None => "resource_appeared",
+        };
+        let details = json!({"kind": resource.kind});
+        x.change(
+            kind,
             &resource.reference,
             previous,
             Some(&digest),
-            Some(json!({"kind": resource.kind})),
+            Some(details),
         )?;
     }
-    if let (Some(before), Some(after)) = (previous_state.as_deref(), desired) {
-        if before != after {
-            let kind = match (before, after) {
+    if let (Some(e), Some(after)) = (&existing, desired) {
+        if e.state != after {
+            let kind = match (e.state.as_str(), after) {
                 (_, "access_lost") => "access_lost",
                 ("access_lost", "present") => "access_restored",
                 _ => "resource_restored",
             };
-            change(
-                transaction,
-                (run_id, at),
-                kind,
-                &resource.reference,
-                None,
-                None,
-                None,
-            )?;
+            x.change(kind, &resource.reference, None, None, None)?;
         }
     }
     Ok(id)
 }
+
 fn upsert_representation(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
+    x: &Run,
     resource_id: i64,
     url: &Url,
     filename: &str,
 ) -> Result<i64, AppError> {
     let digest = object_store::digest(format!("{}\n{filename}", url.as_str()).as_bytes());
-    let existing = transaction
-        .query_row(
-            "SELECT p.id,p.remote_state,
-                (SELECT digest FROM representation_observations
-                  WHERE representation_id=p.id ORDER BY id DESC LIMIT 1)
-           FROM representations p WHERE p.resource_id=?1 AND p.url=?2",
-            params![resource_id, url.as_str()],
-            |row| {
-                Ok(Existing {
-                    id: row.get(0)?,
-                    state: row.get(1)?,
-                    digest: row.get(2)?,
-                })
-            },
-        )
-        .optional()?;
-    let (id, restored) = if let Some(existing) = &existing {
-        transaction.execute(
-            "UPDATE representations SET remote_state='present',last_seen=?1,
-                    not_observed_since=NULL WHERE id=?2",
-            params![at, existing.id],
-        )?;
-        (existing.id, existing.state != "present")
-    } else {
-        transaction.execute(
-            "INSERT INTO representations(resource_id,url,kind,first_seen,last_seen)
-             VALUES(?1,?2,?3,?4,?4)",
-            params![resource_id, url.as_str(), representation_kind(url), at],
-        )?;
-        (transaction.last_insert_rowid(), false)
+    let existing = x.existing(
+        (
+            "representations",
+            "representation_observations",
+            "representation_id",
+        ),
+        "t.resource_id=?1 AND t.url=?2",
+        params![resource_id, url.as_str()],
+    )?;
+    let (id, restored) = match &existing {
+        Some(e) => {
+            x.c.execute(
+                "UPDATE representations SET remote_state='present',last_seen=?1,
+                        not_observed_since=NULL WHERE id=?2",
+                params![x.at, e.id],
+            )?;
+            (e.id, e.state != "present")
+        }
+        None => {
+            let id = x.insert_id(
+                "INSERT INTO representations(resource_id,url,kind,first_seen,last_seen)
+                 VALUES(?1,?2,?3,?4,?4)",
+                params![resource_id, url.as_str(), representation_kind(url), x.at],
+            )?;
+            (id, false)
+        }
     };
-    let previous = existing.as_ref().and_then(|row| row.digest.as_deref());
-    if previous != Some(&digest) {
-        transaction.execute(
+    let subject = format!("representation:{id}");
+    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+    if previous != Some(digest.as_str()) {
+        x.c.execute(
             "INSERT INTO representation_observations(
                representation_id,sync_run_id,observed_at,digest,filename
              ) VALUES(?1,?2,?3,?4,?5)",
-            params![id, run_id, at, digest, filename],
+            params![id, x.id, x.at, digest, filename],
         )?;
-        change(
-            transaction,
-            (run_id, at),
-            if previous.is_some() {
-                "representation_source_changed"
-            } else {
-                "representation_appeared"
-            },
-            &format!("representation:{id}"),
-            previous,
-            Some(&digest),
-            None,
-        )?;
+        let kind = match previous {
+            Some(_) => "representation_source_changed",
+            None => "representation_appeared",
+        };
+        x.change(kind, &subject, previous, Some(&digest), None)?;
     }
     if restored {
-        change(
-            transaction,
-            (run_id, at),
-            "representation_restored",
-            &format!("representation:{id}"),
-            None,
-            None,
-            None,
-        )?;
+        x.change("representation_restored", &subject, None, None, None)?;
     }
-    refresh_subject(transaction, &format!("representation:{id}"))?;
+    refresh_subject(x.c, &subject)?;
     Ok(id)
 }
-/// Rows selected as (`id`, `key`) that `seen` does not claim are marked
-/// missing, with one recorded change each.
-struct Missing<'a> {
-    select: &'a str,
-    update: &'a str,
-    kind: &'a str,
-    details: Option<Value>,
-}
-fn mark_missing(
-    transaction: &Transaction<'_>,
-    (run_id, at): (i64, i64),
-    missing: Missing<'_>,
-    select_params: impl rusqlite::Params,
-    seen: impl Fn(i64, &str) -> bool,
-    subject: impl Fn(i64, &str) -> String,
-) -> Result<(), AppError> {
-    let rows = {
-        let mut statement = transaction.prepare(missing.select)?;
-        statement
-            .query_map(select_params, |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, key) in rows {
-        if !seen(id, &key) {
-            transaction.execute(missing.update, params![at, id])?;
-            change(
-                transaction,
-                (run_id, at),
-                missing.kind,
-                &subject(id, &key),
-                None,
-                None,
-                missing.details.clone(),
-            )?;
-        }
-    }
-    Ok(())
-}
-fn mark_missing_courses(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
-    seen: &HashSet<i64>,
-) -> Result<(), AppError> {
-    mark_missing(
-        transaction,
-        (run_id, at),
-        Missing {
-            select: "SELECT id,ref FROM courses WHERE remote_state='listed'",
-            update: "UPDATE courses SET remote_state='not_listed',not_listed_since=?1 WHERE id=?2",
-            kind: "course_not_listed",
-            details: None,
-        },
-        [],
-        |id, _| seen.contains(&id),
-        |_, reference| reference.to_owned(),
-    )
-}
-fn mark_missing_resources(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
-    course_ref: &str,
-    seen: Option<&HashSet<String>>,
-) -> Result<(), AppError> {
-    mark_missing(
-        transaction,
-        (run_id, at),
-        Missing {
-            select: "SELECT r.id,r.ref FROM resources r JOIN courses c ON c.id=r.course_id
-              WHERE c.ref=?1 AND r.remote_state='present' AND r.kind!='notice'",
-            update: "UPDATE resources SET remote_state='not_observed',
-                        not_observed_since=?1 WHERE id=?2",
-            kind: "resource_not_observed",
-            details: Some(json!({"collection": "course_manifest"})),
-        },
-        [course_ref],
-        |_, reference| seen.is_some_and(|values| values.contains(reference)),
-        |_, reference| reference.to_owned(),
-    )
-}
+
 fn mark_missing_representations(
-    transaction: &Transaction<'_>,
-    run_id: i64,
-    at: i64,
+    x: &Run,
     resource_id: i64,
     seen: &HashSet<String>,
 ) -> Result<(), AppError> {
-    mark_missing(
-        transaction,
-        (run_id, at),
-        Missing {
-            select: "SELECT id,url FROM representations
-              WHERE resource_id=?1 AND remote_state='present'",
-            update: "UPDATE representations SET remote_state='not_observed',
-                        not_observed_since=?1 WHERE id=?2",
-            kind: "representation_not_observed",
-            details: Some(json!({"collection": "resource_detail"})),
-        },
+    x.mark_missing(
+        "SELECT id,url,'representation:'||id FROM representations
+          WHERE resource_id=?1 AND remote_state='present'",
         [resource_id],
-        |_, url| seen.contains(url),
-        |id, _| format!("representation:{id}"),
+        (
+            "UPDATE representations SET remote_state='not_observed',not_observed_since=?1
+              WHERE id=?2",
+            "representation_not_observed",
+            Some(json!({"collection": "resource_detail"})),
+        ),
+        |url| seen.contains(url),
     )?;
     // Drop search entries for notice links that are not_observed. This covers
     // links just marked missing above (mark_missing does not call
     // refresh_subject) and any stale entries left by earlier versions. Keep
     // all history and file entries.
-    transaction.execute(
+    x.c.execute(
         "DELETE FROM search_documents WHERE subject_ref IN (
             SELECT 'representation:'||p.id FROM representations p
               JOIN resources r ON r.id=p.resource_id
@@ -917,54 +797,42 @@ fn mark_missing_representations(
     )?;
     Ok(())
 }
-fn latest_bound_content(
-    connection: &rusqlite::Connection,
-    representation_id: i64,
-) -> Result<Option<BoundContent>, AppError> {
-    connection
-        .query_row(
-            "SELECT sha256,etag,last_modified,byte_length
-           FROM content_observations
+
+fn latest_bound_content(c: &Connection, representation_id: i64) -> Result<Option<Bound>, AppError> {
+    row(
+        c,
+        "SELECT sha256,etag,last_modified,byte_length FROM content_observations
           WHERE representation_id=?1 ORDER BY id DESC LIMIT 1",
-            [representation_id],
-            |row| {
-                Ok(BoundContent {
-                    sha256: row.get(0)?,
-                    etag: row.get(1)?,
-                    last_modified: row.get(2)?,
-                    length: row.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(AppError::from)
+        [representation_id],
+        |r| r.try_into(),
+    )
 }
-fn validators_match(bound: &BoundContent, metadata: &RemoteMetadata) -> bool {
-    match (bound.etag.as_deref(), metadata.etag.as_deref()) {
+
+fn validators_match((_, etag, last_modified, length): &Bound, metadata: &RemoteMetadata) -> bool {
+    match (etag.as_deref(), metadata.etag.as_deref()) {
         (Some(before), Some(after)) => before == after,
         _ => {
-            bound.last_modified.as_deref() == metadata.last_modified.as_deref()
-                && bound.last_modified.is_some()
-                && metadata.content_length.map(|value| value as i64) == Some(bound.length)
+            last_modified.is_some()
+                && last_modified.as_deref() == metadata.last_modified.as_deref()
+                && metadata.content_length.map(|value| value as i64) == Some(*length)
         }
     }
 }
-fn stable_resource_reference(course: &Course, activity: &Activity) -> Result<String, AppError> {
-    let identity = if let Some(id) = activity.id.as_deref() {
-        json!({"course_ref": course.reference, "module": id})
-    } else if let Some(url) = activity.url.as_deref() {
-        json!({"course_ref": course.reference, "url": url})
-    } else {
-        return Err(AppError::shape("activity has no stable identity"));
+
+/// Moodle activities keep their own reference; anything else is identified by
+/// a digest of its course and module id (or URL), stable across renames and moves.
+fn resource_reference(course: &Course, activity: &Activity) -> Result<String, AppError> {
+    if let Some(reference) = activity.reference.as_deref() {
+        return Ok(reference.to_owned());
+    }
+    let identity = match (activity.id.as_deref(), activity.url.as_deref()) {
+        (Some(id), _) => json!({"course_ref": course.reference, "module": id}),
+        (None, Some(url)) => json!({"course_ref": course.reference, "url": url}),
+        _ => return Err(AppError::shape("activity has no stable identity")),
     };
     Ok(format!("resource:{}", &digest_json(&identity)?[..24]))
 }
-fn library_resource_reference(course: &Course, activity: &Activity) -> Result<String, AppError> {
-    match activity.reference.as_deref() {
-        Some(reference) => Ok(reference.to_owned()),
-        None => stable_resource_reference(course, activity),
-    }
-}
+
 fn representation_kind(url: &Url) -> &'static str {
     let path = url.path();
     if path.contains("pluginfile.php")
@@ -975,42 +843,20 @@ fn representation_kind(url: &Url) -> &'static str {
         "link"
     }
 }
+
 fn activity_container(value: &str) -> bool {
     Url::parse(value)
         .is_ok_and(|url| url.path().starts_with("/mod/") && url.path().ends_with("/view.php"))
 }
+
 fn query(url: &Url, key: &str) -> Option<String> {
     url.query_pairs()
         .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
 }
+
 fn digest_json(value: &impl Serialize) -> Result<String, AppError> {
     let bytes = serde_json::to_vec(value).map_err(|error| AppError::internal(error.to_string()))?;
     Ok(object_store::digest(&bytes))
-}
-fn change(
-    transaction: &Transaction<'_>,
-    run_and_time: (i64, i64),
-    kind: &str,
-    subject: &str,
-    before: Option<&str>,
-    after: Option<&str>,
-    details: Option<Value>,
-) -> Result<(), AppError> {
-    transaction.execute(
-        "INSERT INTO remote_changes(
-           sync_run_id,occurred_at,kind,subject_ref,before_ref,after_ref,details_json
-         ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![
-            run_and_time.0,
-            run_and_time.1,
-            kind,
-            subject,
-            before,
-            after,
-            details.map_or_else(|| "{}".to_owned(), |value| value.to_string())
-        ],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1037,8 +883,8 @@ mod tests {
             url: Some("https://klms.example/local/item?id=9".into()),
             external: false,
         };
-        let before = stable_resource_reference(&course, &activity("Old", "Week 1")).unwrap();
-        let after = stable_resource_reference(&course, &activity("New", "Week 2")).unwrap();
+        let before = resource_reference(&course, &activity("Old", "Week 1")).unwrap();
+        let after = resource_reference(&course, &activity("New", "Week 2")).unwrap();
         assert_eq!(before, after);
     }
 }
