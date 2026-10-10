@@ -225,40 +225,17 @@ impl http::Policy for SsoPolicy<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write, net::TcpListener, thread};
-
     use super::*;
+    use crate::fixture_server::{Response, Server};
 
     #[test]
     fn bounds_sso_response_without_content_length_before_eof() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = [0; 4096];
-            let mut received = 0;
-            while !request[..received]
-                .windows(4)
-                .any(|bytes| bytes == b"\r\n\r\n")
-            {
-                let read = stream.read(&mut request[received..]).unwrap();
-                assert!(read > 0, "fixture request headers were incomplete");
-                received += read;
-            }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
-                .unwrap();
-            // Keep the connection open after the cap. An unbounded reader would
-            // wait for EOF and fail with a timeout instead of the size limit.
-            let _ = stream.write_all(&vec![b'x'; MAX_BODY + 1]);
-            let _ = stream.read(&mut request);
-        });
+        // The body is never terminated: an unbounded reader would wait for EOF
+        // and fail with a timeout instead of the size limit.
+        let server = Server::new(|_| Response::open_ended(vec![b'x'; MAX_BODY + 1]));
+        let url = Url::parse(&server.url()).unwrap();
         let mut transport = SsoTransport::new(url.clone(), url.clone(), 2).unwrap();
         let error = transport.get(url.as_str()).unwrap_err();
         assert_eq!(error.code, "LIMIT_EXCEEDED");
-        server.join().unwrap();
     }
 }
