@@ -44,11 +44,7 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
     })
 }
 
-pub fn course_detail(
-    html: &str,
-    base_url: &Url,
-    mut course: Course,
-) -> Result<CourseDetail, AppError> {
+pub fn course_detail(html: &str, base_url: &Url, mut course: Course) -> CourseDetail {
     let document = Html::parse_document(html);
     if let Some(title) = first_text(
         &document,
@@ -62,11 +58,11 @@ pub fn course_detail(
             .or(course.term);
         course.title = title.split('(').next().unwrap_or(&title).trim().to_owned();
     }
-    Ok(CourseDetail {
+    CourseDetail {
         course,
         professors: professors(&document),
         activity_count: activities_from_document(&document, base_url).len(),
-    })
+    }
 }
 
 pub fn activities(
@@ -92,15 +88,15 @@ pub fn activities(
 /// The `kaistweeks` format renders only the current weeks on the default course
 /// page. Its week picker links are `javascript:M.course.format.dayselect(n, course, …)`,
 /// where `n = 0` is "All", served at `course/view.php?id=<course>&section=0`.
-pub fn has_all_weeks_view(html: &str, course_id: &str) -> Result<bool, AppError> {
+pub fn has_all_weeks_view(html: &str, course_id: &str) -> bool {
     let wanted = format!("format.dayselect(0,{course_id},");
-    Ok(Html::parse_document(html)
+    Html::parse_document(html)
         .select(&sel("a[href*='dayselect']"))
         .filter_map(|anchor| anchor.value().attr("href"))
         .any(|href| {
             let compact: String = href.chars().filter(|c| !c.is_whitespace()).collect();
             compact.contains(&wanted)
-        }))
+        })
 }
 
 pub fn is_video_activity(activity: &Activity) -> bool {
@@ -407,7 +403,7 @@ mod tests {
             term: None,
             url: format!("{BASE}/course/view.php?id=42"),
         };
-        let detail = course_detail(html, &base(), course).unwrap();
+        let detail = course_detail(html, &base(), course);
         assert_eq!(detail.course.title, "Programming Language");
         assert_eq!(detail.course.code.as_deref(), Some("CS.30200_2026_3"));
         assert_eq!(detail.professors, ["Ryu Seokyoung"]);
@@ -430,7 +426,7 @@ mod tests {
             (single_week, "42", false),
             ("<main class='course-content'></main>", "42", false),
         ] {
-            assert_eq!(has_all_weeks_view(html, course).unwrap(), expected);
+            assert_eq!(has_all_weeks_view(html, course), expected);
         }
     }
 

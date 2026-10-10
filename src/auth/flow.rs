@@ -548,10 +548,10 @@ fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
     const REGISTER: &str = "/auth/kaist/user/device/ajaxRegist";
     const COMPLETE: &str = "/auth/kaist/user/device/login";
     let (_, html) = transport.get("/auth/kaist/user/device/view")?;
-    let shape = crate::parse::auth_policy_shape(&html)?;
+    let actions = crate::parse::auth_policy_shape(&html);
     if ![REGISTER, COMPLETE]
         .iter()
-        .all(|wanted| shape.actions.iter().any(|action| action == wanted))
+        .all(|wanted| actions.iter().any(|action| action == wanted))
     {
         return Err(AppError::auth_protocol(
             "KAIST device-registration page omitted its expected actions",

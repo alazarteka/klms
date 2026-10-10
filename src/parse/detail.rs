@@ -114,8 +114,8 @@ fn notice_content(
     ))
 }
 
-pub fn has_next_page(html: &str) -> Result<bool, AppError> {
-    Ok(has_any(&Html::parse_document(html), NEXT_PAGE_SELECTORS))
+pub fn has_next_page(html: &str) -> bool {
+    has_any(&Html::parse_document(html), NEXT_PAGE_SELECTORS)
 }
 
 pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppError> {
