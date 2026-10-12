@@ -1,6 +1,7 @@
 //! Panopto metadata and credential-free CDN media transport.
 mod exchange;
 mod folder;
+use super::stream::{self, Expect, Limits};
 use crate::{
     error::AppError,
     http::{self, Follow, Method, Payload},
@@ -12,18 +13,22 @@ use exchange::{Policy, request, text};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    io::{Read, Write},
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
-/// The Panopto and media CDN origins the exchange and media policies trust.
-/// Production values are fixed; tests point them at loopback fixtures.
+/// The Panopto and media CDN origins the exchange and media policies trust,
+/// and the ffmpeg used for remuxing. Production values are fixed; tests point
+/// them at loopback fixtures.
 #[derive(Clone, Debug)]
-pub struct Origins {
+pub struct Config {
     panopto: Url,
     cdn: Url,
+    ffmpeg: std::ffi::OsString,
 }
-impl Origins {
+impl Config {
     pub fn production() -> Result<Self, AppError> {
         Self::new(
             "https://kaist.ap.panopto.com/",
@@ -32,7 +37,14 @@ impl Origins {
     }
     #[cfg(test)]
     pub fn fixture(panopto: &str, cdn: &str) -> Self {
-        Self::new(panopto, cdn).expect("fixture origins")
+        Self::new(panopto, cdn).expect("fixture config")
+    }
+    #[cfg(test)]
+    pub fn with_ffmpeg(self, ffmpeg: impl Into<std::ffi::OsString>) -> Self {
+        Self {
+            ffmpeg: ffmpeg.into(),
+            ..self
+        }
     }
     fn new(panopto: &str, cdn: &str) -> Result<Self, AppError> {
         let parse =
@@ -40,6 +52,7 @@ impl Origins {
         Ok(Self {
             panopto: parse(panopto)?,
             cdn: parse(cdn)?,
+            ffmpeg: "ffmpeg".into(),
         })
     }
     fn is_panopto(&self, u: &Url) -> bool {
@@ -79,10 +92,6 @@ pub struct Delivery {
     pub stream_count: usize,
     pub composition: &'static str,
     pub output_stream_count: usize,
-    #[serde(skip)]
-    mp4: Vec<Url>,
-    #[serde(skip)]
-    hls: Vec<Url>,
     #[serde(skip)]
     groups: Vec<SourceGroup>,
 }
@@ -141,7 +150,7 @@ impl Session {
         };
         let endpoint = self
             .policy
-            .origins
+            .config
             .endpoint("/Panopto/Pages/Viewer/DeliveryInfo.aspx")?;
         let r = request(
             &self.agent,
@@ -152,7 +161,7 @@ impl Session {
         )?;
         let value: Value = serde_json::from_str(&text(r)?)
             .map_err(|_| AppError::shape("Panopto delivery metadata was not JSON"))?;
-        parse_delivery(&id, &value, &self.policy.origins)
+        parse_delivery(&id, &value, &self.policy.config)
     }
     pub fn recordings(&mut self) -> Result<Recordings, AppError> {
         if let Some(id) = self.recording_id.clone() {
@@ -180,7 +189,7 @@ impl Session {
                 .map_err(|_| AppError::internal("could not encode folder query"))?;
             let endpoint = self
                 .policy
-                .origins
+                .config
                 .endpoint("/Panopto/Services/Data.svc/GetSessions")?;
             let r = request(
                 &self.agent,
@@ -196,61 +205,64 @@ impl Session {
                 .map_err(|_| AppError::shape("Panopto folder response was not JSON"))
         })
     }
+    /// Copies a single unshifted MP4 directly; anything else (HLS, several
+    /// tracks, start offsets) is fetched into `scratch`, a private directory
+    /// the caller owns, and remuxed there by ffmpeg.
     pub fn download_to(
         &self,
         d: &Delivery,
         writer: &mut impl Write,
-        max_bytes: usize,
-        max_seconds: u64,
+        limits: Limits,
+        scratch: &Path,
     ) -> Result<Download, AppError> {
-        if d.mp4.len() == 1 && d.groups.len() == 1 && d.groups[0].offset == 0.0 {
-            return media_to(
-                &self.policy.origins,
-                &d.mp4[0],
-                writer,
-                max_bytes,
-                max_seconds,
-            );
+        let config = &self.policy.config;
+        let mut fetch = |u: &Url, w: &mut dyn Write, limits: Limits, range: Option<ByteRange>| {
+            media_copy(config, u, w, limits, Expect::Media, range)
+        };
+        if let [
+            SourceGroup {
+                mp4: Some(source),
+                offset,
+                ..
+            },
+        ] = d.groups.as_slice()
+        {
+            if *offset == 0.0 {
+                return media_copy(config, source, writer, limits, Expect::Mp4, None);
+            }
         }
-        if d.groups.is_empty() || d.groups.iter().any(|g| g.mp4.is_none() && g.hls.is_none()) {
+        // Each track's source, preferring MP4 (true) over HLS (false).
+        let Some(sources) = d
+            .groups
+            .iter()
+            .map(|g| {
+                g.mp4
+                    .as_ref()
+                    .map(|u| (true, u))
+                    .or(g.hls.as_ref().map(|u| (false, u)))
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|s| !s.is_empty())
+        else {
             return Err(AppError::content_unavailable(
                 "Panopto lacks a readable source for every recording stream; access may be restricted or expired",
             ));
-        }
-        if d.groups.iter().all(|g| g.mp4.is_none()) && d.groups.iter().all(|g| g.offset == 0.0) {
-            return hls_to(&self.policy.origins, &d.hls, writer, max_bytes, max_seconds);
-        }
-        let scratch = Scratch::new()?;
-        let deadline = Instant::now() + Duration::from_secs(max_seconds);
-        let mut budget = max_bytes;
+        };
+        require_ffmpeg(&config.ffmpeg)?;
+        let mut budget = limits.max_bytes;
         let mut index = 0;
         let mut inputs = Vec::new();
-        for (i, g) in d.groups.iter().enumerate() {
-            let p = if let Some(u) = &g.mp4 {
-                let p = scratch.0.join(format!("stream-{i}.mp4"));
-                fetch_local(&self.policy.origins, u, &p, &mut budget, deadline)?;
+        for (i, (mp4, u)) in sources.into_iter().enumerate() {
+            inputs.push(if mp4 {
+                let p = scratch.join(format!("stream-{i}.mp4"));
+                fetch_local(u, &p, &mut budget, limits, &mut fetch, None)?;
                 p
             } else {
-                local_playlist(
-                    &self.policy.origins,
-                    g.hls.as_ref().unwrap(),
-                    &scratch,
-                    &mut index,
-                    &mut budget,
-                    deadline,
-                    0,
-                )?
-            };
-            inputs.push(p);
+                local_playlist(u, scratch, &mut index, &mut budget, limits, 0, &mut fetch)?
+            });
         }
-        remux_with_offsets(
-            &inputs,
-            &d.groups.iter().map(|g| g.offset).collect::<Vec<_>>(),
-            &scratch,
-            writer,
-            max_bytes,
-            deadline,
-        )
+        let offsets = d.groups.iter().map(|g| g.offset).collect::<Vec<_>>();
+        remux(&config.ffmpeg, &inputs, &offsets, scratch, writer, limits)
     }
 }
 fn recording(id: &str, v: &Value) -> Recording {
@@ -265,7 +277,7 @@ fn recording(id: &str, v: &Value) -> Recording {
         duration_seconds: v.get("Duration").and_then(Value::as_f64),
     }
 }
-fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, AppError> {
+fn parse_delivery(id: &str, v: &Value, config: &Config) -> Result<Delivery, AppError> {
     let d = v.get("Delivery").unwrap_or(v);
     let streams = d.get("Streams").and_then(Value::as_array).ok_or_else(|| {
         AppError::content_unavailable(
@@ -277,7 +289,7 @@ fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, Ap
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|s| source_group(s, origins))
+        .map(|s| source_group(s, config))
         .collect::<Vec<_>>();
     podcast_groups.sort_by_key(|g| g.mp4.is_none());
     let composed_available = podcast_groups
@@ -289,16 +301,10 @@ fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, Ap
     {
         vec![composed]
     } else {
-        streams.iter().map(|s| source_group(s, origins)).collect()
+        streams.iter().map(|s| source_group(s, config)).collect()
     };
-    let mp4 = groups
-        .iter()
-        .filter_map(|g| g.mp4.clone())
-        .collect::<Vec<_>>();
-    let hls = groups
-        .iter()
-        .filter_map(|g| g.hls.clone())
-        .collect::<Vec<_>>();
+    let mp4 = groups.iter().filter(|g| g.mp4.is_some()).count();
+    let hls = groups.iter().filter(|g| g.hls.is_some()).count();
     let complete = !groups.is_empty() && groups.iter().all(|g| g.mp4.is_some() || g.hls.is_some());
     let official = v
         .get("DownloadUrl")
@@ -307,8 +313,8 @@ fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, Ap
     Ok(Delivery {
         recording: recording(id, d),
         official_download_available: official,
-        mp4_available: complete && mp4.len() == groups.len(),
-        hls_available: complete && !hls.is_empty(),
+        mp4_available: complete && mp4 == groups.len(),
+        hls_available: complete && hls > 0,
         stream_count: streams.len(),
         composition: if composed_available {
             "composed_podcast"
@@ -318,12 +324,10 @@ fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, Ap
             "single_stream"
         },
         output_stream_count: groups.len(),
-        mp4,
-        hls,
         groups,
     })
 }
-fn source_group(s: &Value, origins: &Origins) -> SourceGroup {
+fn source_group(s: &Value, config: &Config) -> SourceGroup {
     let mut group = SourceGroup {
         mp4: None,
         hls: None,
@@ -346,7 +350,7 @@ fn source_group(s: &Value, origins: &Origins) -> SourceGroup {
             .get(key)
             .and_then(Value::as_str)
             .and_then(|v| Url::parse(v).ok())
-            .filter(|u| origins.is_cdn(u))
+            .filter(|u| config.is_cdn(u))
         {
             let path = u.path().to_ascii_lowercase();
             if path.ends_with(".mp4") {
@@ -359,7 +363,7 @@ fn source_group(s: &Value, origins: &Origins) -> SourceGroup {
     group
 }
 struct MediaPolicy<'a> {
-    origins: &'a Origins,
+    config: &'a Config,
     range: Option<String>,
 }
 impl http::Policy for MediaPolicy<'_> {
@@ -370,7 +374,7 @@ impl http::Policy for MediaPolicy<'_> {
             .unwrap_or_default()
     }
     fn allow(&mut self, u: &Url) -> Result<(), AppError> {
-        if self.origins.is_cdn(u) {
+        if self.config.is_cdn(u) {
             Ok(())
         } else {
             Err(AppError::content_unavailable(
@@ -379,36 +383,19 @@ impl http::Policy for MediaPolicy<'_> {
         }
     }
 }
-fn media_to(
-    origins: &Origins,
-    source: &Url,
-    writer: &mut impl Write,
-    max: usize,
-    seconds: u64,
-) -> Result<Download, AppError> {
-    media_copy(origins, source, writer, max, seconds, true)
-}
 type ByteRange = (u64, u64);
+/// One credential-free CDN request, optionally for an exact byte range,
+/// streamed through the shared bounded copy.
 fn media_copy(
-    origins: &Origins,
+    config: &Config,
     source: &Url,
     writer: &mut (impl Write + ?Sized),
-    max: usize,
-    seconds: u64,
-    verify_mp4: bool,
-) -> Result<Download, AppError> {
-    media_copy_range(origins, source, writer, max, seconds, verify_mp4, None)
-}
-fn media_copy_range(
-    origins: &Origins,
-    source: &Url,
-    writer: &mut (impl Write + ?Sized),
-    max: usize,
-    seconds: u64,
-    verify_mp4: bool,
+    limits: Limits,
+    expect: Expect,
     range: Option<ByteRange>,
 ) -> Result<Download, AppError> {
-    if !origins.is_cdn(source) {
+    let max = limits.max_bytes;
+    if !config.is_cdn(source) {
         return Err(AppError::content_unavailable(
             "Panopto media origin refused",
         ));
@@ -424,8 +411,8 @@ fn media_copy_range(
             Ok(format!("bytes={start}-{end}"))
         })
         .transpose()?;
-    let agent = http::agent(Duration::from_secs(seconds), Some(Duration::from_secs(8)));
-    let mut r = http::follow(
+    let agent = http::agent(limits.remaining()?, Some(Duration::from_secs(8)));
+    let r = http::follow(
         &agent,
         Follow {
             method: Method::GET,
@@ -435,7 +422,7 @@ fn media_copy_range(
             strict: false,
         },
         &mut MediaPolicy {
-            origins,
+            config,
             range: range_header,
         },
     )
@@ -467,61 +454,13 @@ fn media_copy_range(
             ));
         }
     }
-    let expected = r.content_length();
-    if expected.is_some_and(|n| n > max as u64) {
-        return Err(AppError::limit("video exceeds byte limit"));
-    }
-    let mut bytes = 0;
-    if verify_mp4 {
-        let mut prefix = Vec::new();
-        r.by_ref()
-            .take(12)
-            .read_to_end(&mut prefix)
-            .map_err(|_| AppError::network("Panopto MP4 header interrupted"))?;
-        if prefix.len() < 12 || &prefix[4..8] != b"ftyp" {
-            return Err(AppError::content_unavailable(
-                "Panopto source returned non-MP4 content",
-            ));
+    let bytes = stream::copy(r, writer, limits, expect, &|| match expect {
+        Expect::Mp4 => AppError::content_unavailable("Panopto source returned non-MP4 content"),
+        Expect::Media => {
+            AppError::content_unavailable("Panopto media returned HTML instead of video")
         }
-        if prefix.len() > max {
-            return Err(AppError::limit("video exceeds byte limit"));
-        }
-        writer
-            .write_all(&prefix)
-            .map_err(|_| AppError::config("failed to write video"))?;
-        bytes = prefix.len();
-    }
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = r
-            .read(&mut buf)
-            .map_err(|_| AppError::network("Panopto media download interrupted"))?;
-        if n == 0 {
-            break;
-        }
-        if bytes == 0 {
-            let p = String::from_utf8_lossy(&buf[..n.min(512)]).to_ascii_lowercase();
-            if p.contains("<html")
-                || p.contains("<!doctype")
-                || r.header("content-type").is_some_and(|t| t.contains("html"))
-            {
-                return Err(AppError::content_unavailable(
-                    "Panopto media returned HTML instead of video",
-                ));
-            }
-        }
-        bytes += n;
-        if bytes > max {
-            return Err(AppError::limit("video exceeds byte limit"));
-        }
-        writer
-            .write_all(&buf[..n])
-            .map_err(|_| AppError::config("failed to write video"))?
-    }
-    if bytes == 0
-        || expected.is_some_and(|n| n != bytes as u64)
-        || range.is_some_and(|(_, len)| len != bytes as u64)
-    {
+    })?;
+    if range.is_some_and(|(_, len)| len != bytes as u64) {
         return Err(AppError::network("Panopto media download incomplete"));
     }
     Ok(Download {
@@ -529,50 +468,47 @@ fn media_copy_range(
         content_type: "video/mp4",
     })
 }
-struct Scratch(std::path::PathBuf);
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+fn ffmpeg_error(e: &std::io::Error) -> AppError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        AppError::config("ffmpeg is required for HLS or multiple streams; install ffmpeg and retry")
+    } else {
+        AppError::config("could not start local ffmpeg")
     }
 }
-impl Scratch {
-    fn new() -> Result<Self, AppError> {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| AppError::config("system clock precedes epoch"))?
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("klms-video-{}-{stamp}", std::process::id()));
-        let mut b = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            b.mode(0o700);
-        }
-        b.create(&p)
-            .map_err(|_| AppError::config("could not create private video workspace"))?;
-        Ok(Self(p))
-    }
+/// Fails before any media is fetched when the remux step could not run.
+fn require_ffmpeg(ffmpeg: &std::ffi::OsStr) -> Result<(), AppError> {
+    Command::new(ffmpeg)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| ffmpeg_error(&e))
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| AppError::config("ffmpeg -version failed; check the ffmpeg install"))
+        })
 }
-fn remaining(deadline: Instant) -> Result<u64, AppError> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .map(|d| d.as_secs().max(1))
-        .ok_or_else(|| AppError::limit("video time limit exceeded"))
-}
+/// Fetches one remote resource (or byte range) into a new private file and
+/// charges it to `budget`.
 fn fetch_local(
-    origins: &Origins,
     url: &Url,
-    path: &std::path::Path,
+    path: &Path,
     budget: &mut usize,
-    deadline: Instant,
-) -> Result<usize, AppError> {
+    limits: Limits,
+    fetch: &mut Fetch<'_>,
+    range: Option<ByteRange>,
+) -> Result<(), AppError> {
     let mut f = crate::private_fs::private_file_options()
         .create_new(true)
         .open(path)
         .map_err(|_| AppError::config("could not create local media fragment"))?;
-    let d = media_copy(origins, url, &mut f, *budget, remaining(deadline)?, false)?;
-    *budget -= d.bytes;
-    Ok(d.bytes)
+    let d = fetch(url, &mut f, limits.with_max(*budget), range)?;
+    *budget = budget
+        .checked_sub(d.bytes)
+        .ok_or_else(|| AppError::limit("video bytes exceeded budget"))?;
+    Ok(())
 }
 fn quoted_attr<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     line.split_once(&format!("{key}=\""))?
@@ -580,7 +516,7 @@ fn quoted_attr<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         .split_once('"')
         .map(|(v, _)| v)
 }
-fn write_private(path: &std::path::Path, text: &str) -> Result<(), AppError> {
+fn write_private(path: &Path, text: &str) -> Result<(), AppError> {
     let mut f = crate::private_fs::private_file_options()
         .create_new(true)
         .open(path)
@@ -605,62 +541,23 @@ fn parse_byte_range(raw: &str) -> Result<(u64, Option<u64>), AppError> {
         .transpose()?;
     Ok((len, start))
 }
-type Fetch<'a> = dyn FnMut(&Url, &mut dyn Write, usize, u64, Option<ByteRange>) -> Result<Download, AppError>
-    + 'a;
+type Fetch<'a> =
+    dyn FnMut(&Url, &mut dyn Write, Limits, Option<ByteRange>) -> Result<Download, AppError> + 'a;
 fn local_playlist(
-    origins: &Origins,
     url: &Url,
-    scratch: &Scratch,
+    scratch: &Path,
     index: &mut usize,
     budget: &mut usize,
-    deadline: Instant,
-    depth: usize,
-) -> Result<std::path::PathBuf, AppError> {
-    local_playlist_with(
-        url,
-        scratch,
-        index,
-        budget,
-        deadline,
-        depth,
-        &mut |u, w, max, seconds, range| {
-            media_copy_range(origins, u, w, max, seconds, false, range)
-        },
-    )
-}
-fn fetch_local_with(
-    url: &Url,
-    path: &std::path::Path,
-    budget: &mut usize,
-    deadline: Instant,
-    fetch: &mut Fetch<'_>,
-    range: Option<ByteRange>,
-) -> Result<(), AppError> {
-    let mut f = crate::private_fs::private_file_options()
-        .create_new(true)
-        .open(path)
-        .map_err(|_| AppError::config("could not create local fragment"))?;
-    let d = fetch(url, &mut f, *budget, remaining(deadline)?, range)?;
-    *budget = budget
-        .checked_sub(d.bytes)
-        .ok_or_else(|| AppError::limit("video bytes exceeded budget"))?;
-    Ok(())
-}
-fn local_playlist_with(
-    url: &Url,
-    scratch: &Scratch,
-    index: &mut usize,
-    budget: &mut usize,
-    deadline: Instant,
+    limits: Limits,
     depth: usize,
     fetch: &mut Fetch<'_>,
-) -> Result<std::path::PathBuf, AppError> {
+) -> Result<PathBuf, AppError> {
     if depth > 3 {
         return Err(AppError::limit("HLS playlist nesting exceeds limit"));
     }
     let mut raw = Vec::new();
     let cap = (*budget).min(1024 * 1024);
-    let downloaded = fetch(url, &mut raw, cap, remaining(deadline)?, None)?;
+    let downloaded = fetch(url, &mut raw, limits.with_max(cap), None)?;
     *budget -= downloaded.bytes;
     let data = String::from_utf8(raw).map_err(|_| AppError::shape("HLS playlist is not UTF-8"))?;
     if data.len() > 1024 * 1024 || !data.starts_with("#EXTM3U") {
@@ -692,8 +589,7 @@ fn local_playlist_with(
         let child = url
             .join(variant)
             .map_err(|_| AppError::shape("invalid HLS variant URL"))?;
-        let video =
-            local_playlist_with(&child, scratch, index, budget, deadline, depth + 1, fetch)?;
+        let video = local_playlist(&child, scratch, index, budget, limits, depth + 1, fetch)?;
         let Some(group) = quoted_attr(info, "AUDIO") else {
             return Ok(video);
         };
@@ -712,16 +608,8 @@ fn local_playlist_with(
         let audio_url = url
             .join(quoted_attr(audio_line, "URI").unwrap())
             .map_err(|_| AppError::shape("invalid HLS audio URL"))?;
-        let audio = local_playlist_with(
-            &audio_url,
-            scratch,
-            index,
-            budget,
-            deadline,
-            depth + 1,
-            fetch,
-        )?;
-        let master = scratch.0.join(format!("playlist-{}.m3u8", *index));
+        let audio = local_playlist(&audio_url, scratch, index, budget, limits, depth + 1, fetch)?;
+        let master = scratch.join(format!("playlist-{}.m3u8", *index));
         *index += 1;
         let audio_name = audio.file_name().unwrap().to_string_lossy();
         let video_name = video.file_name().unwrap().to_string_lossy();
@@ -738,7 +626,7 @@ fn local_playlist_with(
             "HLS stream is live or incomplete; finite recording required",
         ));
     }
-    let out = scratch.0.join(format!("playlist-{}.m3u8", *index));
+    let out = scratch.join(format!("playlist-{}.m3u8", *index));
     *index += 1;
     let mut local = String::new();
     let mut fragments = 0;
@@ -771,7 +659,7 @@ fn local_playlist_with(
                 .map_err(|_| AppError::shape("invalid HLS initialization URL"))?;
             let name = format!("fragment-{}.mp4", *index);
             *index += 1;
-            fetch_local_with(&u, &scratch.0.join(&name), budget, deadline, fetch, range)?;
+            fetch_local(&u, &scratch.join(&name), budget, limits, fetch, range)?;
             local.push_str(&format!("#EXT-X-MAP:URI=\"{name}\"\n"));
         } else if line.starts_with('#') {
             if line.contains("URI=") {
@@ -816,7 +704,7 @@ fn local_playlist_with(
             if range.is_none() {
                 previous_range = None;
             }
-            fetch_local_with(&u, &scratch.0.join(&name), budget, deadline, fetch, range)?;
+            fetch_local(&u, &scratch.join(&name), budget, limits, fetch, range)?;
             local.push_str(&name);
             local.push('\n');
         }
@@ -828,32 +716,16 @@ fn local_playlist_with(
     Ok(out)
 }
 fn remux(
-    inputs: &[std::path::PathBuf],
-    scratch: &Scratch,
-    writer: &mut impl Write,
-    max: usize,
-    deadline: Instant,
-) -> Result<Download, AppError> {
-    remux_with_offsets(
-        inputs,
-        &vec![0.0; inputs.len()],
-        scratch,
-        writer,
-        max,
-        deadline,
-    )
-}
-fn remux_with_offsets(
-    inputs: &[std::path::PathBuf],
+    ffmpeg: &std::ffi::OsStr,
+    inputs: &[PathBuf],
     offsets: &[f64],
-    scratch: &Scratch,
+    scratch: &Path,
     writer: &mut impl Write,
-    max: usize,
-    deadline: Instant,
+    limits: Limits,
 ) -> Result<Download, AppError> {
-    use std::process::{Command, Stdio};
-    let output = scratch.0.join("remux.mp4");
-    let mut c = Command::new("ffmpeg");
+    let (max, deadline) = (limits.max_bytes, limits.deadline);
+    let output = scratch.join("remux.mp4");
+    let mut c = Command::new(ffmpeg);
     c.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     for (p, offset) in inputs.iter().zip(offsets) {
         if *offset != 0.0 {
@@ -871,15 +743,7 @@ fn remux_with_offsets(
         .arg(&output)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = c.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::config(
-                "ffmpeg is required for HLS or multiple streams; install ffmpeg and retry",
-            )
-        } else {
-            AppError::config("could not start local ffmpeg remux")
-        }
-    })?;
+    let mut child = c.spawn().map_err(|e| ffmpeg_error(&e))?;
     loop {
         if Instant::now() >= deadline
             || std::fs::metadata(&output).is_ok_and(|m| m.len() > max as u64)
@@ -909,6 +773,13 @@ fn remux_with_offsets(
             "remuxed video exceeds byte limit or is empty",
         ));
     }
+    // Free the fetched inputs before the copy so peak disk use stays near
+    // twice the media size rather than three times.
+    for input in std::fs::read_dir(scratch).into_iter().flatten().flatten() {
+        if input.path() != output {
+            let _ = std::fs::remove_file(input.path());
+        }
+    }
     let mut f = std::fs::File::open(output)
         .map_err(|_| AppError::config("could not read remuxed video"))?;
     std::io::copy(&mut f, writer).map_err(|_| AppError::config("could not write remuxed video"))?;
@@ -917,42 +788,5 @@ fn remux_with_offsets(
         content_type: "video/mp4",
     })
 }
-fn hls_to(
-    origins: &Origins,
-    sources: &[Url],
-    writer: &mut impl Write,
-    max: usize,
-    seconds: u64,
-) -> Result<Download, AppError> {
-    if std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_err()
-    {
-        return Err(AppError::config(
-            "ffmpeg is required for HLS video; install ffmpeg and retry",
-        ));
-    }
-    let scratch = Scratch::new()?;
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    let mut budget = max;
-    let mut index = 0;
-    let mut inputs = Vec::new();
-    for source in sources {
-        inputs.push(local_playlist(
-            origins,
-            source,
-            &scratch,
-            &mut index,
-            &mut budget,
-            deadline,
-            0,
-        )?);
-    }
-    remux(&inputs, &scratch, writer, max, deadline)
-}
-
 #[cfg(test)]
 mod tests;

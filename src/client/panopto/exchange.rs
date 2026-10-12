@@ -2,7 +2,7 @@
 #[cfg(test)]
 #[path = "exchange_tests.rs"]
 mod tests;
-use super::{Origins, Session};
+use super::{Config, Session};
 use crate::{
     auth::Jar,
     error::AppError,
@@ -14,7 +14,7 @@ use std::{io::Read, time::Duration};
 
 pub(crate) struct Policy {
     pub klms: Url,
-    pub origins: Origins,
+    pub config: Config,
     pub cookie: String,
     pub jar: Jar,
     pub bearer: Option<String>,
@@ -22,7 +22,7 @@ pub(crate) struct Policy {
 }
 impl http::Policy for Policy {
     fn allow(&mut self, u: &Url) -> Result<(), AppError> {
-        allow_exchange(u, &self.klms, &self.origins, self.delivery_only)
+        allow_exchange(u, &self.klms, &self.config, self.delivery_only)
     }
 
     fn headers(&mut self, _: &Method, u: &Url) -> Vec<(&'static str, String)> {
@@ -30,7 +30,7 @@ impl http::Policy for Policy {
             return vec![("cookie", self.cookie.clone())];
         }
         let mut h = Vec::new();
-        if self.origins.is_panopto(u) {
+        if self.config.is_panopto(u) {
             if let Some(c) = self.jar.header(u) {
                 if self.delivery_only {
                     if let Some(token) = c
@@ -57,7 +57,7 @@ impl http::Policy for Policy {
                 "Panopto launch refused a redirect that could repost credentials",
             ));
         }
-        if self.origins.is_panopto(r.url()) {
+        if self.config.is_panopto(r.url()) {
             self.jar.capture(r.url(), r.headers())?
         }
         Ok(())
@@ -111,13 +111,13 @@ pub fn launch(
     timeout: u64,
     html: &str,
     url: &Url,
-    origins: &Origins,
+    config: &Config,
 ) -> Result<Session, AppError> {
     let agent = http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8)));
-    let pano = origins.panopto.origin();
+    let pano = config.panopto.origin();
     let mut policy = Policy {
         klms: klms.clone(),
-        origins: origins.clone(),
+        config: config.clone(),
         cookie: cookie.to_owned(),
         jar: Jar::default(),
         bearer: None,
@@ -126,7 +126,7 @@ pub fn launch(
     let mut page = html.to_owned();
     let mut current = url.clone();
     for _ in 0..5 {
-        if origins.is_panopto(&current)
+        if config.is_panopto(&current)
             && matches!(
                 current.path(),
                 "/Panopto/Pages/Embed.aspx"
@@ -179,7 +179,7 @@ pub fn launch(
 pub(crate) fn allow_exchange(
     u: &Url,
     klms: &Url,
-    origins: &Origins,
+    config: &Config,
     delivery_only: bool,
 ) -> Result<(), AppError> {
     if u.origin() == klms.origin()
@@ -197,7 +197,7 @@ pub(crate) fn allow_exchange(
                 | "/mod/panoptocourseembed/view_content.php"
                 | "/mod/lti/launch.php"
         );
-    let pano = origins.is_panopto(u)
+    let pano = config.is_panopto(u)
         && (matches!(
             u.path(),
             "/Panopto/Pages/Embed.aspx"

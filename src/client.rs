@@ -1,4 +1,5 @@
 pub mod panopto;
+pub mod stream;
 use std::{
     borrow::Cow,
     io::{Read, Write},
@@ -21,7 +22,7 @@ pub struct KlmsClient {
     base_url: Url,
     http: Client,
     cookie: String,
-    panopto: panopto::Origins,
+    panopto: panopto::Config,
 }
 
 pub struct HtmlResponse {
@@ -83,8 +84,8 @@ fn has_userinfo(url: &Url) -> bool {
 impl KlmsClient {
     /// Points the Panopto exchange and media policies at fixture origins.
     #[cfg(test)]
-    pub fn with_panopto_origins(mut self, origins: panopto::Origins) -> Self {
-        self.panopto = origins;
+    pub fn with_panopto_config(mut self, config: panopto::Config) -> Self {
+        self.panopto = config;
         self
     }
     pub fn panopto_launch(
@@ -117,7 +118,7 @@ impl KlmsClient {
                 Some(Duration::from_secs(8)),
             ),
             cookie: cookie.to_owned(),
-            panopto: panopto::Origins::production()?,
+            panopto: panopto::Config::production()?,
         })
     }
 
@@ -270,26 +271,17 @@ impl KlmsClient {
     pub fn download_video_to(
         &self,
         path: &str,
-        max_bytes: usize,
-        max_seconds: u64,
+        limits: stream::Limits,
         writer: &mut impl Write,
     ) -> Result<DownloadResponse, AppError> {
-        if max_bytes == 0 || !(1..=7200).contains(&max_seconds) {
-            return Err(AppError::config(
-                "video limits require positive bytes and 1..7200 seconds",
-            ));
-        }
         let url = self.resolve(path)?;
         let mut policy = NativeVideoPolicy {
             origin: self.base_url.origin(),
             cookie: self.cookie.clone(),
         };
         http::Policy::allow(&mut policy, &url)?;
-        let agent = http::agent(
-            Duration::from_secs(max_seconds),
-            Some(Duration::from_secs(8)),
-        );
-        let mut response = http::follow(
+        let agent = http::agent(limits.remaining()?, Some(Duration::from_secs(8)));
+        let response = http::follow(
             &agent,
             Follow {
                 method: Method::GET,
@@ -309,51 +301,11 @@ impl KlmsClient {
         if !matches!(response.status(), 200 | 206) {
             return Err(bad_status(&response));
         }
+        check_logged_out(&response, &[])?;
         let metadata = remote_metadata(&response);
-        if metadata
-            .content_length
-            .is_some_and(|n| n > max_bytes as u64)
-        {
-            return Err(too_big(max_bytes));
-        }
-        // Validate the container before writing anything to the publisher.
-        let mut prefix = [0_u8; 12];
-        response
-            .read_exact(&mut prefix)
-            .map_err(|error| AppError::network(format!("incomplete video header: {error}")))?;
-        check_logged_out(&response, &prefix)?;
-        if metadata
-            .content_type
-            .as_deref()
-            .is_some_and(|value| value.to_ascii_lowercase().contains("html"))
-            || &prefix[4..8] != b"ftyp"
-            || u32::from_be_bytes(prefix[..4].try_into().expect("four bytes")) < 12
-        {
-            return Err(AppError::upstream("native video response is not an MP4"));
-        }
-        if prefix.len() > max_bytes {
-            return Err(too_big(max_bytes));
-        }
-        writer
-            .write_all(&prefix)
-            .map_err(|error| AppError::config(format!("failed to write video: {error}")))?;
-        let mut total = prefix.len();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|error| AppError::network(format!("failed to read video: {error}")))?;
-            if read == 0 {
-                break;
-            }
-            total = total.checked_add(read).ok_or_else(|| too_big(max_bytes))?;
-            if total > max_bytes {
-                return Err(too_big(max_bytes));
-            }
-            writer
-                .write_all(&buffer[..read])
-                .map_err(|error| AppError::config(format!("failed to write video: {error}")))?;
-        }
+        let total = stream::copy(response, writer, limits, stream::Expect::Mp4, &|| {
+            AppError::upstream("native video response is not an MP4")
+        })?;
         validate_complete_bytes(&metadata, total)?;
         Ok(DownloadResponse {
             url: metadata.url,
@@ -716,7 +668,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{KlmsClient, validate_base_url};
+    use super::{KlmsClient, stream::Limits, validate_base_url};
     use crate::fixture_server::{Response, Server};
 
     fn redirect(location: &str) -> Response {
@@ -849,7 +801,7 @@ mod tests {
         ]);
         let mut output = Vec::new();
         let result = client(&server, Some("MoodleSession=fixture"), 1)
-            .download_video_to("/vod1/start.mp4", 1024, 5, &mut output)
+            .download_video_to("/vod1/start.mp4", Limits::new(1024, 5, 30), &mut output)
             .unwrap();
         assert_eq!(output, body);
         assert_eq!(result.bytes, body.len());
@@ -872,7 +824,7 @@ mod tests {
         for _ in 0..3 {
             let mut output = Vec::new();
             let error = client
-                .download_video_to("/vod1/file.mp4", 1024, 5, &mut output)
+                .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut output)
                 .err()
                 .unwrap();
             assert_eq!(error.code, "UPSTREAM_ERROR");
@@ -891,7 +843,7 @@ mod tests {
         ] {
             assert!(
                 client
-                    .download_video_to(path, 1024, 5, &mut Vec::new())
+                    .download_video_to(path, Limits::new(1024, 5, 30), &mut Vec::new())
                     .is_err()
             );
         }
@@ -899,7 +851,7 @@ mod tests {
         let server = serve(vec![redirect("http://127.0.0.2:1/vod1/file.mp4")]);
         let error = super::KlmsClient::new(&server.url(), Some("MoodleSession=fixture"), 5)
             .unwrap()
-            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
+            .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut Vec::new())
             .err()
             .unwrap();
         assert!(error.message.contains("cross-origin"));
@@ -908,44 +860,56 @@ mod tests {
 
     #[test]
     fn native_video_caps_declared_and_streamed_bytes_and_rejects_partial_ranges() {
+        // One server per case: a refused open-ended body keeps its
+        // connection until the request deadline.
         let body = mp4();
-        let server = serve(vec![
-            Response::bytes("video/mp4", body.clone()),
-            Response::open_ended(body.clone()),
-            Response::bytes("video/mp4", body)
-                .status("206 Partial Content")
-                .header("Content-Range", "bytes 0-30/100"),
-        ]);
-        let client = client(&server, None, 5);
-        let mut output = Vec::new();
-        let error = client
-            .download_video_to("/vod1/file.mp4", 16, 5, &mut output)
-            .err()
-            .unwrap();
-        assert_eq!(error.code, "LIMIT_EXCEEDED");
-        assert!(output.is_empty());
-        let error = client
-            .download_video_to("/vod1/file.mp4", 16, 5, &mut output)
-            .err()
-            .unwrap();
-        assert_eq!(error.code, "LIMIT_EXCEEDED");
-        let error = client
-            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
-            .err()
-            .unwrap();
-        assert_eq!(error.code, "UPSTREAM_ERROR");
+        let cases = [
+            (
+                Response::bytes("video/mp4", body.clone()),
+                16,
+                "LIMIT_EXCEEDED",
+            ),
+            (Response::open_ended(body.clone()), 16, "LIMIT_EXCEEDED"),
+            (
+                Response::bytes("video/mp4", body)
+                    .status("206 Partial Content")
+                    .header("Content-Range", "bytes 0-30/100"),
+                1024,
+                "UPSTREAM_ERROR",
+            ),
+        ];
+        for (response, max, code) in cases {
+            let server = serve(vec![response]);
+            let mut output = Vec::new();
+            let error = client(&server, None, 5)
+                .download_video_to("/vod1/file.mp4", Limits::new(max, 5, 30), &mut output)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, code);
+            if code == "LIMIT_EXCEEDED" {
+                assert!(output.is_empty());
+            }
+        }
     }
 
     #[test]
-    fn native_video_deadline_interrupts_a_stalled_stream() {
-        let server = serve(vec![Response::open_ended(mp4())]);
-        let started = Instant::now();
-        let error = client(&server, None, 5)
-            .download_video_to("/vod1/file.mp4", 1024, 1, &mut Vec::new())
-            .err()
-            .unwrap();
-        assert_eq!(error.code, "NETWORK_ERROR");
-        assert!(started.elapsed() < Duration::from_millis(1600));
+    fn native_video_deadline_and_stall_timeout_interrupt_a_silent_stream() {
+        // The fixture holds the connection open for 5s after the first bytes,
+        // so finishing well before that proves the client gave up on its own.
+        for (limits, message) in [
+            (Limits::new(1024, 1, 30), "time limit"),
+            (Limits::new(1024, 30, 1), "stalled: no data for 1 seconds"),
+        ] {
+            let server = serve(vec![Response::open_ended(mp4())]);
+            let started = Instant::now();
+            let error = client(&server, None, 5)
+                .download_video_to("/vod1/file.mp4", limits, &mut Vec::new())
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "NETWORK_ERROR");
+            assert!(error.message.contains(message), "{}", error.message);
+            assert!(started.elapsed() < Duration::from_secs(4));
+        }
     }
 
     #[test]
@@ -964,7 +928,7 @@ mod tests {
         });
         let error = KlmsClient::new(&base, None, 5)
             .unwrap()
-            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
+            .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut Vec::new())
             .err()
             .unwrap();
         handle.join().unwrap();

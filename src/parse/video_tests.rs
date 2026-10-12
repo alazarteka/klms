@@ -88,7 +88,13 @@ fn malformed_recognized_protocol_forms_fail_visibly() {
         r#"<input name="id_token" value="synthetic"><input name="state" value="synthetic">"#,
         r#"<input name="extra" value="synthetic">"#.repeat(31)
     );
-    assert!(launch_form(&excessive, &klms(), &pano()).is_err());
+    assert_eq!(
+        launch_form(&excessive, &klms(), &pano())
+            .err()
+            .unwrap()
+            .code,
+        "UPSTREAM_SHAPE_CHANGED"
+    );
 }
 
 #[test]

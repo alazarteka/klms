@@ -1,7 +1,109 @@
 use std::path::Path;
 
 use super::*;
-use crate::{cli::VideosCommand, models::Video};
+use crate::{cli::VideosCommand, client::stream::Limits, models::Video};
+
+/// Which transport a video reference uses: native KLMS VOD or Panopto.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoTarget {
+    Native,
+    Panopto,
+}
+
+impl VideoTarget {
+    fn of(target: &str) -> Self {
+        if target.starts_with("vod:") || target.contains("/mod/vod/") {
+            Self::Native
+        } else {
+            Self::Panopto
+        }
+    }
+}
+
+/// Prefix of every temporary entry a download leaves next to `--out`.
+const TEMP_PREFIX: &str = ".klms-video-";
+/// Stale temporaries older than this are swept by the next download.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// A private scratch directory beside `--out` (same filesystem, not a RAM
+/// tmpfs), removed when the download ends.
+struct Workspace(std::path::PathBuf);
+
+impl Workspace {
+    fn create(out: &Path) -> Result<Self, AppError> {
+        let parent = out_parent(out);
+        let path = parent.join(format!("{TEMP_PREFIX}{}.scratch", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path).map_err(|e| {
+            AppError::config(format!(
+                "could not create video workspace {}: {e}",
+                path.display()
+            ))
+        })?;
+        let workspace = Self(path);
+        workspace.sweep_stale(parent);
+        Ok(workspace)
+    }
+
+    /// Best effort: removes temporaries an interrupted download left behind,
+    /// when they are older than a day and owned by this user. Symlinks and
+    /// other file types are never touched or followed.
+    fn sweep_stale(&self, parent: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(own) = self.0.symlink_metadata() else {
+                return;
+            };
+            let Ok(entries) = std::fs::read_dir(parent) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let Some(rest) = name.strip_prefix(TEMP_PREFIX) else {
+                    continue;
+                };
+                let path = entry.path();
+                let Ok(meta) = path.symlink_metadata() else {
+                    continue;
+                };
+                let stale = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .is_some_and(|age| age > STALE_AFTER);
+                if path == self.0 || meta.uid() != own.uid() || !stale {
+                    continue;
+                }
+                if meta.file_type().is_file() && rest.contains(".part") {
+                    let _ = std::fs::remove_file(&path);
+                } else if meta.file_type().is_dir() && rest.ends_with(".scratch") {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = parent;
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn out_parent(out: &Path) -> &Path {
+    out.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
 
 impl Ctx<'_> {
     pub(super) fn videos(&self, command: &VideosCommand) -> Result<CommandResult, AppError> {
@@ -50,7 +152,7 @@ impl Ctx<'_> {
                 )
             }
             VideosCommand::Show { target } => {
-                if !target.starts_with("vod:") && !target.contains("/mod/vod/") {
+                if VideoTarget::of(target) == VideoTarget::Panopto {
                     let (mut session, uuid, launch_ref) = self.panopto_video(target)?;
                     if uuid.is_some() || session.recording_id.is_some() {
                         let delivery = session.delivery(uuid.as_deref())?;
@@ -110,30 +212,38 @@ impl Ctx<'_> {
                 out,
                 max_bytes,
                 max_seconds,
+                stall_seconds,
             } => {
                 validate_out(out)?;
                 let cap = usize::try_from(*max_bytes)
                     .map_err(|_| AppError::usage("max-bytes exceeds this platform's capacity"))?;
-                if target.starts_with("vod:") || target.contains("/mod/vod/") {
-                    let (_, source) = self.native_video(target)?;
-                    publish_video(out, |file| {
-                        self.client
-                            .download_video_to(source.as_str(), cap, *max_seconds, file)
-                    })
-                } else {
-                    let (mut session, uuid, launch_ref) = self.panopto_video(target)?;
-                    let delivery = session.delivery(uuid.as_deref())?;
-                    publish_video(out, |file| {
-                        let downloaded = session.download_to(&delivery, file, cap, *max_seconds)?;
-                        Ok(crate::client::DownloadResponse {
-                            bytes: downloaded.bytes,
-                            content_type: Some(downloaded.content_type.into()),
-                            url: self
-                                .base
-                                .join(&ResourceRef::parse(&launch_ref)?.path())
-                                .expect("built-in path"),
+                let workspace = Workspace::create(out)?;
+                match VideoTarget::of(target) {
+                    VideoTarget::Native => {
+                        let (_, source) = self.native_video(target)?;
+                        let limits = Limits::new(cap, *max_seconds, *stall_seconds);
+                        publish_video(out, |file| {
+                            self.client.download_video_to(source.as_str(), limits, file)
                         })
-                    })
+                    }
+                    VideoTarget::Panopto => {
+                        let (mut session, uuid, launch_ref) = self.panopto_video(target)?;
+                        let delivery = session.delivery(uuid.as_deref())?;
+                        let url = self
+                            .base
+                            .join(&ResourceRef::parse(&launch_ref)?.path())
+                            .map_err(|_| AppError::shape("Panopto launch locator is invalid"))?;
+                        let limits = Limits::new(cap, *max_seconds, *stall_seconds);
+                        publish_video(out, |file| {
+                            let downloaded =
+                                session.download_to(&delivery, file, limits, &workspace.0)?;
+                            Ok(crate::client::DownloadResponse {
+                                bytes: downloaded.bytes,
+                                content_type: Some(downloaded.content_type.into()),
+                                url,
+                            })
+                        })
+                    }
                 }
             }
         }
@@ -212,11 +322,6 @@ impl Ctx<'_> {
         }
         self.validate_detail_identity(&format!("/mod/vod/viewer/index.php?id={id}"), &viewer.url)?;
         let sources = parse::native_sources(&viewer.text, &viewer.url)?;
-        if sources.len() != 1 {
-            return Err(AppError::content_unavailable(
-                "native recording has multiple MP4 sources; cannot choose a composition",
-            ));
-        }
         let model = Video {
             reference: reference.to_string(),
             kind: "vod".into(),
@@ -229,7 +334,12 @@ impl Ctx<'_> {
             stream_count: Some(1),
             output_composition: Some("single_stream".into()),
         };
-        Ok((model, sources.into_iter().next().expect("one source")))
+        let [source] = <[Url; 1]>::try_from(sources).map_err(|_| {
+            AppError::content_unavailable(
+                "native recording has multiple MP4 sources; cannot choose a composition",
+            )
+        })?;
+        Ok((model, source))
     }
 }
 
@@ -240,10 +350,7 @@ fn validate_out(out: &Path) -> Result<(), AppError> {
             out.display()
         )));
     }
-    let parent = out
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let parent = out_parent(out);
     if !parent.is_dir() {
         return Err(AppError::config(format!(
             "destination directory does not exist: {}",
@@ -257,11 +364,7 @@ fn publish_video(
     out: &Path,
     fill: impl FnOnce(&mut std::fs::File) -> Result<crate::client::DownloadResponse, AppError>,
 ) -> Result<CommandResult, AppError> {
-    let parent = out
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let temp = parent.join(format!(".klms-video-{}.part", std::process::id()));
+    let temp = out_parent(out).join(format!("{TEMP_PREFIX}{}.part", std::process::id()));
     let (response, linked) = publish_new(&temp, out, fill).map_err(|e| match e {
         PublishError::Fill(e) => e,
         PublishError::Create(e) | PublishError::Sync(e) | PublishError::Link(e) => {

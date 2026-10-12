@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     cli::VideosCommand,
-    client::{KlmsClient, panopto::Origins},
+    client::{KlmsClient, panopto::Config},
     fixture_server::{Recorded, Response, Server},
 };
 
@@ -16,13 +16,23 @@ struct Fixtures {
     cdn: Server,
 }
 
-fn fixtures(media: fn() -> Response) -> Fixtures {
+/// A recording whose delivery offers a composed podcast MP4, or (without
+/// `podcast`) only an HLS camera stream that needs ffmpeg.
+fn fixtures(media: fn() -> Response, podcast: bool) -> Fixtures {
     let cdn = Server::new(move |request| match request.target.as_str() {
         "/podcast.mp4?sig=synthetic-signature" => media(),
         _ => panic!("unexpected CDN request: {}", request.target),
     });
+    let podcast = if podcast {
+        format!(
+            r#"[{{"StreamHttpUrl":"{}/podcast.mp4?sig=synthetic-signature"}}]"#,
+            cdn.url()
+        )
+    } else {
+        "[]".into()
+    };
     let delivery = format!(
-        r#"{{"DownloadUrl":null,"Delivery":{{"SessionName":"Synthetic lecture","Duration":12.5,"PodcastStreams":[{{"StreamHttpUrl":"{0}/podcast.mp4?sig=synthetic-signature"}}],"Streams":[{{"StreamUrl":"{0}/camera.m3u8"}}]}}}}"#,
+        r#"{{"DownloadUrl":null,"Delivery":{{"SessionName":"Synthetic lecture","Duration":12.5,"PodcastStreams":{podcast},"Streams":[{{"StreamUrl":"{}/camera.m3u8"}}]}}}}"#,
         cdn.url()
     );
     let panopto =
@@ -56,10 +66,18 @@ fn fixtures(media: fn() -> Response) -> Fixtures {
 }
 
 fn run(f: &Fixtures, command: &VideosCommand) -> Result<CommandResult, AppError> {
+    run_with(f, command, Config::fixture(&f.panopto.url(), &f.cdn.url()))
+}
+
+fn run_with(
+    f: &Fixtures,
+    command: &VideosCommand,
+    config: Config,
+) -> Result<CommandResult, AppError> {
     let base = Url::parse(&f.klms.url()).unwrap();
     let client = KlmsClient::new(base.as_str(), Some("MoodleSession=synthetic-klms"), 5)
         .unwrap()
-        .with_panopto_origins(Origins::fixture(&f.panopto.url(), &f.cdn.url()));
+        .with_panopto_config(config);
     let ctx = Ctx {
         client: &client,
         base: &base,
@@ -121,7 +139,7 @@ fn mp4() -> Response {
 
 #[test]
 fn panopto_show_launches_and_reports_delivery_without_media_or_secrets() {
-    let f = fixtures(mp4);
+    let f = fixtures(mp4, true);
     let result = run(
         &f,
         &VideosCommand::Show {
@@ -149,7 +167,7 @@ fn panopto_show_launches_and_reports_delivery_without_media_or_secrets() {
 
 #[test]
 fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
-    let f = fixtures(mp4);
+    let f = fixtures(mp4, true);
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("lecture.mp4");
     let result = run(
@@ -159,6 +177,7 @@ fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
             out: out.clone(),
             max_bytes: 1024,
             max_seconds: 30,
+            stall_seconds: 10,
         },
     )
     .unwrap();
@@ -187,7 +206,10 @@ fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
 
 #[test]
 fn panopto_download_rejects_html_media_and_publishes_nothing() {
-    let f = fixtures(|| Response::bytes("video/mp4", "<!doctype html><html>expired</html>"));
+    let f = fixtures(
+        || Response::bytes("video/mp4", "<!doctype html><html>expired</html>"),
+        true,
+    );
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("lecture.mp4");
     let error = run(
@@ -197,6 +219,7 @@ fn panopto_download_rejects_html_media_and_publishes_nothing() {
             out: out.clone(),
             max_bytes: 1024,
             max_seconds: 30,
+            stall_seconds: 10,
         },
     )
     .err()
@@ -210,4 +233,80 @@ fn panopto_download_rejects_html_media_and_publishes_nothing() {
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     assert_credential_routing(&f, 1);
+}
+
+fn download(out: &Path) -> VideosCommand {
+    VideosCommand::Download {
+        target: format!("panopto-recording:lti:7:{UUID}"),
+        out: out.to_path_buf(),
+        max_bytes: 1024,
+        max_seconds: 30,
+        stall_seconds: 10,
+    }
+}
+
+#[test]
+fn missing_ffmpeg_fails_before_any_media_is_fetched() {
+    let f = fixtures(mp4, false);
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-ffmpeg");
+    let config = Config::fixture(&f.panopto.url(), &f.cdn.url()).with_ffmpeg(&missing);
+    let error = run_with(&f, &download(&dir.path().join("lecture.mp4")), config)
+        .err()
+        .unwrap();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (
+            "CONFIG_ERROR",
+            "ffmpeg is required for HLS or multiple streams; install ffmpeg and retry"
+        )
+    );
+    assert_credential_routing(&f, 0);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn download_sweeps_only_stale_temporaries_beside_the_output() {
+    use std::time::{Duration, SystemTime};
+    let f = fixtures(mp4, true);
+    let dir = tempfile::tempdir().unwrap();
+    let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+    let age = |path: &Path| {
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap()
+    };
+    let stale_part = dir.path().join(".klms-video-1.part");
+    let stale_retry = dir.path().join(".klms-video-1.part.1a2");
+    let stale_scratch = dir.path().join(".klms-video-2.scratch");
+    let fresh_part = dir.path().join(".klms-video-3.part");
+    let unrelated = dir.path().join("notes.part");
+    let misnamed_dir = dir.path().join(".klms-video-4.part");
+    for file in [&stale_part, &stale_retry, &fresh_part, &unrelated] {
+        std::fs::write(file, b"partial").unwrap();
+    }
+    std::fs::create_dir(&stale_scratch).unwrap();
+    std::fs::write(stale_scratch.join("stream-0.mp4"), b"fragment").unwrap();
+    std::fs::create_dir(&misnamed_dir).unwrap();
+    for path in [&stale_part, &stale_retry, &unrelated, &misnamed_dir] {
+        age(path);
+    }
+    age(&stale_scratch);
+    run(&f, &download(&dir.path().join("lecture.mp4"))).unwrap();
+    let mut left = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            ".klms-video-3.part",
+            ".klms-video-4.part",
+            "lecture.mp4",
+            "notes.part"
+        ]
+    );
 }
