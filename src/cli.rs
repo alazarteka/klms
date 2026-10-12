@@ -7,6 +7,7 @@ const TOP_HELP: &str = "Workflow:
   klms auth login                                  # interactive; passwords are never flags
   klms --json courses list                         # get course refs
   klms --json assignments list --course course:ID
+  klms --json videos list --course course:ID       # then: videos download REF --out ./lecture.mp4
   klms --json files list --course course:ID        # then: files download file:ID --out /abs/new/path.pdf
   klms --json library sync --course course:ID --notices --files   # required before library search/content
   klms --json library search TEXT                  # local only; an unsynced library returns nothing
@@ -37,7 +38,8 @@ Exit codes:
 Reference formats (pass the `ref` from output; do not scrape URLs):
   course:ID                  course (--course also takes an exact code/title or unambiguous fragment)
   file:ID                    downloadable file       assign:ID  quiz:ID   assignment, quiz
-  vod:ID lti:ID panopto:ID   video (bare numeric ids rejected)
+  vod:ID lti:ID panopto:ID panoptocourseembed:ID   video recording or collection
+  panopto-recording:KIND:CM:UUID   recording with its launch activity (KIND lti/panopto/panoptocourseembed)
   activity:KIND:ID           other module, KIND = Moodle module name
   board:ID  board-post:BOARD:POST   board, post (notices show takes a board-post ref)
   resource:HASH              resource without an upstream id
@@ -48,7 +50,8 @@ Reference formats (pass the `ref` from output; do not scrape URLs):
 Safety:
   Course data is read-only: klms never submits work, starts quizzes,
   posts, or checks attendance; access is not authorization to do those. Never send KLMS
-  credentials to third-party links (Zoom, Panopto, Classum, LTI).
+  cookies to third-party links (Zoom, Panopto, Classum, LTI). Video commands use a narrowly
+  scoped Panopto LTI exchange; its temporary credentials stay in memory and never reach media CDNs.
   Auth: `klms auth login` (interactive; Easy Login or password + email/SMS code); `klms --json auth
   status` is secret-free. On AUTH_REQUIRED ask the user to log in. Never ask for or accept a
   password in chat: it is typed only at a terminal or stored once with --remember-password. The
@@ -57,7 +60,11 @@ Safety:
   `auth extend` cannot revive an expired session. See `klms auth login --help`.
 
 Row fields (--json; every `ref` can be passed back in as a ref):
-  courses list      id, ref, title, code, term, url
+  courses list      id, ref, title, code, term, url (default dashboard; --all or --year/--semester for history)
+  videos list/show  ref, kind, title, video_type (recording/collection), course_ref, duration_seconds,
+                    downloadable, official_download_available (null until inspected), stream_count,
+                    output_composition (composed_podcast/single_stream/separate_tracks); collections expand recordings
+  videos download   path, bytes, source_url (launch locator for Panopto), content_type
   files list        ref (null if not downloadable), id, kind, title, course_ref, week, section, url, downloadable
   today/upcoming    ref, kind, title, course, course_id, starts_at, when_text, url (Korea time;
                     upcoming --through Nd = today through today+N days, inclusive)
@@ -77,7 +84,7 @@ const FILE_PREVIEW_HELP: &str = "Needs bytes stored by `klms library sync --down
     name = "klms",
     version,
     about = "Fast, agent-friendly access to KAIST KLMS",
-    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one versioned document for agents and scripts. Course data is read-only: the CLI never submits work, starts quizzes, posts, or checks attendance. Only `auth` commands change remote state (sign-in, code delivery, session timer).",
+    long_about = "Read KAIST KLMS directly over authenticated HTTP. Human output is the default; --json emits one versioned document for agents and scripts. Course data is read-only: the CLI never submits work, starts quizzes, posts, or checks attendance. Video commands may perform the fixed Panopto authentication exchange; `auth` manages stored sessions, code delivery and the KLMS session timer.",
     after_help = "Run `klms --help` for the workflow, JSON/exit-code contract, and ref formats; `klms <command> --help` for details; `klms --json spec` for the full argument tree.",
     after_long_help = TOP_HELP,
     arg_required_else_help = true
@@ -174,8 +181,11 @@ pub enum Command {
         #[command(subcommand)]
         command: FilesCommand,
     },
-    /// List or inspect video metadata.
-    Videos(ModuleArgs),
+    /// Discover recordings and collections, inspect or download a recording.
+    Videos {
+        #[command(subcommand)]
+        command: VideosCommand,
+    },
     /// Show the grade report for a course.
     Grades(CourseShowArgs),
     /// Show the attendance report for a course.
@@ -639,10 +649,45 @@ pub struct ModuleArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum VideosCommand {
+    /// List native recordings and verified Panopto recordings in a course.
+    List {
+        #[arg(help = COURSE_HELP, long, value_name = "COURSE")]
+        course: String,
+        #[command(flatten)]
+        list: ListArgs,
+    },
+    /// Inspect one recording or collection without running its player.
+    Show {
+        /// Typed video reference printed by videos list (bare numbers are ambiguous).
+        #[arg(value_name = "REF")]
+        target: String,
+    },
+    /// Download MP4 or locally remux HLS to a new private file; never overwrites.
+    #[command(
+        after_help = "--out is an exact new path; its parent must exist. HLS requires ffmpeg. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+    )]
+    Download {
+        /// Recording reference printed by videos list; collections cannot be downloaded.
+        #[arg(value_name = "REF")]
+        target: String,
+        /// Exact new output path; parent must exist.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// Total media byte cap (default 4 GiB, at most 16 GiB).
+        #[arg(long, default_value_t = 4_294_967_296_u64, value_parser = clap::value_parser!(u64).range(1..=17_179_869_184))]
+        max_bytes: u64,
+        /// Total download/remux time budget in seconds (1-7200).
+        #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        max_seconds: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ModuleCommand {
     /// List this resource type in a course.
     #[command(
-        after_help = "The parent command selects assignments, quizzes, or videos.\n\nExamples:\n  klms assignments list --course CS.30200\n  klms quizzes list --course 189705\n  klms videos list --course 189705"
+        after_help = "Examples:\n  klms assignments list --course CS.30200\n  klms quizzes list --course 189705"
     )]
     List {
         #[arg(help = COURSE_HELP, long, value_name = "COURSE")]
@@ -652,10 +697,10 @@ pub enum ModuleCommand {
     },
     /// Show one resource by canonical ref, numeric id where unambiguous, or URL.
     #[command(
-        after_help = "Examples:\n  klms assignments show assign:1210516\n  klms quizzes show quiz:1210517\n  klms videos show lti:1265520"
+        after_help = "Examples:\n  klms assignments show assign:1210516\n  klms quizzes show quiz:1210517"
     )]
     Show {
-        /// Canonical ref (assign:ID, quiz:ID, vod:ID, lti:ID, panopto:ID), a same-origin module URL, or a numeric id for assignments/quizzes (videos reject bare ids).
+        /// Canonical assignment/quiz ref, a same-origin module URL, or numeric id.
         #[arg(value_name = "REF")]
         target: String,
     },

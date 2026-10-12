@@ -303,3 +303,18 @@ pub struct RelationResult {
     #[serde(rename = "ref")]
     pub reference: String,
 }
+
+#[derive(Debug, Serialize)]
+pub struct Video {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub kind: String,
+    pub title: String,
+    pub video_type: &'static str,
+    pub course_ref: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub downloadable: Option<bool>,
+    pub official_download_available: Option<bool>,
+    pub stream_count: Option<usize>,
+    pub output_composition: Option<String>,
+}

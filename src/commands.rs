@@ -1,4 +1,5 @@
 mod library;
+mod videos;
 
 use std::path::Path;
 
@@ -27,13 +28,13 @@ use crate::{
 };
 
 const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
-const VIDEO_KINDS: &[&str] = &["vod", "panoptocourseembed", "panopto", "lti"];
 const CALENDAR_PATH: &str = "/calendar/view.php?view=upcoming";
 
 /// An authenticated client and the origin it talks to.
 struct Ctx<'a> {
     client: &'a KlmsClient,
     base: &'a Url,
+    timeout: u64,
 }
 
 pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
@@ -83,6 +84,7 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
             let ctx = Ctx {
                 client: &client,
                 base: &base,
+                timeout: cli.timeout,
             };
             ctx.live(command)
         }
@@ -274,16 +276,7 @@ impl Ctx<'_> {
                     })
                 })
             }
-            Command::Videos(args) => self.module(
-                &args.command,
-                "videos.show",
-                VIDEO_KINDS,
-                |course, limit| {
-                    let mut rows = course_pages::activities(client, base, &course.id)?;
-                    rows.retain(parse::is_video_activity);
-                    activity_table("videos.list", course, rows, limit)
-                },
-            ),
+            Command::Videos { command } => self.videos(command),
             Command::Calendar { command } => {
                 let CalendarCommand::List(list) = command;
                 let page = parse::calendar_page(
@@ -575,7 +568,7 @@ impl Ctx<'_> {
         activity_table(command, &resolved, rows, limit)
     }
 
-    /// Shared list/show dispatch for assignments, quizzes and videos.
+    /// Shared list/show dispatch for assignments and quizzes.
     fn module(
         &self,
         command: &ModuleCommand,

@@ -69,7 +69,7 @@ fn auth_status_and_logout_never_emit_cookie_values() {
     let mut env = Env::new();
     let status = env.data("auth status");
     assert_eq!(status["configured"], false);
-    assert_eq!(env.ok("auth status")["schema_version"], "4");
+    assert_eq!(env.ok("auth status")["schema_version"], "5");
     env.state();
     let output = env.out("--base-url http://127.0.0.1:9 auth status");
     assert!(output.status.success());
@@ -632,4 +632,147 @@ fn spec_and_completions_describe_the_command_surface() {
     assert_eq!(zsh["shell"], "zsh");
     assert!(zsh["script"].as_str().unwrap().contains("#compdef klms"));
     assert!(!env.run("completions tcsh").status.success());
+}
+
+#[test]
+fn native_video_download_is_static_private_complete_and_never_overwrites() {
+    let mp4 = b"\x00\x00\x00\x18ftypisomsynthetic-media";
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/mod/vod/view.php?id=7" => Response::html("<main><h1>Synthetic lecture</h1></main>"),
+        "/mod/vod/viewer/index.php?id=7" => Response::html(
+            r#"<script>flowplayer('#player', {clip: {sources: [{type: "video/mp4", src: "/vod1/synthetic.mp4"}]}});</script>"#,
+        ),
+        "/vod1/synthetic.mp4" => Response::bytes("video/mp4", mp4.to_vec()),
+        _ => panic!("unexpected request: {}", request.target),
+    });
+    let env = Env::at(&server);
+    let out = env.path("lecture.mp4");
+    let args = format!("videos download vod:7 --out {}", out.display());
+    let result = env.data(&args);
+    assert_eq!(result["bytes"], mp4.len());
+    assert_eq!(fs::read(&out).unwrap(), mp4);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let calls = server.requests().len();
+    assert_eq!(env.fail(&args).1["code"], "CONFIG_ERROR");
+    assert_eq!(server.requests().len(), calls);
+    assert_eq!(fs::read(&out).unwrap(), mp4);
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| !r.contains("playtime") && !r.contains("progress"))
+    );
+}
+
+#[test]
+fn failed_native_video_download_cleans_temporary_and_output() {
+    for response in [
+        Response::html("<html>Login</html>"),
+        Response::bytes("video/mp4", b"\x00\x00\x00\x18ftypisom-too-large".to_vec()),
+    ] {
+        let responses = std::sync::Mutex::new(std::collections::VecDeque::from([
+            Response::html("<main><h1>Lecture</h1></main>"),
+            Response::html(
+                r#"<script>flowplayer('#player', {clip: {sources: [{type: "video/mp4", src: "/vod1/synthetic.mp4"}]}});</script>"#,
+            ),
+            response,
+        ]));
+        let server = Server::new(move |_| {
+            responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("extra request")
+        });
+        let env = Env::at(&server);
+        let out = env.path("failed.mp4");
+        let (_, error) = env.fail(&format!(
+            "videos download vod:7 --out {} --max-bytes 12",
+            out.display()
+        ));
+        assert!(
+            ["UPSTREAM_SHAPE_CHANGED", "LIMIT_EXCEEDED"].contains(&error["code"].as_str().unwrap())
+        );
+        assert!(!out.exists());
+        let parent = out.parent().unwrap();
+        assert!(fs::read_dir(parent).unwrap().all(|p| {
+            !p.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".klms-video-")
+        }));
+    }
+}
+
+#[test]
+fn video_grammar_rejects_ambiguous_ids_and_invalid_limits() {
+    let env = Env::new();
+    for args in [
+        "videos download vod:7 --out x --max-seconds 0",
+        "videos download vod:7 --out x --max-bytes 0",
+        "videos download vod:7",
+        "videos download 7 --out x --max-seconds 7201",
+    ] {
+        assert_eq!(env.fail(args).1["code"], "USAGE", "{args}");
+    }
+    let server = html_server("<main>unused</main>");
+    assert_eq!(Env::at(&server).fail("videos show 7").1["code"], "USAGE");
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn video_list_inspects_lti_protocol_instead_of_titles_and_reports_failed_coverage() {
+    let server = Server::new(|request| match request.target.as_str() {
+        "/course/view.php?id=42" => Response::html(
+            r#"<main class="course-content"><li class="activity modtype_lti" id="module-7"><a href="/mod/lti/view.php?id=7"><span class="instancename">Panopto Lecture</span></a></li><li class="activity modtype_panoptocourseembed" id="module-8"><span class="instancename">Embedded collection</span></li></main>"#,
+        ),
+        "/mod/lti/view.php?id=7" => Response::html(
+            "<main><h1>Panopto Lecture</h1><a href='https://example.org'>Unrelated LTI</a></main>",
+        ),
+        "/mod/panoptocourseembed/view.php?id=8" => {
+            Response::html("<main><h1>Unavailable collection</h1></main>")
+        }
+        _ => panic!("unexpected request: {}", request.target),
+    });
+    let result = Env::at(&server).ok("videos list --course course:42");
+    assert_eq!(result["data"], json!([]));
+    assert_eq!(result["meta"]["complete"], false);
+    assert_eq!(result["meta"]["source_complete"], false);
+    assert!(result["meta"]["total"].is_null());
+    assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+    assert!(
+        result["warnings"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("panoptocourseembed:8:")
+    );
+}
+
+#[test]
+fn native_viewer_redirects_cannot_change_the_recording_identity() {
+    let server = Server::new(|request| match request.target.as_str() {
+        "/mod/vod/view.php?id=7" => Response::html("<main><h1>Requested lecture</h1></main>"),
+        "/mod/vod/viewer/index.php?id=7" => Response::html("")
+            .status("302 Found")
+            .header("Location", "/mod/vod/viewer/index.php?id=8"),
+        "/mod/vod/viewer/index.php?id=8" => Response::html(
+            r#"<script>flowplayer('#player', {clip:{sources:[{type:"video/mp4",src:"/vod1/other.mp4"}]}});</script>"#,
+        ),
+        _ => panic!("unexpected media request"),
+    });
+    let env = Env::at(&server);
+    let out = env.path("wrong.mp4");
+    let error = env
+        .fail(&format!("videos download vod:7 --out {}", out.display()))
+        .1;
+    assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED");
+    assert!(error["message"].as_str().unwrap().contains("identity"));
+    assert!(!out.exists());
 }

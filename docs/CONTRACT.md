@@ -90,3 +90,37 @@ trusted-device IDs. Remembered login lives in `$XDG_CONFIG_HOME/klms`. The KLMS
 base URL must be HTTPS, with plain HTTP allowed only for loopback. `update`
 contacts only GitHub, verifies the archive SHA-256 and the candidate version,
 and keeps the old binary on failure.
+
+## Videos (JSON schema 5)
+
+Schema 5 replaces the former activity-shaped video rows; the local SQLite schema
+remains version 1. Video grammar is independent of assignment/quiz grammar. `videos list --course`
+returns recordings and collections with `video_type`; verified Panopto
+collections expand into recording rows. A failed launch or incomplete folder
+page makes `meta.complete` false and produces a warning. LTI recognition uses
+launch protocol markup, never its title. `downloadable` and
+`official_download_available` are null when delivery sources have not been
+inspected. The official DownloadUrl permission is separate from readable
+playback MP4/HLS availability.
+
+`panopto-recording:KIND:CM:UUID` identifies an actual recording and preserves its
+KLMS launch activity for renewed authentication. KIND is `lti`, `panopto` or
+`panoptocourseembed`; CM is numeric. Existing `vod:ID`, `lti:ID`, `panopto:ID`
+and `panoptocourseembed:ID` identify Moodle activities. Collections cannot be
+downloaded as a single video; choose a recording ref.
+
+`videos download REF --out PATH` publishes a private file without overwriting.
+It defaults to a 4 GiB media cap and 1800-second download/remux budget;
+`--max-bytes` permits up to 16 GiB and `--max-seconds` up to 7200. Native VOD
+uses only static same-origin `/vod1/` MP4 sources. Panopto exchanges use separate
+host-scoped transient credentials; media requests receive neither KLMS nor
+Panopto credentials. Temporary signed media URLs are never returned in JSON;
+Panopto `source_url` is the KLMS launch locator. HLS media is retrieved under
+bounded transport policies and remuxed locally with ffmpeg; ffmpeg receives
+only local paths. No player scripts or playback/progress telemetry run.
+Multiple native Panopto streams are preserved as separate video/audio tracks
+with their start offsets; a readable composed podcast takes precedence.
+`stream_count` and `output_composition` expose this choice on inspected recordings.
+Finite HLS playlists, external audio renditions, initialization fragments and
+byte ranges are supported. Encrypted or unfinished/live playlists fail visibly.
+Library sync remains metadata-only for videos, even with `--files`.
