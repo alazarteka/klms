@@ -1,19 +1,62 @@
 //! Panopto metadata and credential-free CDN media transport.
-#[path = "panopto_folder.rs"]
+mod exchange;
 mod folder;
 use crate::{
-    auth::panopto::{Policy, request, text},
     error::AppError,
     http::{self, Follow, Method, Payload},
     parse::video,
     url::{Url, form_urlencode},
 };
+pub use exchange::launch;
+use exchange::{Policy, request, text};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     io::{Read, Write},
     time::{Duration, Instant},
 };
+
+/// The Panopto and media CDN origins the exchange and media policies trust.
+/// Production values are fixed; tests point them at loopback fixtures.
+#[derive(Clone, Debug)]
+pub struct Origins {
+    panopto: Url,
+    cdn: Url,
+}
+impl Origins {
+    pub fn production() -> Result<Self, AppError> {
+        Self::new(
+            "https://kaist.ap.panopto.com/",
+            "https://s-cloudfront.cdn.ap.panopto.com/",
+        )
+    }
+    #[cfg(test)]
+    pub fn fixture(panopto: &str, cdn: &str) -> Self {
+        Self::new(panopto, cdn).expect("fixture origins")
+    }
+    fn new(panopto: &str, cdn: &str) -> Result<Self, AppError> {
+        let parse =
+            |u: &str| Url::parse(u).map_err(|_| AppError::internal("invalid Panopto origin"));
+        Ok(Self {
+            panopto: parse(panopto)?,
+            cdn: parse(cdn)?,
+        })
+    }
+    fn is_panopto(&self, u: &Url) -> bool {
+        same_origin(u, &self.panopto)
+    }
+    fn is_cdn(&self, u: &Url) -> bool {
+        same_origin(u, &self.cdn)
+    }
+    fn endpoint(&self, path: &str) -> Result<Url, AppError> {
+        self.panopto
+            .join(path)
+            .map_err(|_| AppError::internal("invalid Panopto endpoint"))
+    }
+}
+fn same_origin(u: &Url, origin: &Url) -> bool {
+    u.origin() == origin.origin() && u.username().is_empty() && u.password().is_none()
+}
 
 pub struct Session {
     agent: ureq::Agent,
@@ -96,17 +139,20 @@ impl Session {
             content_type: "application/x-www-form-urlencoded",
             bytes: form_urlencode(pairs).into_bytes(),
         };
+        let endpoint = self
+            .policy
+            .origins
+            .endpoint("/Panopto/Pages/Viewer/DeliveryInfo.aspx")?;
         let r = request(
             &self.agent,
             &mut self.policy,
             Method::POST,
-            Url::parse("https://kaist.ap.panopto.com/Panopto/Pages/Viewer/DeliveryInfo.aspx")
-                .unwrap(),
+            endpoint,
             Some(p),
         )?;
         let value: Value = serde_json::from_str(&text(r)?)
             .map_err(|_| AppError::shape("Panopto delivery metadata was not JSON"))?;
-        parse_delivery(&id, &value)
+        parse_delivery(&id, &value, &self.policy.origins)
     }
     pub fn recordings(&mut self) -> Result<Recordings, AppError> {
         if let Some(id) = self.recording_id.clone() {
@@ -132,12 +178,15 @@ impl Session {
             };
             let payload = serde_json::to_vec(&body)
                 .map_err(|_| AppError::internal("could not encode folder query"))?;
+            let endpoint = self
+                .policy
+                .origins
+                .endpoint("/Panopto/Services/Data.svc/GetSessions")?;
             let r = request(
                 &self.agent,
                 &mut self.policy,
                 Method::POST,
-                Url::parse("https://kaist.ap.panopto.com/Panopto/Services/Data.svc/GetSessions")
-                    .expect("built-in endpoint"),
+                endpoint,
                 Some(Payload {
                     content_type: "application/json; charset=utf-8",
                     bytes: payload,
@@ -155,7 +204,13 @@ impl Session {
         max_seconds: u64,
     ) -> Result<Download, AppError> {
         if d.mp4.len() == 1 && d.groups.len() == 1 && d.groups[0].offset == 0.0 {
-            return media_to(&d.mp4[0], writer, max_bytes, max_seconds);
+            return media_to(
+                &self.policy.origins,
+                &d.mp4[0],
+                writer,
+                max_bytes,
+                max_seconds,
+            );
         }
         if d.groups.is_empty() || d.groups.iter().any(|g| g.mp4.is_none() && g.hls.is_none()) {
             return Err(AppError::content_unavailable(
@@ -163,7 +218,7 @@ impl Session {
             ));
         }
         if d.groups.iter().all(|g| g.mp4.is_none()) && d.groups.iter().all(|g| g.offset == 0.0) {
-            return hls_to(&d.hls, writer, max_bytes, max_seconds);
+            return hls_to(&self.policy.origins, &d.hls, writer, max_bytes, max_seconds);
         }
         let scratch = Scratch::new()?;
         let deadline = Instant::now() + Duration::from_secs(max_seconds);
@@ -173,10 +228,11 @@ impl Session {
         for (i, g) in d.groups.iter().enumerate() {
             let p = if let Some(u) = &g.mp4 {
                 let p = scratch.0.join(format!("stream-{i}.mp4"));
-                fetch_local(u, &p, &mut budget, deadline)?;
+                fetch_local(&self.policy.origins, u, &p, &mut budget, deadline)?;
                 p
             } else {
                 local_playlist(
+                    &self.policy.origins,
                     g.hls.as_ref().unwrap(),
                     &scratch,
                     &mut index,
@@ -209,7 +265,7 @@ fn recording(id: &str, v: &Value) -> Recording {
         duration_seconds: v.get("Duration").and_then(Value::as_f64),
     }
 }
-fn parse_delivery(id: &str, v: &Value) -> Result<Delivery, AppError> {
+fn parse_delivery(id: &str, v: &Value, origins: &Origins) -> Result<Delivery, AppError> {
     let d = v.get("Delivery").unwrap_or(v);
     let streams = d.get("Streams").and_then(Value::as_array).ok_or_else(|| {
         AppError::content_unavailable(
@@ -221,7 +277,7 @@ fn parse_delivery(id: &str, v: &Value) -> Result<Delivery, AppError> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(source_group)
+        .map(|s| source_group(s, origins))
         .collect::<Vec<_>>();
     podcast_groups.sort_by_key(|g| g.mp4.is_none());
     let composed_available = podcast_groups
@@ -233,7 +289,7 @@ fn parse_delivery(id: &str, v: &Value) -> Result<Delivery, AppError> {
     {
         vec![composed]
     } else {
-        streams.iter().map(source_group).collect()
+        streams.iter().map(|s| source_group(s, origins)).collect()
     };
     let mp4 = groups
         .iter()
@@ -267,7 +323,7 @@ fn parse_delivery(id: &str, v: &Value) -> Result<Delivery, AppError> {
         groups,
     })
 }
-fn source_group(s: &Value) -> SourceGroup {
+fn source_group(s: &Value, origins: &Origins) -> SourceGroup {
     let mut group = SourceGroup {
         mp4: None,
         hls: None,
@@ -290,7 +346,7 @@ fn source_group(s: &Value) -> SourceGroup {
             .get(key)
             .and_then(Value::as_str)
             .and_then(|v| Url::parse(v).ok())
-            .filter(allowed_media)
+            .filter(|u| origins.is_cdn(u))
         {
             let path = u.path().to_ascii_lowercase();
             if path.ends_with(".mp4") {
@@ -302,17 +358,11 @@ fn source_group(s: &Value) -> SourceGroup {
     }
     group
 }
-fn allowed_media(u: &Url) -> bool {
-    u.scheme() == "https"
-        && u.host_str() == Some("s-cloudfront.cdn.ap.panopto.com")
-        && u.port_or_known_default() == Some(443)
-        && u.username().is_empty()
-        && u.password().is_none()
-}
-struct MediaPolicy {
+struct MediaPolicy<'a> {
+    origins: &'a Origins,
     range: Option<String>,
 }
-impl http::Policy for MediaPolicy {
+impl http::Policy for MediaPolicy<'_> {
     fn headers(&mut self, _: &Method, _: &Url) -> Vec<(&'static str, String)> {
         self.range
             .as_ref()
@@ -320,7 +370,7 @@ impl http::Policy for MediaPolicy {
             .unwrap_or_default()
     }
     fn allow(&mut self, u: &Url) -> Result<(), AppError> {
-        if allowed_media(u) {
+        if self.origins.is_cdn(u) {
             Ok(())
         } else {
             Err(AppError::content_unavailable(
@@ -330,24 +380,27 @@ impl http::Policy for MediaPolicy {
     }
 }
 fn media_to(
+    origins: &Origins,
     source: &Url,
     writer: &mut impl Write,
     max: usize,
     seconds: u64,
 ) -> Result<Download, AppError> {
-    media_copy(source, writer, max, seconds, true)
+    media_copy(origins, source, writer, max, seconds, true)
 }
 type ByteRange = (u64, u64);
 fn media_copy(
+    origins: &Origins,
     source: &Url,
     writer: &mut (impl Write + ?Sized),
     max: usize,
     seconds: u64,
     verify_mp4: bool,
 ) -> Result<Download, AppError> {
-    media_copy_range(source, writer, max, seconds, verify_mp4, None)
+    media_copy_range(origins, source, writer, max, seconds, verify_mp4, None)
 }
 fn media_copy_range(
+    origins: &Origins,
     source: &Url,
     writer: &mut (impl Write + ?Sized),
     max: usize,
@@ -355,7 +408,7 @@ fn media_copy_range(
     verify_mp4: bool,
     range: Option<ByteRange>,
 ) -> Result<Download, AppError> {
-    if !allowed_media(source) {
+    if !origins.is_cdn(source) {
         return Err(AppError::content_unavailable(
             "Panopto media origin refused",
         ));
@@ -382,6 +435,7 @@ fn media_copy_range(
             strict: false,
         },
         &mut MediaPolicy {
+            origins,
             range: range_header,
         },
     )
@@ -506,6 +560,7 @@ fn remaining(deadline: Instant) -> Result<u64, AppError> {
         .ok_or_else(|| AppError::limit("video time limit exceeded"))
 }
 fn fetch_local(
+    origins: &Origins,
     url: &Url,
     path: &std::path::Path,
     budget: &mut usize,
@@ -515,7 +570,7 @@ fn fetch_local(
         .create_new(true)
         .open(path)
         .map_err(|_| AppError::config("could not create local media fragment"))?;
-    let d = media_copy(url, &mut f, *budget, remaining(deadline)?, false)?;
+    let d = media_copy(origins, url, &mut f, *budget, remaining(deadline)?, false)?;
     *budget -= d.bytes;
     Ok(d.bytes)
 }
@@ -553,6 +608,7 @@ fn parse_byte_range(raw: &str) -> Result<(u64, Option<u64>), AppError> {
 type Fetch<'a> = dyn FnMut(&Url, &mut dyn Write, usize, u64, Option<ByteRange>) -> Result<Download, AppError>
     + 'a;
 fn local_playlist(
+    origins: &Origins,
     url: &Url,
     scratch: &Scratch,
     index: &mut usize,
@@ -567,7 +623,9 @@ fn local_playlist(
         budget,
         deadline,
         depth,
-        &mut |u, w, max, seconds, range| media_copy_range(u, w, max, seconds, false, range),
+        &mut |u, w, max, seconds, range| {
+            media_copy_range(origins, u, w, max, seconds, false, range)
+        },
     )
 }
 fn fetch_local_with(
@@ -860,6 +918,7 @@ fn remux_with_offsets(
     })
 }
 fn hls_to(
+    origins: &Origins,
     sources: &[Url],
     writer: &mut impl Write,
     max: usize,
@@ -883,6 +942,7 @@ fn hls_to(
     let mut inputs = Vec::new();
     for source in sources {
         inputs.push(local_playlist(
+            origins,
             source,
             &scratch,
             &mut index,
@@ -895,52 +955,4 @@ fn hls_to(
 }
 
 #[cfg(test)]
-#[path = "panopto_tests.rs"]
 mod tests;
-
-/// Origin/path policy for the fixed authentication and metadata endpoints.
-pub(crate) fn allow_exchange(u: &Url, klms: &Url, delivery_only: bool) -> Result<(), AppError> {
-    if u.origin() == klms.origin()
-        && (u.path() == "/enrol/index.php" || u.path().starts_with("/login/"))
-    {
-        return Err(AppError::content_unavailable(
-            "Panopto launch requires enrollment or renewed KLMS sign-in",
-        ));
-    }
-    let klms = u.origin() == klms.origin()
-        && matches!(
-            u.path(),
-            "/blocks/panopto/lib/lti/auth.php"
-                | "/mod/lti/auth.php"
-                | "/mod/panoptocourseembed/view_content.php"
-                | "/mod/lti/launch.php"
-        );
-    let pano = video::panopto_origin(u)
-        && (matches!(
-            u.path(),
-            "/Panopto/Pages/Embed.aspx"
-                | "/Panopto/Pages/Sessions/List.aspx"
-                | "/Panopto/Pages/Auth/CookieCheck.aspx"
-                | "/Panopto/Pages/EmbeddedList.aspx"
-                | "/Panopto/LTI/LTI.aspx"
-                | "/Panopto/Pages/Viewer/DeliveryInfo.aspx"
-                | "/Panopto/Services/Data.svc/GetSessions"
-        ) || (u
-            .path()
-            .to_ascii_lowercase()
-            .starts_with("/panopto/lti/adv/platforms/")
-            && u.path().ends_with("/login")))
-        && (!delivery_only
-            || matches!(
-                u.path(),
-                "/Panopto/Pages/Viewer/DeliveryInfo.aspx"
-                    | "/Panopto/Services/Data.svc/GetSessions"
-            ));
-    if (!delivery_only && klms || pano) && u.username().is_empty() && u.password().is_none() {
-        Ok(())
-    } else {
-        Err(AppError::content_unavailable(
-            "Panopto exchange refused an unexpected origin or endpoint",
-        ))
-    }
-}

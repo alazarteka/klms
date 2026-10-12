@@ -1,13 +1,16 @@
 use super::*;
 use serde_json::json;
 const ID: &str = "00000000-0000-0000-0000-000000000001";
+fn prod() -> Origins {
+    Origins::production().unwrap()
+}
 fn cdn(path: &str) -> String {
     format!("https://s-cloudfront.cdn.ap.panopto.com/{path}")
 }
 #[test]
 fn readable_sources_are_independent_of_official_download_permission() {
     let v = json!({"DownloadUrl":null,"Delivery":{"SessionName":"synthetic","Duration":2.0,"PodcastStreams":[{"StreamHttpUrl":cdn("podcast.mp4")}],"Streams":[{"StreamUrl":cdn("video.m3u8")},{"StreamUrl":cdn("audio.m3u8")}]}});
-    let d = parse_delivery(ID, &v).unwrap();
+    let d = parse_delivery(ID, &v, &prod()).unwrap();
     assert!(!d.official_download_available);
     assert!(d.mp4_available);
     assert_eq!(d.groups.len(), 1);
@@ -18,13 +21,13 @@ fn readable_sources_are_independent_of_official_download_permission() {
 #[test]
 fn mixed_and_missing_streams_cannot_silently_download_partial_recordings() {
     let v = json!({"Delivery":{"Streams":[{"StreamUrl":cdn("camera.mp4")},{"StreamUrl":cdn("audio.m3u8"),"RelativeStart":1.5}]}});
-    let d = parse_delivery(ID, &v).unwrap();
+    let d = parse_delivery(ID, &v, &prod()).unwrap();
     assert!(!d.mp4_available);
     assert!(d.hls_available);
     assert_eq!(d.groups.len(), 2);
     assert_eq!(d.groups[1].offset, 1.5);
     let v = json!({"Delivery":{"Streams":[{"StreamUrl":cdn("camera.mp4")},{"StreamUrl":"https://unrelated.test/audio.mp4"}]}});
-    let d = parse_delivery(ID, &v).unwrap();
+    let d = parse_delivery(ID, &v, &prod()).unwrap();
     assert!(!d.mp4_available && !d.hls_available);
     assert!(d.groups[1].mp4.is_none());
 }
@@ -34,7 +37,7 @@ fn fixture_fetch<'a>(
 ) -> impl FnMut(&Url, &mut dyn Write, usize, u64, Option<ByteRange>) -> Result<Download, AppError> + 'a
 {
     move |u, w, max, _, range| {
-        assert!(allowed_media(u));
+        assert!(prod().is_cdn(u));
         seen.push(u.path().into());
         let data = items.iter().find(|(path, _)| *path == u.path()).unwrap().1;
         let data = range.map_or(data, |(start, len)| {
@@ -211,7 +214,7 @@ fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
         .unwrap();
     assert!(status.success());
     let mut fetch = |u: &Url, w: &mut dyn Write, max: usize, _: u64, _: Option<ByteRange>| {
-        assert!(allowed_media(u));
+        assert!(prod().is_cdn(u));
         let p = remote.path().join(u.path().trim_start_matches('/'));
         let data = std::fs::read(p).unwrap();
         if data.len() > max {
@@ -299,7 +302,7 @@ fn hls_byte_ranges_retrieve_exact_init_and_segments_and_remove_range_tags() {
 #[test]
 fn composed_mp4_takes_precedence_over_an_alternative_hls_podcast() {
     let value = json!({"Delivery":{"PodcastStreams":[{"StreamUrl":cdn("podcast.m3u8")},{"StreamHttpUrl":cdn("podcast.mp4")}],"Streams":[{"StreamUrl":cdn("camera.m3u8")},{"StreamUrl":cdn("slides.m3u8")}]}});
-    let delivery = parse_delivery(ID, &value).unwrap();
+    let delivery = parse_delivery(ID, &value, &prod()).unwrap();
     assert!(delivery.mp4_available);
     assert_eq!(delivery.composition, "composed_podcast");
     assert_eq!(delivery.output_stream_count, 1);
@@ -307,4 +310,63 @@ fn composed_mp4_takes_precedence_over_an_alternative_hls_podcast() {
         delivery.groups[0].mp4.as_ref().unwrap().path(),
         "/podcast.mp4"
     );
+}
+
+fn cdn_fixture(
+    response: fn() -> crate::fixture_server::Response,
+) -> (crate::fixture_server::Server, Origins) {
+    let server = crate::fixture_server::Server::new(move |_| response());
+    let origins = Origins::fixture("https://kaist.ap.panopto.com/", &server.url());
+    (server, origins)
+}
+
+#[test]
+fn media_range_must_match_the_requested_bytes() {
+    use crate::fixture_server::Response;
+    let (server, origins) = cdn_fixture(|| {
+        Response::bytes("video/mp2t", "bbbb")
+            .status("206 Partial Content")
+            .header("Content-Range", "bytes 1-4/10")
+    });
+    let source = Url::parse(&format!("{}/shared.ts", server.url())).unwrap();
+    let mut out = Vec::new();
+    let error = media_copy_range(&origins, &source, &mut out, 100, 5, false, Some((0, 4)))
+        .err()
+        .unwrap();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (
+            "CONTENT_UNAVAILABLE",
+            "HLS server returned an unexpected byte range"
+        )
+    );
+    assert!(out.is_empty());
+    assert_eq!(
+        server.recorded()[0].header_value("range"),
+        Some("bytes=0-3")
+    );
+}
+
+#[test]
+fn media_that_sniffs_as_html_is_refused_before_writing() {
+    use crate::fixture_server::Response;
+    let (server, origins) = cdn_fixture(|| {
+        Response::bytes(
+            "application/octet-stream",
+            "<!DOCTYPE html><html>denied</html>",
+        )
+    });
+    let source = Url::parse(&format!("{}/segment.ts", server.url())).unwrap();
+    let mut out = Vec::new();
+    let error = media_copy_range(&origins, &source, &mut out, 100, 5, false, None)
+        .err()
+        .unwrap();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (
+            "CONTENT_UNAVAILABLE",
+            "Panopto media returned HTML instead of video"
+        )
+    );
+    assert!(out.is_empty());
 }

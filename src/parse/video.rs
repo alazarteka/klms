@@ -2,21 +2,25 @@
 #[cfg(test)]
 #[path = "video_tests.rs"]
 mod protocol_tests;
-use crate::{error::AppError, url::Url};
-use scraper::{Html, Selector};
+use crate::{
+    error::AppError,
+    url::{Origin, Url},
+};
+use scraper::{ElementRef, Html, Selector};
 
 pub struct LaunchForm {
     pub action: Url,
     pub fields: Vec<(String, String)>,
 }
-pub fn panopto_origin(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str() == Some("kaist.ap.panopto.com")
-        && url.port_or_known_default() == Some(443)
-        && url.username().is_empty()
-        && url.password().is_none()
+/// Whether `url` is on the trusted Panopto `origin`, without userinfo.
+fn on_panopto(url: &Url, panopto: &Origin) -> bool {
+    url.origin() == *panopto && url.username().is_empty() && url.password().is_none()
 }
-pub fn launch_form(html: &str, base: &Url) -> Result<Option<LaunchForm>, AppError> {
+pub fn launch_form(
+    html: &str,
+    base: &Url,
+    panopto: &Origin,
+) -> Result<Option<LaunchForm>, AppError> {
     let doc = Html::parse_document(html);
     for f in doc.select(&Selector::parse("form[action]").unwrap()) {
         let Some(action) = f.value().attr("action").and_then(|a| base.join(a).ok()) else {
@@ -27,7 +31,7 @@ pub fn launch_form(html: &str, base: &Url) -> Result<Option<LaunchForm>, AppErro
                 action.path(),
                 "/blocks/panopto/lib/lti/auth.php" | "/mod/lti/auth.php"
             );
-        if !panopto_origin(&action) && !repost {
+        if !on_panopto(&action, panopto) && !repost {
             continue;
         }
         let path = action.path().to_ascii_lowercase();
@@ -74,26 +78,39 @@ pub fn launch_form(html: &str, base: &Url) -> Result<Option<LaunchForm>, AppErro
     }
     Ok(None)
 }
-pub fn embedded_launch(html: &str, base: &Url) -> Option<Url> {
+/// Whether `element` sits inside the activity description, which teachers
+/// write and which may link unrelated recordings.
+fn in_description(element: ElementRef<'_>) -> bool {
+    element.ancestors().filter_map(ElementRef::wrap).any(|a| {
+        a.value().id() == Some("intro") || a.value().classes().any(|c| c == "activity-description")
+    })
+}
+/// The activity's own launch target: the main region's launch iframe, else
+/// its first allowed link. Description blocks are skipped.
+pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> {
     let doc = Html::parse_document(html);
+    let region = ["#region-main", "[role=main]", "main"]
+        .into_iter()
+        .find_map(|css| doc.select(&Selector::parse(css).ok()?).next())
+        .unwrap_or_else(|| doc.root_element());
     let allowed = |u: &Url| {
         u.origin() == base.origin()
             && (u.path() == "/mod/panoptocourseembed/view_content.php"
                 || u.path() == "/mod/lti/launch.php"
                     && u.query_value("id") == base.query_value("id"))
-            || panopto_origin(u)
+            || on_panopto(u, panopto)
                 && matches!(
                     u.path(),
                     "/Panopto/Pages/Embed.aspx" | "/Panopto/Pages/Sessions/List.aspx"
                 )
     };
-    for f in doc.select(&Selector::parse("iframe[src],a[href]").unwrap()) {
-        if let Some(u) = f
-            .value()
-            .attr("src")
-            .or_else(|| f.value().attr("href"))
-            .and_then(|v| base.join(v).ok())
-            .filter(allowed)
+    for (css, attr) in [("iframe[src]", "src"), ("a[href]", "href")] {
+        let selector = Selector::parse(css).ok()?;
+        if let Some(u) = region
+            .select(&selector)
+            .filter(|f| !in_description(*f))
+            .filter_map(|f| base.join(f.value().attr(attr)?).ok())
+            .find(allowed)
         {
             return Some(u);
         }
@@ -119,14 +136,14 @@ pub fn embedded_launch(html: &str, base: &Url) -> Option<Url> {
     }
     None
 }
-pub fn non_panopto_lti_form(html: &str, base: &Url) -> bool {
+pub fn non_panopto_lti_form(html: &str, base: &Url, panopto: &Origin) -> bool {
     let doc = Html::parse_document(html);
     doc.select(&Selector::parse("form[action]").unwrap())
         .any(|form| {
             let Some(u) = form.value().attr("action").and_then(|v| base.join(v).ok()) else {
                 return false;
             };
-            if u.origin() == base.origin() || panopto_origin(&u) {
+            if u.origin() == base.origin() || on_panopto(&u, panopto) {
                 return false;
             }
             let names = form
@@ -146,9 +163,7 @@ pub fn folder_id(url: &Url) -> Option<String> {
         .or_else(|| url.query_value("folderId"));
     let fragment = || {
         url.fragment()
-            .and_then(|fragment| {
-                Url::parse(&format!("https://kaist.ap.panopto.com/?{fragment}")).ok()
-            })
+            .and_then(|fragment| url.join(&format!("?{fragment}")).ok())
             .and_then(|u| u.query_value("folderID"))
     };
     let value = direct.or_else(fragment)?;
@@ -173,19 +188,22 @@ mod tests {
     #[test]
     fn recognition_uses_protocol_not_title() {
         let u = Url::parse("https://klms.kaist.ac.kr/mod/lti/view.php?id=1").unwrap();
+        let pano = Url::parse("https://kaist.ap.panopto.com/")
+            .unwrap()
+            .origin();
         assert!(
-            launch_form("<h1>Panopto Lecture</h1>", &u)
+            launch_form("<h1>Panopto Lecture</h1>", &u, &pano)
                 .unwrap()
                 .is_none()
         );
-        assert!(embedded_launch("<h1>Panopto Lecture</h1>", &u).is_none());
+        assert!(embedded_launch("<h1>Panopto Lecture</h1>", &u, &pano).is_none());
         assert!(launch_form(
             r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/lti/adv/platforms/test/login"><input name="iss" value="x"><input name="login_hint" value="x"><input name="target_link_uri" value="x"></form>"#,
-            &u
+            &u, &pano
         ).unwrap().is_some());
         assert!(launch_form(
             r#"<form method="post" action="https://evil.test/Panopto/LTI/LTI.aspx"><input name="id_token" value="secret"><input name="state" value="secret"></form>"#,
-            &u
+            &u, &pano
         ).unwrap().is_none());
     }
 }

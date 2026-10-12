@@ -11,8 +11,8 @@ spec      -> cli, output
 update    -> client, output
 corpus    -> client, course_pages, parse, models, date, url, reference, error
 course_pages -> client, parse, models, url
-auth      -> client (Panopto endpoints), http, parse, url, date, output, error
-client    -> auth (transient credential routing), http, parse, url, private_fs, error
+auth      -> http, parse, url, date, output, error
+client    -> auth (cookie jar only), http, parse, url, private_fs, error
 parse     -> models, reference, safe_url, date, url, error
 output    -> models, error
 ```
@@ -29,11 +29,11 @@ output    -> models, error
   bounds, and authentication checks. It also has a separate unauthenticated
   HTTPS client for release downloads used by `update`.
 - `client/panopto`: transient Panopto delivery/folder reads and credential-free
-  media transport, including bounded HLS retrieval and local ffmpeg remux. It
-  owns the authentication endpoint policy; `panopto_folder` holds typed folder
-  requests and completeness handling.
-- `auth/panopto`: fixed LTI handoffs using exact host/path policies and an
-  in-memory Panopto cookie jar; no persisted third-party credentials.
+  media transport, including bounded HLS retrieval and local ffmpeg remux.
+  `Origins` names the Panopto and media CDN origins every policy trusts (fixed
+  in production). `exchange` performs the fixed LTI handoffs with exact
+  host/path policies and an in-memory `auth::Jar`; no third-party credential
+  is persisted. `folder` holds typed folder requests and completeness handling.
 - `http`: the one blocking HTTP transport. It never follows redirects itself;
   each caller supplies its origin policy to `follow`.
 - `url`: a small `http`/`https` URL type with WHATWG-style normalization for a
@@ -47,8 +47,8 @@ output    -> models, error
   - `secret`: password storage backends (macOS keychain, Linux Secret Service,
     or an opt-in plaintext file).
   - `tests`: auth tests.
-  Serialized status models are secret-free. Transient Panopto credentials
-  remain in its private cookie/header routing state.
+  Serialized status models are secret-free. `auth` does no Panopto network
+  work; `client/panopto` borrows only its cookie jar.
 - `parse`: all KLMS/Moodle markup knowledge. Selectors live here and nowhere
   else. Submodules: `auth`, `calendar`, `courses`, `coursework`, `detail`
   and `shared`, plus static `native_video`, `embedded_video` and Panopto `video`

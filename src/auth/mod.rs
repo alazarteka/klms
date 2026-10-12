@@ -4,10 +4,12 @@
 
 mod cookies;
 mod flow;
-pub mod panopto;
 mod secret;
 mod store;
 mod transport;
+
+/// The in-memory cookie jar, shared with the Panopto exchange in `client`.
+pub(crate) use cookies::Jar;
 
 use std::io::IsTerminal;
 
