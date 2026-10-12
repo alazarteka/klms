@@ -25,12 +25,11 @@ fn lti13_forms_preserve_encoded_protocol_fields_without_execution() {
     );
     let response = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="id_token" value="synthetic.jwt"><input name="state" value="synthetic-state"></form>"#;
     assert_eq!(
-        launch_form(response, &klms(), &pano())
-            .unwrap()
-            .unwrap()
-            .fields
-            .len(),
-        2
+        launch_form(response, &klms(), &pano()).unwrap().unwrap().fields,
+        [
+            ("id_token".into(), "synthetic.jwt".into()),
+            ("state".into(), "synthetic-state".into())
+        ]
     );
 }
 

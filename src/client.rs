@@ -16,6 +16,12 @@ pub type Client = ureq::Agent;
 
 /// Redirects any KLMS or release request may follow.
 const MAX_REDIRECTS: usize = 5;
+/// Every Moodle AJAX method the client may call; there is no arbitrary POST.
+const AJAX_METHODS: [&str; 3] = [
+    "core_session_time_remaining",
+    "core_session_touch",
+    "core_course_get_enrolled_courses_by_timeline_classification",
+];
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct KlmsClient {
@@ -358,11 +364,6 @@ impl KlmsClient {
     }
 
     pub fn ajax(&self, sesskey: &str, method: &'static str) -> Result<serde_json::Value, AppError> {
-        if !["core_session_time_remaining", "core_session_touch"].contains(&method) {
-            return Err(AppError::internal(
-                "attempted a non-allowlisted Moodle AJAX method",
-            ));
-        }
         self.ajax_request(sesskey, method, serde_json::json!({}))
     }
 
@@ -389,6 +390,11 @@ impl KlmsClient {
         method: &'static str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, AppError> {
+        if !AJAX_METHODS.contains(&method) {
+            return Err(AppError::internal(
+                "attempted a non-allowlisted Moodle AJAX method",
+            ));
+        }
         let mut url = self
             .base_url
             .join("/lib/ajax/service.php")
@@ -693,6 +699,21 @@ mod tests {
 
     fn client(server: &Server, cookie: Option<&str>, timeout: u64) -> KlmsClient {
         KlmsClient::new(&server.url(), cookie, timeout).unwrap()
+    }
+
+    #[test]
+    fn ajax_refuses_methods_outside_the_allowlist_without_a_request() {
+        let server = serve(vec![]);
+        let client = client(&server, None, 5);
+        let error = client
+            .ajax_request("key", "core_user_update_users", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            error.message,
+            "attempted a non-allowlisted Moodle AJAX method"
+        );
+        assert!(server.recorded().is_empty());
     }
 
     #[test]

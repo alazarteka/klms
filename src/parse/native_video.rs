@@ -8,6 +8,8 @@ use crate::{error::AppError, url::Url};
 enum Token {
     Word(String),
     String(String),
+    /// A string with an escape this parser does not decode; never a usable source.
+    OpaqueString,
     Punct(char),
 }
 
@@ -45,31 +47,41 @@ fn tokens(input: &str) -> Result<Vec<Token>, AppError> {
         if c == '\'' || c == '"' {
             let mut value = String::new();
             let mut closed = false;
+            let mut opaque = false;
             while let Some(next) = chars.next() {
                 if next == c {
                     closed = true;
                     break;
                 }
-                if next == '\\' {
-                    let escaped = chars
-                        .next()
-                        .ok_or_else(|| AppError::shape("invalid player string"))?;
-                    match escaped {
-                        '\\' | '\'' | '"' | '/' => value.push(escaped),
-                        _ => {
-                            return Err(AppError::shape(
-                                "unsupported escape in native player source",
-                            ));
+                if next != '\\' {
+                    value.push(next);
+                    continue;
+                }
+                let escaped = chars
+                    .next()
+                    .ok_or_else(|| AppError::shape("invalid player string"))?;
+                match escaped {
+                    '\\' | '\'' | '"' | '/' => value.push(escaped),
+                    'n' => value.push('\n'),
+                    't' => value.push('\t'),
+                    'r' => value.push('\r'),
+                    'u' => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            Some(decoded) if hex.len() == 4 => value.push(decoded),
+                            _ => opaque = true,
                         }
                     }
-                } else {
-                    value.push(next);
+                    _ => opaque = true,
                 }
             }
             if !closed {
                 return Err(AppError::shape("unterminated native player string"));
             }
-            out.push(Token::String(value));
+            out.push(match opaque {
+                true => Token::OpaqueString,
+                false => Token::String(value),
+            });
         } else if c.is_ascii_alphanumeric() || matches!(c, '_' | '$') {
             let mut word = c.to_string();
             while chars
@@ -181,6 +193,16 @@ mod tests {
             r#"<script>flowplayer('#player', {{ clip: {{ sources: [{{token: 123, type: "video/mp4", /*src: "bad"*/ src: {src}}}] }} }});</script>"#
         )
     }
+    #[test]
+    fn standard_escapes_in_other_fields_do_not_fail_the_parse() {
+        let page_html = r#"<script>flowplayer('#p', { clip: { title: "line\nbreak\t\u00e9 é", sources: [{type: "video/mp4", note: "x\qy", src: "\/vod1\/a.mp4"}] } });</script>"#;
+        let urls = native_sources(page_html, &page()).unwrap();
+        assert_eq!(urls[0].path(), "/vod1/a.mp4");
+        let opaque_src = page_html.replace(r#"src: "\/vod1\/a.mp4""#, r#"src: "\x41""#);
+        let error = native_sources(&opaque_src, &page()).unwrap_err();
+        assert_eq!(error.message, "native source is not a static string");
+    }
+
     #[test]
     fn static_sources_ignore_comments_and_reject_dynamic_or_untrusted_sources() {
         assert_eq!(

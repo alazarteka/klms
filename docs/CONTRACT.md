@@ -26,11 +26,16 @@ complete global sync). A scoped sync never claims global coverage.
 spring|summer|fall|winter` filters that discovery by course metadata. These reads
 never change dashboard preferences. `meta.complete` requires exhaustion of the
 upstream pagination as well as no output truncation. Unknown terms remain null
-and are excluded by term filters. `term` retains the `YEAR-N` representation,
+and are excluded by term filters, with a warning counting them (`--all` shows
+them). `term` retains the `YEAR-N` representation,
 where course-code suffixes 1/2/3/4 mean spring/summer/fall/winter; dashboard
 selector values 10/11/20/21 are a different encoding. Media paths are not term
 evidence. Printed historical `course:ID` refs work with all course resources.
 Library sync retains its dashboard default and never crawls history implicitly.
+
+Change: `term` is now derived only from a trailing `_YYYY_N` shortname suffix
+with N in 1-4. A code such as `training_2024_20` previously yielded a term and
+now yields `null`.
 
 ## Exit codes
 

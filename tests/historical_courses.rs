@@ -45,6 +45,7 @@ fn historical_discovery_pages_deduplicates_and_keeps_resource_refs_usable() {
     assert_eq!(result["meta"]["complete"], true);
     assert_eq!(result["meta"]["returned"], 3);
     assert_eq!(result["data"][2]["term"], Value::Null);
+    assert_eq!(result["warnings"], json!([]));
     let recorded = server.recorded();
     let calls: Vec<_> = recorded
         .iter()
@@ -77,6 +78,12 @@ fn term_filters_match_metadata_and_empty_terms_are_complete() {
         let result = Env::at(&server).ok(&format!("courses list {args}"));
         assert_eq!(result["meta"]["returned"], expected);
         assert_eq!(result["meta"]["complete"], true);
+        assert_eq!(
+            result["warnings"],
+            json!([
+                "1 course(s) were excluded because their term is unknown; use --all to see them"
+            ])
+        );
     }
     let server = historical_server();
     let matches = Env::at(&server).ok("courses resolve Compilers --all");
