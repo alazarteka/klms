@@ -409,13 +409,18 @@ mod tests {
         assert_eq!(rows[1].term.as_deref(), Some("2024-2"));
         assert!(rows[2].term.is_none() && rows[3].term.is_none());
         assert_eq!(rows[0].reference, "course:42");
-        assert!(super::enrolled_courses(&serde_json::json!({"courses":[]}), &base()).is_err());
-        assert!(
-            super::enrolled_courses(
-                &serde_json::json!({"courses":[{"id":"oops"}],"nextoffset":1}),
-                &base()
-            )
-            .is_err()
+        let empty = super::enrolled_courses(&serde_json::json!({"courses":[]}), &base());
+        assert_eq!(
+            empty.unwrap_err().message,
+            "enrolled courses response has no numeric nextoffset"
+        );
+        let bad_id = super::enrolled_courses(
+            &serde_json::json!({"courses":[{"id":"oops"}],"nextoffset":1}),
+            &base(),
+        );
+        assert_eq!(
+            bad_id.unwrap_err().message,
+            "enrolled course has no positive numeric id"
         );
     }
 

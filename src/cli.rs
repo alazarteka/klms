@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const LIST_HELP: &str = "Default scope: the selected dashboard term. --all and --year/--semester use read-only enrolled-course discovery without changing the dashboard. Unknown terms are retained by --all and excluded by term filters.\n\nExamples:\n  klms courses list\n  klms --json courses list --all\n  klms courses list --year 2024 --semester fall";
+const RESOLVE_HELP: &str = "Default scope: the selected dashboard term. --all and --year/--semester use read-only enrolled-course discovery without changing the dashboard. Unknown terms are retained by --all and excluded by term filters.\n\nExamples:\n  klms courses resolve CS.30200\n  klms --json courses resolve 'machine learning' --limit 5\n  klms courses resolve CS.30200 --all";
 const TOP_HELP: &str = "Workflow:
   klms auth login                                  # interactive; passwords are never flags
   klms --json courses list                         # get course refs
@@ -603,9 +604,7 @@ pub enum CoursesCommand {
     #[command(after_help = LIST_HELP)]
     List(CourseListArgs),
     /// Return matching courses without guessing.
-    #[command(
-        after_help = "Examples:\n  klms courses resolve CS.30200\n  klms --json courses resolve 'machine learning' --limit 5"
-    )]
+    #[command(after_help = RESOLVE_HELP)]
     Resolve {
         /// Title, code, or fragment to match; returns every match.
         #[arg(value_name = "QUERY", value_parser = nonempty_operand)]

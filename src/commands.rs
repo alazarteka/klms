@@ -196,22 +196,9 @@ impl Ctx<'_> {
                 "upcoming",
             ),
             Command::Courses { command } => match command {
-                CoursesCommand::List(list) => listing(
-                    "courses.list",
-                    self.scoped_courses(list)?,
-                    list.list.limit,
-                    true,
-                    courses_table,
-                ),
+                CoursesCommand::List(list) => self.course_listing("courses.list", None, list),
                 CoursesCommand::Resolve { query, list } => {
-                    let matches = matching_courses(self.scoped_courses(list)?, query);
-                    listing(
-                        "courses.resolve",
-                        matches,
-                        list.list.limit,
-                        true,
-                        courses_table,
-                    )
+                    self.course_listing("courses.resolve", Some(query), list)
                 }
                 CoursesCommand::Show { course } => {
                     let resolved = self.resolve_course(course)?;
@@ -468,9 +455,30 @@ impl Ctx<'_> {
         Ok(parse::dashboard(&self.client.get("/my/")?.text, self.base)?.courses)
     }
 
-    fn scoped_courses(&self, args: &CourseListArgs) -> Result<Vec<Course>, AppError> {
+    fn course_listing(
+        &self,
+        command: &'static str,
+        query: Option<&str>,
+        args: &CourseListArgs,
+    ) -> Result<CommandResult, AppError> {
+        let (courses, unknown_term) = self.scoped_courses(args)?;
+        let courses = match query {
+            Some(query) => matching_courses(courses, query),
+            None => courses,
+        };
+        let mut result = listing(command, courses, args.list.limit, true, courses_table)?;
+        if unknown_term > 0 {
+            result.warnings.push(format!(
+                "{unknown_term} course(s) were excluded because their term is unknown; use --all to see them"
+            ));
+        }
+        Ok(result)
+    }
+
+    /// The scoped courses, and how many term filtering dropped for an unknown term.
+    fn scoped_courses(&self, args: &CourseListArgs) -> Result<(Vec<Course>, usize), AppError> {
         if !args.all && args.year.is_none() {
-            return self.courses();
+            return Ok((self.courses()?, 0));
         }
         let key = parse::sesskey(&self.client.get("/my/")?.text)?;
         let mut courses = Vec::new();
@@ -501,11 +509,13 @@ impl Ctx<'_> {
             }
             offset = next;
         }
+        let mut unknown_term = 0;
         if let Some((year, semester)) = args.year.zip(args.semester) {
             let term = format!("{year}-{}", semester.course_suffix());
+            unknown_term = courses.iter().filter(|c| c.term.is_none()).count();
             courses.retain(|course| course.term.as_deref() == Some(term.as_str()));
         }
-        Ok(courses)
+        Ok((courses, unknown_term))
     }
 
     fn resolve_course(&self, query: &str) -> Result<Course, AppError> {
