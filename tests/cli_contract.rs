@@ -694,3 +694,118 @@ fn spec_and_completions_describe_the_command_surface() {
     assert!(zsh["script"].as_str().unwrap().contains("#compdef klms"));
     assert!(!env.run("completions tcsh").status.success());
 }
+
+#[test]
+fn course_listings_read_every_week_of_the_paged_week_format() {
+    // The default page of KLMS's paged week format shows only the current week; the picker's
+    // "All" choice (dayselect 0) is served at section=0. Every course-page command must merge it.
+    let section = |week: u32, modules: &str| {
+        format!(
+            "<li class='section'><h3 class='sectionname'>week {week}</h3><ul>{modules}</ul></li>"
+        )
+    };
+    let module = |kind: &str, id: u32, name: &str| {
+        format!(
+            "<li class='activity modtype_{kind}' id='module-{id}'><a href='/mod/{kind}/view.php?id={id}'>\
+             <span class='instancename'>{name}</span></a></li>"
+        )
+    };
+    let current = format!(
+        "<a href='javascript:M.course.format.dayselect(0, 42, 0)'>All</a><main class='course-content'>{}</main>",
+        section(5, &module("resource", 7, "Week 5 slides"))
+    );
+    let all = format!(
+        "<main class='course-content'>{}{}</main>",
+        section(
+            1,
+            &(module("resource", 3, "Week 1 slides") + &module("vod", 4, "Week 1 lecture"))
+        ),
+        section(5, &module("resource", 7, "Week 5 slides"))
+    );
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/course/view.php?id=42" => Response::html(current.as_bytes()),
+        "/course/view.php?id=42&section=0" => Response::html(all.as_bytes()),
+        other => panic!("unexpected request: {other}"),
+    });
+    let env = Env::at(&server);
+    let refs = |args: &str| -> Vec<String> {
+        let value = env.ok(args);
+        assert_eq!(value["meta"]["complete"], true, "{args}");
+        let rows = value["data"].as_array().unwrap();
+        rows.iter()
+            .map(|row| row["ref"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Rows of the default page come first, then the weeks only the "All" view lists, once each.
+    assert_eq!(
+        refs("activities list --course 42"),
+        ["file:7", "file:3", "vod:4"]
+    );
+    assert_eq!(
+        refs("activities list --course 42 --week 1"),
+        ["file:3", "vod:4"]
+    );
+    assert_eq!(refs("activities list --course 42 --week 5"), ["file:7"]);
+    assert_eq!(refs("files list --course 42"), ["file:7", "file:3"]);
+    assert_eq!(refs("videos list --course 42"), ["vod:4"]);
+    assert!(server.requests().chunks(2).all(|pair| pair
+        == [
+            "GET /course/view.php?id=42 HTTP/1.1",
+            "GET /course/view.php?id=42&section=0 HTTP/1.1"
+        ]));
+
+    // Other course formats stay a single request.
+    let plain = format!(
+        "<main class='course-content'>{}</main>",
+        module("resource", 7, "Slides")
+    );
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/course/view.php?id=42" => Response::html(plain.as_bytes()),
+        other => panic!("unexpected request: {other}"),
+    });
+    assert_eq!(
+        Env::at(&server).data("files list --course 42")[0]["ref"],
+        "file:7"
+    );
+    assert_eq!(server.requests(), ["GET /course/view.php?id=42 HTTP/1.1"]);
+}
+
+#[test]
+fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
+    // An event KLMS lists without any time (e.g. a quiz with no close date) is not an error:
+    // the dated events are returned, the undated one is counted in a warning, and `calendar list`
+    // still shows it.
+    let dated = include_str!("fixtures/localized/calendar.html")
+        .replace("&amp;time=1899989400", "")
+        .replace("내일", "오늘");
+    let page = dated.replace(
+        "</main>",
+        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div></main>",
+    );
+    let server = Server::new(move |_| Response::html(page.as_bytes()));
+    let env = Env::at(&server);
+    let warning = "1 calendar event(s) have no date and are not shown; see `klms calendar list`";
+    for command in ["today", "upcoming"] {
+        let value = env.ok(command);
+        assert_eq!(value["warnings"], json!([warning]), "{command}");
+        assert_eq!(value["meta"]["complete"], true, "{command}");
+        assert_eq!(value["data"].as_array().unwrap().len(), 1, "{command}");
+        assert_eq!(value["data"][0]["ref"], "assign:7");
+    }
+    let listed = env.ok("calendar list");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["data"][1]["ref"], "quiz:9");
+    assert_eq!(listed["data"][1]["starts_at"], Value::Null);
+
+    // A time that is present but unreadable still fails the agenda rather than hiding the event.
+    let page = dated.replace(
+        "</main>",
+        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Quiz</a><time>sometime</time></div></main>",
+    );
+    let server = Server::new(move |_| Response::html(page.as_bytes()));
+    let (code, error) = Env::at(&server).fail("today");
+    assert_eq!(
+        (code, &error["code"]),
+        (30, &json!("UPSTREAM_SHAPE_CHANGED"))
+    );
+}

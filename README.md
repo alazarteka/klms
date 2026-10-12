@@ -41,6 +41,12 @@ klms files download file:1205160 --out ./notes.pdf
 klms library sync --notices --files && klms library search "compiler"
 ```
 
+Coursework indexes and grade/attendance report headers recognize English and
+Korean KLMS labels. Calendar cards prefer structural timestamps and their event
+heading, with English/Korean date text as a fallback in Asia/Seoul. Other text
+locales are not verified; an unrecognized dated event fails agenda generation
+rather than being silently omitted.
+
 ## Upgrading
 
 `klms update --check` reports the latest stable release; `klms update` installs
