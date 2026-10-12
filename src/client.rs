@@ -388,6 +388,32 @@ impl KlmsClient {
                 "attempted a non-allowlisted Moodle AJAX method",
             ));
         }
+        self.ajax_request(sesskey, method, serde_json::json!({}))
+    }
+
+    /// Fixed read-only Moodle operation, with bounded page arguments.
+    pub fn enrolled_courses(
+        &self,
+        sesskey: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<serde_json::Value, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AppError::internal("invalid enrolled-course page size"));
+        }
+        self.ajax_request(
+            sesskey,
+            "core_course_get_enrolled_courses_by_timeline_classification",
+            serde_json::json!({"classification":"all", "limit":limit, "offset":offset, "sort":"fullname"}),
+        )
+    }
+
+    fn ajax_request(
+        &self,
+        sesskey: &str,
+        method: &'static str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
         let mut url = self
             .base_url
             .join("/lib/ajax/service.php")
@@ -395,7 +421,7 @@ impl KlmsClient {
         url.query_pairs_mut()
             .append_pair("sesskey", sesskey)
             .append_pair("info", method);
-        let body = serde_json::json!([{"index": 0, "methodname": method, "args": {}}]);
+        let body = serde_json::json!([{"index": 0, "methodname": method, "args": args}]);
         let payload = Payload {
             content_type: "application/json",
             bytes: body.to_string().into_bytes(),

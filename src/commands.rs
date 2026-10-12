@@ -8,8 +8,8 @@ use crate::{
     auth,
     cli::{
         ActivitiesCommand, AuthCommand, BoardsCommand, CalendarCommand, Cli, Command,
-        CourseShowCommand, CoursesCommand, FilesCommand, LibraryCommand, ModuleCommand,
-        NoticesCommand, RequestCommand,
+        CourseListArgs, CourseShowCommand, CoursesCommand, FilesCommand, LibraryCommand,
+        ModuleCommand, NoticesCommand, RequestCommand,
     },
     client::{KlmsClient, validate_base_url},
     course_pages, date,
@@ -196,14 +196,20 @@ impl Ctx<'_> {
             Command::Courses { command } => match command {
                 CoursesCommand::List(list) => listing(
                     "courses.list",
-                    self.courses()?,
-                    list.limit,
+                    self.scoped_courses(list)?,
+                    list.list.limit,
                     true,
                     courses_table,
                 ),
                 CoursesCommand::Resolve { query, list } => {
-                    let matches = matching_courses(self.courses()?, query);
-                    listing("courses.resolve", matches, list.limit, true, courses_table)
+                    let matches = matching_courses(self.scoped_courses(list)?, query);
+                    listing(
+                        "courses.resolve",
+                        matches,
+                        list.list.limit,
+                        true,
+                        courses_table,
+                    )
                 }
                 CoursesCommand::Show { course } => {
                     let resolved = self.resolve_course(course)?;
@@ -467,6 +473,46 @@ impl Ctx<'_> {
 
     fn courses(&self) -> Result<Vec<Course>, AppError> {
         Ok(parse::dashboard(&self.client.get("/my/")?.text, self.base)?.courses)
+    }
+
+    fn scoped_courses(&self, args: &CourseListArgs) -> Result<Vec<Course>, AppError> {
+        if !args.all && args.year.is_none() {
+            return self.courses();
+        }
+        let key = parse::sesskey(&self.client.get("/my/")?.text)?;
+        let mut courses = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut offset = 0;
+        loop {
+            let (page, next) = parse::enrolled_courses(
+                &self.client.enrolled_courses(&key, offset, 100)?,
+                self.base,
+            )?;
+            if page.is_empty() {
+                break;
+            }
+            if next <= offset {
+                return Err(AppError::shape(
+                    "enrolled-course pagination did not advance",
+                ));
+            }
+            for course in page {
+                if seen.insert(course.id.clone()) {
+                    courses.push(course);
+                }
+            }
+            if next > 100_000 || courses.len() > 10_000 {
+                return Err(AppError::limit(
+                    "enrolled-course discovery exceeded its bounded pagination limit",
+                ));
+            }
+            offset = next;
+        }
+        if let Some((year, semester)) = args.year.zip(args.semester) {
+            let term = format!("{year}-{}", semester.course_suffix());
+            courses.retain(|course| course.term.as_deref() == Some(term.as_str()));
+        }
+        Ok(courses)
     }
 
     fn resolve_course(&self, query: &str) -> Result<Course, AppError> {

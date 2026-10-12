@@ -44,6 +44,53 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
     })
 }
 
+/// Parse only Moodle's documented enrolled-course metadata, never course images/media paths.
+pub fn enrolled_courses(
+    value: &serde_json::Value,
+    base: &Url,
+) -> Result<(Vec<Course>, usize), AppError> {
+    let records = value
+        .get("courses")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AppError::shape("enrolled courses response has no courses array"))?;
+    let next = value
+        .get("nextoffset")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| AppError::shape("enrolled courses response has no numeric nextoffset"))?;
+    let mut rows = Vec::new();
+    for record in records {
+        let id = record
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|id| *id > 0)
+            .map(|id| id.to_string())
+            .ok_or_else(|| AppError::shape("enrolled course has no positive numeric id"))?;
+        let title = record
+            .get("fullname")
+            .and_then(serde_json::Value::as_str)
+            .filter(|title| !title.trim().is_empty())
+            .ok_or_else(|| AppError::shape("enrolled course has no title"))?;
+        let code = record
+            .get("shortname")
+            .and_then(serde_json::Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .map(str::to_owned);
+        rows.push(Course {
+            reference: format!("course:{id}"),
+            url: base
+                .join(&format!("/course/view.php?id={id}"))
+                .expect("built-in course path")
+                .into(),
+            id,
+            title: title.to_owned(),
+            term: code.as_deref().and_then(term_from_code),
+            code,
+        });
+    }
+    Ok((rows, next))
+}
+
 pub fn course_detail(html: &str, base_url: &Url, mut course: Course) -> CourseDetail {
     let document = Html::parse_document(html);
     if let Some(title) = first_text(
@@ -268,7 +315,7 @@ fn term_from_code(code: &str) -> Option<String> {
     let year = parts.next()?;
     (year.len() == 4
         && year.chars().all(|c| c.is_ascii_digit())
-        && semester.chars().all(|c| c.is_ascii_digit()))
+        && matches!(semester, "1" | "2" | "3" | "4"))
     .then(|| format!("{year}-{semester}"))
 }
 
@@ -353,6 +400,30 @@ mod tests {
 
     fn base() -> Url {
         Url::parse(BASE).unwrap()
+    }
+
+    #[test]
+    fn historical_terms_use_shortnames_and_preserve_unknowns() {
+        let data = serde_json::json!({"courses": [
+            {"id":42,"fullname":"Compilers","shortname":"CS350_2024_3","courseimage":"/2026/fall/image.png"},
+            {"id":43,"fullname":"Summer","shortname":"CS350_2024_2"},
+            {"id":44,"fullname":"Unknown","shortname":"training_2024_20"},
+            {"id":45,"fullname":"Unknown","courseimage":"/2024/1/image.png"}
+        ],"nextoffset":4});
+        let (rows, next) = super::enrolled_courses(&data, &base()).unwrap();
+        assert_eq!(next, 4);
+        assert_eq!(rows[0].term.as_deref(), Some("2024-3"));
+        assert_eq!(rows[1].term.as_deref(), Some("2024-2"));
+        assert!(rows[2].term.is_none() && rows[3].term.is_none());
+        assert_eq!(rows[0].reference, "course:42");
+        assert!(super::enrolled_courses(&serde_json::json!({"courses":[]}), &base()).is_err());
+        assert!(
+            super::enrolled_courses(
+                &serde_json::json!({"courses":[{"id":"oops"}],"nextoffset":1}),
+                &base()
+            )
+            .is_err()
+        );
     }
 
     #[test]

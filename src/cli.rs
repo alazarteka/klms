@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-const LIST_HELP: &str = "Examples:\n  klms courses list\n  klms --json courses list";
+const LIST_HELP: &str = "Default scope: the selected dashboard term. --all and --year/--semester use read-only enrolled-course discovery without changing the dashboard. Unknown terms are retained by --all and excluded by term filters.\n\nExamples:\n  klms courses list\n  klms --json courses list --all\n  klms courses list --year 2024 --semester fall";
 const TOP_HELP: &str = "Workflow:
   klms auth login                                  # interactive; passwords are never flags
   klms --json courses list                         # get course refs
@@ -552,11 +552,45 @@ pub struct AuthLoginArgs {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Semester {
+    Spring,
+    Summer,
+    Fall,
+    Winter,
+}
+
+impl Semester {
+    pub fn course_suffix(self) -> &'static str {
+        match self {
+            Self::Spring => "1",
+            Self::Summer => "2",
+            Self::Fall => "3",
+            Self::Winter => "4",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct CourseListArgs {
+    #[command(flatten)]
+    pub list: ListArgs,
+    /// Include all enrolled courses, including past semesters; never changes the dashboard.
+    #[arg(long, conflicts_with_all = ["year", "semester"])]
+    pub all: bool,
+    /// Filter all enrolled courses to this year; requires --semester.
+    #[arg(long, requires = "semester", value_parser = clap::value_parser!(u32).range(1900..=9999))]
+    pub year: Option<u32>,
+    /// Filter by the term encoded in course metadata; unknown terms are excluded.
+    #[arg(long, requires = "year", value_enum)]
+    pub semester: Option<Semester>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum CoursesCommand {
-    /// List courses visible on the selected dashboard term.
+    /// List dashboard courses, or explicitly discover historical enrolled courses.
     #[command(after_help = LIST_HELP)]
-    List(ListArgs),
+    List(CourseListArgs),
     /// Return matching courses without guessing.
     #[command(
         after_help = "Examples:\n  klms courses resolve CS.30200\n  klms --json courses resolve 'machine learning' --limit 5"
@@ -566,7 +600,7 @@ pub enum CoursesCommand {
         #[arg(value_name = "QUERY", value_parser = nonempty_operand)]
         query: String,
         #[command(flatten)]
-        list: ListArgs,
+        list: CourseListArgs,
     },
     /// Show one course by numeric id, code, or unambiguous title fragment.
     #[command(
