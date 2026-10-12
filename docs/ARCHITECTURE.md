@@ -68,7 +68,7 @@ output    -> models, error
   Local library commands load no auth.
 - `update`: stable release selection, checksum and candidate version checks,
   the single executable-replacement path (`__install`, shared with
-  `scripts/install.sh`), and removal of the legacy managed skill. Tests are in
+  `scripts/install.sh`), and the deprecation notice for a leftover legacy skill (reported, never removed). Tests are in
   `update/tests.rs`.
 
 ## Boundaries

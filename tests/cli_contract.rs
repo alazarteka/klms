@@ -229,30 +229,90 @@ fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
 }
 
 #[test]
-fn agenda_kind_filters_rows_and_rejects_unknown_kinds() {
+fn agenda_kind_filter_selects_rows_and_warns_when_a_kind_matches_nothing() {
+    // The assignment card plus a site event (no module link) on the same day.
     let page = include_str!("fixtures/localized/calendar.html")
         .replace("&amp;time=1899989400", "")
         .replace("내일", "오늘");
+    let card = &page[page.find("<div class=\"event").unwrap()..page.find("</main>").unwrap()];
+    let event = card
+        .replace(
+            "/mod/assign/view.php?id=7&amp;action=editsubmission",
+            "/calendar/event.php?id=99",
+        )
+        .replace("Reading response is due", "Department seminar");
+    let page = page.replace("</main>", &format!("{event}</main>"));
     let server = Server::new(move |_| Response::html(page.as_bytes()));
     let env = Env::at(&server);
+    let all = env.ok("today");
+    let today = all["data"][0]["starts_at"].as_str().unwrap()[..10].to_owned();
+    let kinds: Vec<_> = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["kind"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("assign"), json!("event")]);
     for command in ["today", "upcoming"] {
-        let rows = |kinds: &str| {
-            let value = env.ok(&format!("{command}{kinds}"));
-            value["data"].as_array().unwrap().len()
+        let span = match command {
+            "today" => format!("for {today}"),
+            _ => format!("from {today} through "),
         };
-        assert_eq!(rows(""), 1, "{command}");
-        assert_eq!(rows(" --kind assign"), 1);
-        assert_eq!(rows(" --kind ASSIGN"), 1);
-        assert_eq!(rows(" --kind quiz,assign"), 1);
-        assert_eq!(rows(" --kind quiz --kind assign"), 1);
-        assert_eq!(rows(" --kind quiz"), 0);
-        assert_eq!(rows(" --kind event,quiz"), 0);
+        let run = |kinds: &str| {
+            let value = env.ok(&format!("{command}{kinds}"));
+            assert_eq!(value["meta"]["complete"], true);
+            let titles: Vec<_> = (value["data"].as_array().unwrap().iter())
+                .map(|row| row["title"].as_str().unwrap().to_owned())
+                .collect();
+            let warnings: Vec<_> = (value["warnings"].as_array().unwrap().iter())
+                .map(|warning| warning.as_str().unwrap().to_owned())
+                .collect();
+            (titles, warnings)
+        };
+        let (assign, seminar) = ("Reading response is due", "Department seminar");
+        let quiet: &[String] = &[];
+        assert_eq!(
+            run(""),
+            (vec![assign.into(), seminar.into()], quiet.to_vec())
+        );
+        for kinds in [" --kind assign", " --kind ASSIGN", " --kind Assign,assign"] {
+            assert_eq!(run(kinds), (vec![assign.into()], quiet.to_vec()), "{kinds}");
+        }
+        assert_eq!(run(" --kind EVENT"), (vec![seminar.into()], quiet.to_vec()));
 
-        // Kinds are open-ended Moodle module names; an unlisted one just matches nothing.
-        assert_eq!(rows(" --kind zoom"), 0);
+        // A kind that matches nothing (a typo, or simply none due) says so and
+        // lists what was there, whether or not another kind matched.
+        for (kinds, titles, missing) in [
+            (" --kind quiz,assign", vec![assign.to_owned()], "quiz"),
+            (" --kind quiz --kind assignment", vec![], "assignment, quiz"),
+            (" --kind zoom", vec![], "zoom"),
+        ] {
+            let (rows, warnings) = run(kinds);
+            assert_eq!(rows, titles, "{kinds}");
+            let [warning] = &warnings[..] else {
+                panic!("{kinds}: {warnings:?}")
+            };
+            let head = format!("--kind {missing} matched no calendar row {span}");
+            assert!(warning.starts_with(&head), "{warning}");
+            assert!(
+                warning.ends_with(" (kinds present: assign, event)"),
+                "{warning}"
+            );
+        }
         let (exit, error) = env.fail(&format!("{command} --kind 'a b'"));
         assert_eq!((exit, &error["code"]), (2, &json!("USAGE")));
     }
+    let human = env.run("today --kind quiz");
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap().trim(),
+        format!("Nothing of kind quiz scheduled for {today}.")
+    );
+    assert_eq!(
+        String::from_utf8(human.stderr).unwrap().trim(),
+        format!(
+            "warning: --kind quiz matched no calendar row for {today} (kinds present: assign, event)"
+        )
+    );
 }
 
 #[test]
@@ -556,6 +616,7 @@ fn help_is_the_agent_manual() {
         "Exit codes:",
         "54 CURATION_CONFLICT",
         "12 CODE_REQUIRED",
+        "`auth login` may also give CODE_INCORRECT or CODE_EXPIRED",
         "board-post:BOARD:POST",
         "ok:true",
         "read-only",
@@ -788,4 +849,119 @@ fn native_viewer_redirects_cannot_change_the_recording_identity() {
     assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED");
     assert!(error["message"].as_str().unwrap().contains("identity"));
     assert!(!out.exists());
+}
+
+#[test]
+fn course_listings_read_every_week_of_the_paged_week_format() {
+    // The default page of KLMS's paged week format shows only the current week; the picker's
+    // "All" choice (dayselect 0) is served at section=0. Every course-page command must merge it.
+    let section = |week: u32, modules: &str| {
+        format!(
+            "<li class='section'><h3 class='sectionname'>week {week}</h3><ul>{modules}</ul></li>"
+        )
+    };
+    let module = |kind: &str, id: u32, name: &str| {
+        format!(
+            "<li class='activity modtype_{kind}' id='module-{id}'><a href='/mod/{kind}/view.php?id={id}'>\
+             <span class='instancename'>{name}</span></a></li>"
+        )
+    };
+    let current = format!(
+        "<a href='javascript:M.course.format.dayselect(0, 42, 0)'>All</a><main class='course-content'>{}</main>",
+        section(5, &module("resource", 7, "Week 5 slides"))
+    );
+    let all = format!(
+        "<main class='course-content'>{}{}</main>",
+        section(
+            1,
+            &(module("resource", 3, "Week 1 slides") + &module("vod", 4, "Week 1 lecture"))
+        ),
+        section(5, &module("resource", 7, "Week 5 slides"))
+    );
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/course/view.php?id=42" => Response::html(current.as_bytes()),
+        "/course/view.php?id=42&section=0" => Response::html(all.as_bytes()),
+        other => panic!("unexpected request: {other}"),
+    });
+    let env = Env::at(&server);
+    let refs = |args: &str| -> Vec<String> {
+        let value = env.ok(args);
+        assert_eq!(value["meta"]["complete"], true, "{args}");
+        let rows = value["data"].as_array().unwrap();
+        rows.iter()
+            .map(|row| row["ref"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Rows of the default page come first, then the weeks only the "All" view lists, once each.
+    assert_eq!(
+        refs("activities list --course 42"),
+        ["file:7", "file:3", "vod:4"]
+    );
+    assert_eq!(
+        refs("activities list --course 42 --week 1"),
+        ["file:3", "vod:4"]
+    );
+    assert_eq!(refs("activities list --course 42 --week 5"), ["file:7"]);
+    assert_eq!(refs("files list --course 42"), ["file:7", "file:3"]);
+    assert_eq!(refs("videos list --course 42"), ["vod:4"]);
+    assert!(server.requests().chunks(2).all(|pair| pair
+        == [
+            "GET /course/view.php?id=42 HTTP/1.1",
+            "GET /course/view.php?id=42&section=0 HTTP/1.1"
+        ]));
+
+    // Other course formats stay a single request.
+    let plain = format!(
+        "<main class='course-content'>{}</main>",
+        module("resource", 7, "Slides")
+    );
+    let server = Server::new(move |request| match request.target.as_str() {
+        "/course/view.php?id=42" => Response::html(plain.as_bytes()),
+        other => panic!("unexpected request: {other}"),
+    });
+    assert_eq!(
+        Env::at(&server).data("files list --course 42")[0]["ref"],
+        "file:7"
+    );
+    assert_eq!(server.requests(), ["GET /course/view.php?id=42 HTTP/1.1"]);
+}
+
+#[test]
+fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
+    // An event KLMS lists without any time (e.g. a quiz with no close date) is not an error:
+    // the dated events are returned, the undated one is counted in a warning, and `calendar list`
+    // still shows it.
+    let dated = include_str!("fixtures/localized/calendar.html")
+        .replace("&amp;time=1899989400", "")
+        .replace("내일", "오늘");
+    let page = dated.replace(
+        "</main>",
+        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div></main>",
+    );
+    let server = Server::new(move |_| Response::html(page.as_bytes()));
+    let env = Env::at(&server);
+    let warning = "1 calendar event(s) have no date and are not shown; see `klms calendar list`";
+    for command in ["today", "upcoming"] {
+        let value = env.ok(command);
+        assert_eq!(value["warnings"], json!([warning]), "{command}");
+        assert_eq!(value["meta"]["complete"], true, "{command}");
+        assert_eq!(value["data"].as_array().unwrap().len(), 1, "{command}");
+        assert_eq!(value["data"][0]["ref"], "assign:7");
+    }
+    let listed = env.ok("calendar list");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["data"][1]["ref"], "quiz:9");
+    assert_eq!(listed["data"][1]["starts_at"], Value::Null);
+
+    // A time that is present but unreadable still fails the agenda rather than hiding the event.
+    let page = dated.replace(
+        "</main>",
+        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Quiz</a><time>sometime</time></div></main>",
+    );
+    let server = Server::new(move |_| Response::html(page.as_bytes()));
+    let (code, error) = Env::at(&server).fail("today");
+    assert_eq!(
+        (code, &error["code"]),
+        (30, &json!("UPSTREAM_SHAPE_CHANGED"))
+    );
 }

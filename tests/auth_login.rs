@@ -90,12 +90,16 @@ fn help_documents_the_login_flags_and_the_parser_rejects_bad_combinations() {
         "Signing in as",
         "12 CODE_REQUIRED",
         "login.json",
+        "(with --code, the pending login is consumed)",
+        "NETWORK_ERROR (exit 20) keeps it, so retry the same --code",
+        "over 1024 bytes are not remembered",
     ] {
         assert!(help.contains(needle), "missing {needle:?} in:\n{help}");
     }
     assert!(!help.contains("--password") && !help.contains("--otp"));
     let forget = String::from_utf8(home.run(&["auth", "forget", "--help"]).stdout).unwrap();
     assert!(forget.contains("plaintext credentials file") && forget.contains("keychain"));
+    assert!(forget.contains("a warning says the password may remain there"));
 
     for args in [
         &["--insecure-storage"][..],
@@ -165,6 +169,55 @@ fn logout_keeps_the_remembered_login_and_forget_removes_it() {
     let again = json(&home.run(&["--json", "auth", "forget"]).stdout);
     assert_eq!(again["data"]["login_removed"], false);
     assert_eq!(again["data"]["password_removed"], false);
+}
+
+#[test]
+fn forget_recovers_from_a_backend_it_cannot_open() {
+    // (recorded backend, the reason the backend error gives)
+    for (backend, reason) in [
+        (
+            "bogus",
+            r#"unknown password backend "bogus" in remembered login"#,
+        ),
+        (
+            "secret-service",
+            "the stored password lives in the Secret Service but `secret-tool` is not installed",
+        ),
+    ] {
+        let home = Home::new();
+        home.seed(true);
+        let login = fs::read_to_string(home.config().join("login.json")).unwrap();
+        let login = login.replace("plaintext-file", backend);
+        fs::write(home.config().join("login.json"), login).unwrap();
+        fs::create_dir_all(home.state()).unwrap();
+        fs::write(home.state().join("pending-login.json"), "{}").unwrap();
+
+        let forget = home.run(&["--json", "auth", "forget"]);
+        assert_eq!(
+            forget.status.code(),
+            Some(0),
+            "{backend}: {:?}",
+            forget.stderr
+        );
+        let value = json(&forget.stdout);
+        assert_eq!(value["data"]["login_removed"], true, "{backend}");
+        assert_eq!(value["data"]["password_removed"], false, "{backend}");
+        assert_eq!(value["data"]["password_backend"], backend);
+        assert_eq!(value["data"]["pending_removed"], true, "{backend}");
+        assert_eq!(
+            value["warnings"],
+            serde_json::json!([format!(
+                "could not remove the stored password of student from the {backend} backend ({reason}); it may remain there"
+            )])
+        );
+        for path in [
+            home.config().join("login.json"),
+            home.config().join("credentials.json"),
+            home.state().join("pending-login.json"),
+        ] {
+            assert!(!path.exists(), "{backend}: {}", path.display());
+        }
+    }
 }
 
 #[test]
