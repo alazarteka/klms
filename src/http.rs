@@ -175,8 +175,9 @@ pub struct Follow {
 }
 
 /// Sends the request and follows redirects by hand. 307/308 keep the method
-/// and body; every other redirect becomes a body-less GET. The agent's global
-/// timeout bounds the whole chain, not each hop.
+/// and body; any other redirect drops the body and turns every method except
+/// HEAD into GET. The agent's global timeout bounds the whole chain, not each
+/// hop.
 pub fn follow(
     agent: &Agent,
     request: Follow,
@@ -224,9 +225,105 @@ pub fn follow(
         let next = url.join(&location).map_err(|_| Failure::InvalidLocation)?;
         policy.allow(&next).map_err(Failure::Refused)?;
         if !matches!(status, 307 | 308) {
-            method = Method::GET;
+            if method != Method::HEAD {
+                method = Method::GET;
+            }
             payload = None;
         }
         url = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture_server::{Response as Served, Server};
+
+    struct AllowAll;
+
+    impl Policy for AllowAll {
+        fn allow(&mut self, _url: &Url) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    /// The request lines and bodies seen when `method` meets `status` with a
+    /// `Location` of `/next`.
+    fn redirected(method: Method, status: &'static str, strict: bool) -> Vec<(String, String)> {
+        let server = Server::new(move |request| {
+            if request.target == "/start" {
+                Served::bytes("text/plain", "")
+                    .status(status)
+                    .header("Location", "/next")
+            } else {
+                Served::bytes("text/plain", "done")
+            }
+        });
+        let payload = (method == Method::POST).then(|| Payload {
+            content_type: "application/x-www-form-urlencoded",
+            bytes: b"a=1".to_vec(),
+        });
+        let request = Follow {
+            method,
+            url: Url::parse(&format!("{}/start", server.url())).unwrap(),
+            payload,
+            max_redirects: 5,
+            strict,
+        };
+        follow(&agent(Duration::from_secs(5), None), request, &mut AllowAll).unwrap();
+        let recorded = server.recorded().into_iter();
+        recorded.map(|r| (r.line, r.body)).collect()
+    }
+
+    fn hop(line: &str, body: &str) -> (String, String) {
+        (format!("{line} HTTP/1.1"), body.to_owned())
+    }
+
+    #[test]
+    fn head_stays_head_and_post_keeps_its_body_only_through_307_and_308() {
+        for strict in [false, true] {
+            for status in [
+                "301 Moved Permanently",
+                "302 Found",
+                "303 See Other",
+                "307 Temporary Redirect",
+                "308 Permanent Redirect",
+            ] {
+                assert_eq!(
+                    redirected(Method::HEAD, status, strict),
+                    [hop("HEAD /start", ""), hop("HEAD /next", "")],
+                    "HEAD through {status}, strict={strict}"
+                );
+                let kept = matches!(&status[..3], "307" | "308");
+                let next = if kept {
+                    hop("POST /next", "a=1")
+                } else {
+                    hop("GET /next", "")
+                };
+                assert_eq!(
+                    redirected(Method::POST, status, strict),
+                    [hop("POST /start", "a=1"), next],
+                    "POST through {status}, strict={strict}"
+                );
+            }
+        }
+        // Strict mode follows every 3xx; the unusual ones never resend a POST.
+        for status in [
+            "300 Multiple Choices",
+            "304 Not Modified",
+            "305 Use Proxy",
+            "306 Switch Proxy",
+        ] {
+            assert_eq!(
+                redirected(Method::POST, status, true),
+                [hop("POST /start", "a=1"), hop("GET /next", "")],
+                "POST through {status}, strict"
+            );
+            assert_eq!(
+                redirected(Method::POST, status, false),
+                [hop("POST /start", "a=1")],
+                "POST through {status}, not strict"
+            );
+        }
     }
 }
