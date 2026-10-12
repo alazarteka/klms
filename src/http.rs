@@ -174,8 +174,9 @@ pub struct Follow {
     pub strict: bool,
 }
 
-/// Sends the request and follows redirects by hand. 307/308 keep the method
-/// and body; every other redirect becomes a body-less GET. The agent's global
+/// Sends the request and follows redirects by hand. 301/302 rewrite POST,
+/// and 303 rewrites methods other than GET/HEAD to a body-less GET. Other
+/// methods and 307/308 retain their method and body. The agent's global
 /// timeout bounds the whole chain, not each hop.
 pub fn follow(
     agent: &Agent,
@@ -223,10 +224,68 @@ pub fn follow(
         redirects += 1;
         let next = url.join(&location).map_err(|_| Failure::InvalidLocation)?;
         policy.allow(&next).map_err(Failure::Refused)?;
-        if !matches!(status, 307 | 308) {
+        if (matches!(status, 301 | 302) && method == Method::POST)
+            || (status == 303 && !matches!(method, Method::GET | Method::HEAD))
+        {
             method = Method::GET;
             payload = None;
         }
         url = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture_server::{Response as FixtureResponse, Server};
+
+    struct LocalPolicy;
+    impl Policy for LocalPolicy {
+        fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+            assert!(url.is_http_loopback());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn head_remains_head_through_every_redirect_status() {
+        let server = Server::new(|request| {
+            let step = request
+                .target
+                .trim_start_matches('/')
+                .parse::<usize>()
+                .unwrap();
+            let statuses = [
+                "301 Moved Permanently",
+                "302 Found",
+                "303 See Other",
+                "307 Temporary Redirect",
+                "308 Permanent Redirect",
+            ];
+            if step < statuses.len() {
+                FixtureResponse::bytes("text/plain", "")
+                    .status(statuses[step])
+                    .header("Location", &format!("/{}", step + 1))
+            } else {
+                FixtureResponse::bytes("application/octet-stream", "metadata")
+            }
+        });
+        let response = follow(
+            &agent(Duration::from_secs(5), None),
+            Follow {
+                method: Method::HEAD,
+                url: Url::parse(&format!("{}/0", server.url())).unwrap(),
+                payload: None,
+                max_redirects: 5,
+                strict: false,
+            },
+            &mut LocalPolicy,
+        )
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.content_length(), Some(8));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 6);
+        assert!(requests.iter().all(|line| line.starts_with("HEAD ")));
     }
 }
