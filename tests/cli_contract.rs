@@ -556,6 +556,7 @@ fn help_is_the_agent_manual() {
         "Exit codes:",
         "54 CURATION_CONFLICT",
         "12 CODE_REQUIRED",
+        "`auth login` may also give CODE_INCORRECT or CODE_EXPIRED",
         "board-post:BOARD:POST",
         "ok:true",
         "read-only",

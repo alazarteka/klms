@@ -28,9 +28,14 @@ must match it. Exit 0 covers a partial sync too: read `data.status`,
 and CORPUS_BUSY (52).
 
 Exit 10 carries three error codes: AUTH_REQUIRED (no session, or KAIST rejected
-the sign-in), CODE_INCORRECT (`auth login --code` with a wrong code; the pending
-login is consumed) and CODE_EXPIRED (no pending login, or it or its code
+the sign-in), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
+`auth login --code`; with `--code` the pending login is consumed) and
+CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or it
 expired; run `auth login` again). Branch on `error.code`, not the exit status.
+A NETWORK_ERROR during `auth login --code` keeps the pending login, so the same
+code can be retried. `auth forget` always removes login.json, the credentials
+file and the pending login; a password backend it cannot reach becomes a
+warning (the password may remain there) instead of an error.
 
 ## Refs
 
