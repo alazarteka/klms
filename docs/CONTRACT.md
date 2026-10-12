@@ -18,6 +18,10 @@ succeed with `command` set to `help` or `version`. Collections set
 null. Library search and changes add `source_complete` (true, false, or null
 when there is no evidence) and `fresh_through` (the finish time of the latest
 complete global sync). A scoped sync never claims global coverage.
+`complete` is about the rows that passed the filters: a `today`/`upcoming`
+`--kind` that matches no row in the date range adds a warning naming that kind
+and the kinds that were present, so a misspelled kind is not mistaken for
+"nothing due".
 
 ## Exit codes
 

@@ -402,7 +402,7 @@ pub struct ListArgs {
 
 /// Row `kind` values `today`/`upcoming` can produce: the Moodle module name
 /// of the event's activity (calendar.rs), or `event` when it has none.
-const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate), matched against each row's `kind`. Common kinds: assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, event; any other Moodle module name also works. Case-insensitive.";
+const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate), matched against each row's `kind`. Common kinds: assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, event; any other Moodle module name also works. Case-insensitive. A kind that matches no row in the range adds a warning listing the kinds present.";
 
 fn parse_agenda_kind(value: &str) -> Result<String, String> {
     let kind = value.trim().to_ascii_lowercase();

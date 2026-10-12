@@ -229,30 +229,90 @@ fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
 }
 
 #[test]
-fn agenda_kind_filters_rows_and_rejects_unknown_kinds() {
+fn agenda_kind_filter_selects_rows_and_warns_when_a_kind_matches_nothing() {
+    // The assignment card plus a site event (no module link) on the same day.
     let page = include_str!("fixtures/localized/calendar.html")
         .replace("&amp;time=1899989400", "")
         .replace("내일", "오늘");
+    let card = &page[page.find("<div class=\"event").unwrap()..page.find("</main>").unwrap()];
+    let event = card
+        .replace(
+            "/mod/assign/view.php?id=7&amp;action=editsubmission",
+            "/calendar/event.php?id=99",
+        )
+        .replace("Reading response is due", "Department seminar");
+    let page = page.replace("</main>", &format!("{event}</main>"));
     let server = Server::new(move |_| Response::html(page.as_bytes()));
     let env = Env::at(&server);
+    let all = env.ok("today");
+    let today = all["data"][0]["starts_at"].as_str().unwrap()[..10].to_owned();
+    let kinds: Vec<_> = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["kind"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("assign"), json!("event")]);
     for command in ["today", "upcoming"] {
-        let rows = |kinds: &str| {
-            let value = env.ok(&format!("{command}{kinds}"));
-            value["data"].as_array().unwrap().len()
+        let span = match command {
+            "today" => format!("for {today}"),
+            _ => format!("from {today} through "),
         };
-        assert_eq!(rows(""), 1, "{command}");
-        assert_eq!(rows(" --kind assign"), 1);
-        assert_eq!(rows(" --kind ASSIGN"), 1);
-        assert_eq!(rows(" --kind quiz,assign"), 1);
-        assert_eq!(rows(" --kind quiz --kind assign"), 1);
-        assert_eq!(rows(" --kind quiz"), 0);
-        assert_eq!(rows(" --kind event,quiz"), 0);
+        let run = |kinds: &str| {
+            let value = env.ok(&format!("{command}{kinds}"));
+            assert_eq!(value["meta"]["complete"], true);
+            let titles: Vec<_> = (value["data"].as_array().unwrap().iter())
+                .map(|row| row["title"].as_str().unwrap().to_owned())
+                .collect();
+            let warnings: Vec<_> = (value["warnings"].as_array().unwrap().iter())
+                .map(|warning| warning.as_str().unwrap().to_owned())
+                .collect();
+            (titles, warnings)
+        };
+        let (assign, seminar) = ("Reading response is due", "Department seminar");
+        let quiet: &[String] = &[];
+        assert_eq!(
+            run(""),
+            (vec![assign.into(), seminar.into()], quiet.to_vec())
+        );
+        for kinds in [" --kind assign", " --kind ASSIGN", " --kind Assign,assign"] {
+            assert_eq!(run(kinds), (vec![assign.into()], quiet.to_vec()), "{kinds}");
+        }
+        assert_eq!(run(" --kind EVENT"), (vec![seminar.into()], quiet.to_vec()));
 
-        // Kinds are open-ended Moodle module names; an unlisted one just matches nothing.
-        assert_eq!(rows(" --kind zoom"), 0);
+        // A kind that matches nothing (a typo, or simply none due) says so and
+        // lists what was there, whether or not another kind matched.
+        for (kinds, titles, missing) in [
+            (" --kind quiz,assign", vec![assign.to_owned()], "quiz"),
+            (" --kind quiz --kind assignment", vec![], "assignment, quiz"),
+            (" --kind zoom", vec![], "zoom"),
+        ] {
+            let (rows, warnings) = run(kinds);
+            assert_eq!(rows, titles, "{kinds}");
+            let [warning] = &warnings[..] else {
+                panic!("{kinds}: {warnings:?}")
+            };
+            let head = format!("--kind {missing} matched no calendar row {span}");
+            assert!(warning.starts_with(&head), "{warning}");
+            assert!(
+                warning.ends_with(" (kinds present: assign, event)"),
+                "{warning}"
+            );
+        }
         let (exit, error) = env.fail(&format!("{command} --kind 'a b'"));
         assert_eq!((exit, &error["code"]), (2, &json!("USAGE")));
     }
+    let human = env.run("today --kind quiz");
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap().trim(),
+        format!("Nothing of kind quiz scheduled for {today}.")
+    );
+    assert_eq!(
+        String::from_utf8(human.stderr).unwrap().trim(),
+        format!(
+            "warning: --kind quiz matched no calendar row for {today} (kinds present: assign, event)"
+        )
+    );
 }
 
 #[test]
