@@ -59,8 +59,11 @@ impl Response {
         &self.headers
     }
 
+    /// The header as text. Raw UTF-8 is accepted (servers send it in
+    /// `Location`), unlike `HeaderValue::to_str`, which allows only ASCII.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).and_then(|value| value.to_str().ok())
+        let value = self.headers.get(name)?;
+        std::str::from_utf8(value.as_bytes()).ok()
     }
 
     pub fn content_length(&self) -> Option<u64> {
@@ -325,5 +328,33 @@ mod tests {
                 "POST through {status}, not strict"
             );
         }
+    }
+
+    #[test]
+    fn follows_a_raw_utf8_location_with_the_path_percent_encoded() {
+        let server = Server::new(|request| {
+            if request.target == "/start" {
+                Served::bytes("text/plain", "")
+                    .status("302 Found")
+                    .header("Location", "/files/한.pdf")
+            } else {
+                Served::bytes("application/pdf", "%PDF")
+            }
+        });
+        let request = Follow {
+            method: Method::GET,
+            url: Url::parse(&format!("{}/start", server.url())).unwrap(),
+            payload: None,
+            max_redirects: 5,
+            strict: false,
+        };
+        let agent = agent(Duration::from_secs(5), None);
+        let response = follow(&agent, request, &mut AllowAll).unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.url().path(), "/files/%ED%95%9C.pdf");
+        assert_eq!(
+            server.requests(),
+            ["GET /start HTTP/1.1", "GET /files/%ED%95%9C.pdf HTTP/1.1"]
+        );
     }
 }
