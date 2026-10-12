@@ -117,14 +117,25 @@ and `panoptocourseembed:ID` identify Moodle activities. Collections cannot be
 downloaded as a single video; choose a recording ref.
 
 `videos download REF --out PATH` publishes a private file without overwriting.
-It defaults to a 4 GiB media cap and 1800-second download/remux budget;
-`--max-bytes` permits up to 16 GiB and `--max-seconds` up to 7200. Native VOD
-uses only static same-origin `/vod1/` MP4 sources. Panopto exchanges use separate
-host-scoped transient credentials; media requests receive neither KLMS nor
-Panopto credentials. Temporary signed media URLs are never returned in JSON;
-Panopto `source_url` is the KLMS launch locator. HLS media is retrieved under
-bounded transport policies and remuxed locally with ffmpeg; ffmpeg receives
-only local paths. No player scripts or playback/progress telemetry run.
+It defaults to a 4 GiB media cap, a 14400-second (4 h) overall download/remux
+budget and a 60-second stall timeout: `--max-bytes` permits up to 16 GiB,
+`--max-seconds` up to 86400 and `--stall-seconds` 1-600. A transfer that
+receives no bytes for the stall timeout, or outlives `--max-seconds`, fails
+with NETWORK_ERROR; there is no resume. Scratch space is a private (0700)
+`.klms-video-<pid>.scratch` directory beside `--out`, next to the
+`.klms-video-<pid>.part` publish file; both are removed when the command ends,
+and a later download removes ones older than 24 hours that the same user owns
+(regular files and directories only, never through symlinks). A remux peaks at
+about twice the media size on that filesystem; free space is not checked in
+advance. Native VOD uses only static same-origin `/vod1/` MP4 sources, which
+receive the KLMS session cookie and nothing else. Panopto exchanges use
+separate host-scoped transient credentials; Panopto media (CDN) requests
+receive neither KLMS nor Panopto credentials. Temporary signed media URLs are
+never returned in JSON; Panopto `source_url` is the KLMS launch locator. HLS,
+multi-track and offset recordings are retrieved under bounded transport
+policies and remuxed locally with ffmpeg, whose presence is checked before any
+media is fetched; ffmpeg receives only local paths. No player scripts or
+playback/progress telemetry run.
 Multiple native Panopto streams are preserved as separate video/audio tracks
 with their start offsets; a readable composed podcast takes precedence.
 `stream_count` and `output_composition` expose this choice on inspected recordings.

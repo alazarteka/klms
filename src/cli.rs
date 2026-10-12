@@ -672,7 +672,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. HLS requires ffmpeg. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. Scratch space (a private .klms-video-<pid>.scratch directory) and the temporary .part file live beside --out; stale ones older than a day are removed by the next download. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.
@@ -684,9 +684,12 @@ pub enum VideosCommand {
         /// Total media byte cap (default 4 GiB, at most 16 GiB).
         #[arg(long, default_value_t = 4_294_967_296_u64, value_parser = clap::value_parser!(u64).range(1..=17_179_869_184))]
         max_bytes: u64,
-        /// Total download/remux time budget in seconds (1-7200).
-        #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=7200))]
+        /// Overall download/remux time budget in seconds (default 4 h, at most 24 h; a 4 GiB recording needs about 70 minutes at 1 MB/s).
+        #[arg(long, default_value_t = 14_400, value_parser = clap::value_parser!(u64).range(1..=86_400))]
         max_seconds: u64,
+        /// Fail with NETWORK_ERROR when no media bytes arrive for this many seconds (1-600).
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
+        stall_seconds: u64,
     },
 }
 

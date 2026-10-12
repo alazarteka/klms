@@ -673,9 +673,17 @@ fn native_video_download_is_static_private_complete_and_never_overwrites() {
 
 #[test]
 fn failed_native_video_download_cleans_temporary_and_output() {
-    for response in [
-        Response::html("<html>Login</html>"),
-        Response::bytes("video/mp4", b"\x00\x00\x00\x18ftypisom-too-large".to_vec()),
+    for (response, max_bytes, code) in [
+        (
+            Response::html("<!doctype html><html>permission denied</html>"),
+            1024,
+            "UPSTREAM_ERROR",
+        ),
+        (
+            Response::bytes("video/mp4", b"\x00\x00\x00\x18ftypisom-too-large".to_vec()),
+            12,
+            "LIMIT_EXCEEDED",
+        ),
     ] {
         let responses = std::sync::Mutex::new(std::collections::VecDeque::from([
             Response::html("<main><h1>Lecture</h1></main>"),
@@ -694,12 +702,11 @@ fn failed_native_video_download_cleans_temporary_and_output() {
         let env = Env::at(&server);
         let out = env.path("failed.mp4");
         let (_, error) = env.fail(&format!(
-            "videos download vod:7 --out {} --max-bytes 12",
+            "videos download vod:7 --out {} --max-bytes {max_bytes}",
             out.display()
         ));
-        assert!(
-            ["UPSTREAM_SHAPE_CHANGED", "LIMIT_EXCEEDED"].contains(&error["code"].as_str().unwrap())
-        );
+        assert_eq!(error["code"], code, "{error}");
+        assert_eq!(server.requests().len(), 3);
         assert!(!out.exists());
         let parent = out.parent().unwrap();
         assert!(fs::read_dir(parent).unwrap().all(|p| {
@@ -718,7 +725,8 @@ fn video_grammar_rejects_ambiguous_ids_and_invalid_limits() {
         "videos download vod:7 --out x --max-seconds 0",
         "videos download vod:7 --out x --max-bytes 0",
         "videos download vod:7",
-        "videos download 7 --out x --max-seconds 7201",
+        "videos download 7 --out x --max-seconds 86401",
+        "videos download vod:7 --out x --stall-seconds 0",
     ] {
         assert_eq!(env.fail(args).1["code"], "USAGE", "{args}");
     }

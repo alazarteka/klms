@@ -11,7 +11,7 @@ fn url(value: &str) -> Url {
 fn policy() -> Policy {
     Policy {
         klms: url("https://klms.kaist.ac.kr/"),
-        origins: Origins::production().unwrap(),
+        config: Config::production().unwrap(),
         cookie: "MoodleSession=synthetic-klms".into(),
         jar: Jar::default(),
         bearer: Some("synthetic-panopto-token".into()),
@@ -60,7 +60,10 @@ fn credentials_are_selected_by_exact_origin_and_exchange_phase() {
     ] {
         let target = url(raw);
         assert!(policy.headers(&Method::GET, &target).is_empty());
-        assert!(policy.allow(&target).is_err());
+        assert_eq!(
+            policy.allow(&target).unwrap_err().code,
+            "CONTENT_UNAVAILABLE"
+        );
     }
 }
 
@@ -88,18 +91,26 @@ fn endpoint_allowlist_excludes_player_telemetry_and_unrelated_hosts() {
         "https://user@kaist.ap.panopto.com/Panopto/LTI/LTI.aspx",
         "https://kaist.ap.panopto.com:444/Panopto/LTI/LTI.aspx",
     ] {
-        assert!(policy.allow(&url(raw)).is_err(), "{raw}");
+        assert_eq!(
+            policy.allow(&url(raw)).unwrap_err().code,
+            "CONTENT_UNAVAILABLE",
+            "{raw}"
+        );
     }
     policy.delivery_only = true;
-    assert!(
+    assert_eq!(
         policy
             .allow(&url("https://klms.kaist.ac.kr/mod/lti/auth.php"))
-            .is_err()
+            .unwrap_err()
+            .code,
+        "CONTENT_UNAVAILABLE"
     );
-    assert!(
+    assert_eq!(
         policy
             .allow(&url("https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"))
-            .is_err()
+            .unwrap_err()
+            .code,
+        "CONTENT_UNAVAILABLE"
     );
     assert!(
         policy
@@ -191,7 +202,7 @@ fn static_embed_metadata_needs_no_player_or_network_execution() {
         2,
         "<html></html>",
         &embed,
-        &Origins::production().unwrap(),
+        &Config::production().unwrap(),
     )
     .unwrap();
     assert_eq!(

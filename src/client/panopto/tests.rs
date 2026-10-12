@@ -1,8 +1,11 @@
 use super::*;
 use serde_json::json;
 const ID: &str = "00000000-0000-0000-0000-000000000001";
-fn prod() -> Origins {
-    Origins::production().unwrap()
+fn limits(seconds: u64) -> Limits {
+    Limits::new(10_000_000, seconds, seconds)
+}
+fn prod() -> Config {
+    Config::production().unwrap()
 }
 fn cdn(path: &str) -> String {
     format!("https://s-cloudfront.cdn.ap.panopto.com/{path}")
@@ -34,9 +37,10 @@ fn mixed_and_missing_streams_cannot_silently_download_partial_recordings() {
 fn fixture_fetch<'a>(
     items: &'a [(&'a str, &'a [u8])],
     seen: &'a mut Vec<String>,
-) -> impl FnMut(&Url, &mut dyn Write, usize, u64, Option<ByteRange>) -> Result<Download, AppError> + 'a
+) -> impl FnMut(&Url, &mut dyn Write, Limits, Option<ByteRange>) -> Result<Download, AppError> + 'a
 {
-    move |u, w, max, _, range| {
+    move |u, w, limits, range| {
+        let max = limits.max_bytes;
         assert!(prod().is_cdn(u));
         seen.push(u.path().into());
         let data = items.iter().find(|(path, _)| *path == u.path()).unwrap().1;
@@ -55,18 +59,18 @@ fn fixture_fetch<'a>(
 }
 #[test]
 fn hls_fetches_all_fragments_and_writes_only_secret_free_local_paths() {
-    let scratch = Scratch::new().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let mut seen = Vec::new();
     let items=[("/master.m3u8",b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?token=secret\n".as_slice()),("/high.m3u8",b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4?token=secret\"\n#EXTINF:1,\na.ts?token=secret\n#EXTINF:1,\nb.ts?token=secret\n#EXT-X-ENDLIST\n"), ("/init.mp4",b"init"),("/a.ts",b"segment1"),("/b.ts",b"segment2")];
     let mut fetch = fixture_fetch(&items, &mut seen);
     let mut budget = 10000;
     let mut index = 0;
-    let path = local_playlist_with(
+    let path = local_playlist(
         &Url::parse(&cdn("master.m3u8")).unwrap(),
-        &scratch,
+        scratch.path(),
         &mut index,
         &mut budget,
-        Instant::now() + Duration::from_secs(5),
+        limits(5),
         0,
         &mut fetch,
     )
@@ -79,7 +83,7 @@ fn hls_fetches_all_fragments_and_writes_only_secret_free_local_paths() {
     let text = std::fs::read_to_string(path).unwrap();
     assert!(!text.contains("token") && !text.contains("secret") && !text.contains("https:"));
     assert!(text.contains("#EXT-X-ENDLIST"));
-    for file in std::fs::read_dir(&scratch.0).unwrap() {
+    for file in std::fs::read_dir(scratch.path()).unwrap() {
         let bytes = std::fs::read(file.unwrap().path()).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
     }
@@ -90,16 +94,16 @@ fn hls_playlist_size_encryption_and_live_fail_before_segment_fetch() {
         "#EXTM3U\n#EXTINF:1,\na.ts\n",
         "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"secret.key\"\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST\n",
     ] {
-        let scratch = Scratch::new().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
         let mut seen = Vec::new();
         let items = [("/test.m3u8", playlist.as_bytes())];
         let mut fetch = fixture_fetch(&items, &mut seen);
-        let e = local_playlist_with(
+        let e = local_playlist(
             &Url::parse(&cdn("test.m3u8")).unwrap(),
-            &scratch,
+            scratch.path(),
             &mut 0,
             &mut 2000,
-            Instant::now() + Duration::from_secs(5),
+            limits(5),
             0,
             &mut fetch,
         )
@@ -108,38 +112,38 @@ fn hls_playlist_size_encryption_and_live_fail_before_segment_fetch() {
         drop(fetch);
         assert_eq!(seen.len(), 1);
     }
-    let scratch = Scratch::new().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let mut cap_seen = 0;
-    let mut fetch = |_: &Url, _: &mut dyn Write, max: usize, _: u64, _: Option<ByteRange>| {
-        cap_seen = max;
+    let mut fetch = |_: &Url, _: &mut dyn Write, limits: Limits, _: Option<ByteRange>| {
+        cap_seen = limits.max_bytes;
         Err(AppError::limit("oversized playlist"))
     };
-    assert!(
-        local_playlist_with(
-            &Url::parse(&cdn("large.m3u8")).unwrap(),
-            &scratch,
-            &mut 0,
-            &mut (4 * 1024 * 1024),
-            Instant::now() + Duration::from_secs(5),
-            0,
-            &mut fetch
-        )
-        .is_err()
-    );
+    let error = local_playlist(
+        &Url::parse(&cdn("large.m3u8")).unwrap(),
+        scratch.path(),
+        &mut 0,
+        &mut (4 * 1024 * 1024),
+        limits(5),
+        0,
+        &mut fetch,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "LIMIT_EXCEEDED");
     assert_eq!(cap_seen, 1024 * 1024);
 }
 #[test]
 fn hls_master_retrieves_default_separate_audio_without_exposing_remote_uri() {
-    let scratch = Scratch::new().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let mut seen = Vec::new();
     let items=[("/master.m3u8",b"#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"a\",DEFAULT=YES,URI=\"audio.m3u8?secret=x\"\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"audio\"\nvideo.m3u8\n".as_slice()),("/video.m3u8",b"#EXTM3U\n#EXTINF:1,\nv.ts\n#EXT-X-ENDLIST\n"),("/audio.m3u8",b"#EXTM3U\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST\n"),("/v.ts",b"video"),("/a.ts",b"audio")];
     let mut fetch = fixture_fetch(&items, &mut seen);
-    let p = local_playlist_with(
+    let p = local_playlist(
         &Url::parse(&cdn("master.m3u8")).unwrap(),
-        &scratch,
+        scratch.path(),
         &mut 0,
         &mut 10000,
-        Instant::now() + Duration::from_secs(5),
+        limits(5),
         0,
         &mut fetch,
     )
@@ -154,7 +158,7 @@ fn hls_master_retrieves_default_separate_audio_without_exposing_remote_uri() {
 #[test]
 fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
     use std::process::{Command, Stdio};
-    let scratch = Scratch::new().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let available = Command::new("ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
@@ -165,11 +169,12 @@ fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
         .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
     {
         let e = remux(
-            &[scratch.0.join("input.m3u8")],
-            &scratch,
+            "ffmpeg".as_ref(),
+            &[scratch.path().join("input.m3u8")],
+            &[0.0],
+            scratch.path(),
             &mut Vec::new(),
-            1000000,
-            Instant::now() + Duration::from_secs(5),
+            limits(5),
         )
         .err()
         .unwrap();
@@ -213,7 +218,8 @@ fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut fetch = |u: &Url, w: &mut dyn Write, max: usize, _: u64, _: Option<ByteRange>| {
+    let mut fetch = |u: &Url, w: &mut dyn Write, limits: Limits, _: Option<ByteRange>| {
+        let max = limits.max_bytes;
         assert!(prod().is_cdn(u));
         let p = remote.path().join(u.path().trim_start_matches('/'));
         let data = std::fs::read(p).unwrap();
@@ -227,23 +233,24 @@ fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
         })
     };
     let mut budget = 1000000;
-    let p = local_playlist_with(
+    let p = local_playlist(
         &Url::parse(&cdn("source.m3u8")).unwrap(),
-        &scratch,
+        scratch.path(),
         &mut 0,
         &mut budget,
-        Instant::now() + Duration::from_secs(5),
+        limits(5),
         0,
         &mut fetch,
     )
     .unwrap();
     let mut output = Vec::new();
     let d = remux(
+        "ffmpeg".as_ref(),
         &[p],
-        &scratch,
+        &[0.0],
+        scratch.path(),
         &mut output,
-        1000000,
-        Instant::now() + Duration::from_secs(10),
+        limits(10),
     )
     .unwrap();
     assert_eq!(d.bytes, output.len());
@@ -263,17 +270,17 @@ fn local_hls_remux_preserves_video_audio_or_reports_missing_ffmpeg() {
 
 #[test]
 fn hls_byte_ranges_retrieve_exact_init_and_segments_and_remove_range_tags() {
-    let scratch = Scratch::new().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     let mut seen = Vec::new();
     let items=[("/test.m3u8",b"#EXTM3U\n#EXT-X-MAP:URI=\"shared.mp4?secret=token\",BYTERANGE=\"4@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:3@4\nshared.mp4?secret=token\n#EXTINF:1,\n#EXT-X-BYTERANGE:3\nshared.mp4?secret=token\n#EXT-X-ENDLIST\n".as_slice()),("/shared.mp4",b"INITaaabbbNOTRETRIEVED")];
     let mut fetch = fixture_fetch(&items, &mut seen);
     let mut budget = 10000;
-    let p = local_playlist_with(
+    let p = local_playlist(
         &Url::parse(&cdn("test.m3u8")).unwrap(),
-        &scratch,
+        scratch.path(),
         &mut 0,
         &mut budget,
-        Instant::now() + Duration::from_secs(5),
+        limits(5),
         0,
         &mut fetch,
     )
@@ -281,7 +288,7 @@ fn hls_byte_ranges_retrieve_exact_init_and_segments_and_remove_range_tags() {
     drop(fetch);
     let local = std::fs::read_to_string(p).unwrap();
     assert!(!local.contains("BYTERANGE") && !local.contains("secret"));
-    let mut fragments = std::fs::read_dir(&scratch.0)
+    let mut fragments = std::fs::read_dir(scratch.path())
         .unwrap()
         .map(|f| f.unwrap().path())
         .filter(|p| {
@@ -314,25 +321,32 @@ fn composed_mp4_takes_precedence_over_an_alternative_hls_podcast() {
 
 fn cdn_fixture(
     response: fn() -> crate::fixture_server::Response,
-) -> (crate::fixture_server::Server, Origins) {
+) -> (crate::fixture_server::Server, Config) {
     let server = crate::fixture_server::Server::new(move |_| response());
-    let origins = Origins::fixture("https://kaist.ap.panopto.com/", &server.url());
-    (server, origins)
+    let config = Config::fixture("https://kaist.ap.panopto.com/", &server.url());
+    (server, config)
 }
 
 #[test]
 fn media_range_must_match_the_requested_bytes() {
     use crate::fixture_server::Response;
-    let (server, origins) = cdn_fixture(|| {
+    let (server, config) = cdn_fixture(|| {
         Response::bytes("video/mp2t", "bbbb")
             .status("206 Partial Content")
             .header("Content-Range", "bytes 1-4/10")
     });
     let source = Url::parse(&format!("{}/shared.ts", server.url())).unwrap();
     let mut out = Vec::new();
-    let error = media_copy_range(&origins, &source, &mut out, 100, 5, false, Some((0, 4)))
-        .err()
-        .unwrap();
+    let error = media_copy(
+        &config,
+        &source,
+        &mut out,
+        limits(5),
+        Expect::Media,
+        Some((0, 4)),
+    )
+    .err()
+    .unwrap();
     assert_eq!(
         (error.code, error.message.as_str()),
         (
@@ -350,7 +364,7 @@ fn media_range_must_match_the_requested_bytes() {
 #[test]
 fn media_that_sniffs_as_html_is_refused_before_writing() {
     use crate::fixture_server::Response;
-    let (server, origins) = cdn_fixture(|| {
+    let (server, config) = cdn_fixture(|| {
         Response::bytes(
             "application/octet-stream",
             "<!DOCTYPE html><html>denied</html>",
@@ -358,7 +372,7 @@ fn media_that_sniffs_as_html_is_refused_before_writing() {
     });
     let source = Url::parse(&format!("{}/segment.ts", server.url())).unwrap();
     let mut out = Vec::new();
-    let error = media_copy_range(&origins, &source, &mut out, 100, 5, false, None)
+    let error = media_copy(&config, &source, &mut out, limits(5), Expect::Media, None)
         .err()
         .unwrap();
     assert_eq!(
