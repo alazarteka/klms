@@ -322,3 +322,7 @@ fn panopto_model(launch: &str, d: &crate::client::panopto::Delivery) -> Result<V
         output_composition: Some(d.composition.into()),
     })
 }
+
+#[cfg(test)]
+#[path = "videos_tests.rs"]
+mod tests;

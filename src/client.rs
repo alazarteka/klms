@@ -21,6 +21,7 @@ pub struct KlmsClient {
     base_url: Url,
     http: Client,
     cookie: String,
+    panopto: panopto::Origins,
 }
 
 pub struct HtmlResponse {
@@ -80,12 +81,25 @@ fn has_userinfo(url: &Url) -> bool {
 }
 
 impl KlmsClient {
+    /// Points the Panopto exchange and media policies at fixture origins.
+    #[cfg(test)]
+    pub fn with_panopto_origins(mut self, origins: panopto::Origins) -> Self {
+        self.panopto = origins;
+        self
+    }
     pub fn panopto_launch(
         &self,
         page: &HtmlResponse,
         timeout: u64,
     ) -> Result<panopto::Session, AppError> {
-        crate::auth::panopto::launch(&self.base_url, &self.cookie, timeout, &page.text, &page.url)
+        panopto::launch(
+            &self.base_url,
+            &self.cookie,
+            timeout,
+            &page.text,
+            &page.url,
+            &self.panopto,
+        )
     }
     pub fn new(
         base: &str,
@@ -103,6 +117,7 @@ impl KlmsClient {
                 Some(Duration::from_secs(8)),
             ),
             cookie: cookie.to_owned(),
+            panopto: panopto::Origins::production()?,
         })
     }
 

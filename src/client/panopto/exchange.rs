@@ -1,10 +1,10 @@
 //! Ephemeral LTI exchange. No Panopto credential is persisted or exposed.
 #[cfg(test)]
-#[path = "panopto_tests.rs"]
+#[path = "exchange_tests.rs"]
 mod tests;
-use super::cookies::Jar;
+use super::{Origins, Session};
 use crate::{
-    client::panopto::Session,
+    auth::Jar,
     error::AppError,
     http::{self, Follow, Method, Payload, Response},
     parse::video,
@@ -14,6 +14,7 @@ use std::{io::Read, time::Duration};
 
 pub(crate) struct Policy {
     pub klms: Url,
+    pub origins: Origins,
     pub cookie: String,
     pub jar: Jar,
     pub bearer: Option<String>,
@@ -21,7 +22,7 @@ pub(crate) struct Policy {
 }
 impl http::Policy for Policy {
     fn allow(&mut self, u: &Url) -> Result<(), AppError> {
-        crate::client::panopto::allow_exchange(u, &self.klms, self.delivery_only)
+        allow_exchange(u, &self.klms, &self.origins, self.delivery_only)
     }
 
     fn headers(&mut self, _: &Method, u: &Url) -> Vec<(&'static str, String)> {
@@ -29,7 +30,7 @@ impl http::Policy for Policy {
             return vec![("cookie", self.cookie.clone())];
         }
         let mut h = Vec::new();
-        if video::panopto_origin(u) {
+        if self.origins.is_panopto(u) {
             if let Some(c) = self.jar.header(u) {
                 if self.delivery_only {
                     if let Some(token) = c
@@ -56,7 +57,7 @@ impl http::Policy for Policy {
                 "Panopto launch refused a redirect that could repost credentials",
             ));
         }
-        if video::panopto_origin(r.url()) {
+        if self.origins.is_panopto(r.url()) {
             self.jar.capture(r.url(), r.headers())?
         }
         Ok(())
@@ -110,10 +111,13 @@ pub fn launch(
     timeout: u64,
     html: &str,
     url: &Url,
+    origins: &Origins,
 ) -> Result<Session, AppError> {
     let agent = http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8)));
+    let pano = origins.panopto.origin();
     let mut policy = Policy {
         klms: klms.clone(),
+        origins: origins.clone(),
         cookie: cookie.to_owned(),
         jar: Jar::default(),
         bearer: None,
@@ -122,7 +126,7 @@ pub fn launch(
     let mut page = html.to_owned();
     let mut current = url.clone();
     for _ in 0..5 {
-        if video::panopto_origin(&current)
+        if origins.is_panopto(&current)
             && matches!(
                 current.path(),
                 "/Panopto/Pages/Embed.aspx"
@@ -137,7 +141,7 @@ pub fn launch(
             policy.cookie.clear();
             return Ok(Session::new(agent, policy, recording, folder));
         }
-        let response = if let Some(form) = video::launch_form(&page, &current)? {
+        let response = if let Some(form) = video::launch_form(&page, &current, &pano)? {
             let payload = Payload {
                 content_type: "application/x-www-form-urlencoded",
                 bytes: form_urlencode(form.fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -150,10 +154,10 @@ pub fn launch(
                 form.action,
                 Some(payload),
             )?
-        } else if let Some(embed) = video::embedded_launch(&page, &current) {
+        } else if let Some(embed) = video::embedded_launch(&page, &current, &pano) {
             request(&agent, &mut policy, Method::GET, embed, None)?
         } else {
-            if video::non_panopto_lti_form(&page, &current) {
+            if video::non_panopto_lti_form(&page, &current, &pano) {
                 return Err(AppError::content_unavailable(
                     "activity launches a non-Panopto external tool",
                 )
@@ -169,4 +173,56 @@ pub fn launch(
     Err(AppError::shape(
         "Panopto launch exceeded its bounded exchange",
     ))
+}
+
+/// Origin/path policy for the fixed authentication and metadata endpoints.
+pub(crate) fn allow_exchange(
+    u: &Url,
+    klms: &Url,
+    origins: &Origins,
+    delivery_only: bool,
+) -> Result<(), AppError> {
+    if u.origin() == klms.origin()
+        && (u.path() == "/enrol/index.php" || u.path().starts_with("/login/"))
+    {
+        return Err(AppError::content_unavailable(
+            "Panopto launch requires enrollment or renewed KLMS sign-in",
+        ));
+    }
+    let klms = u.origin() == klms.origin()
+        && matches!(
+            u.path(),
+            "/blocks/panopto/lib/lti/auth.php"
+                | "/mod/lti/auth.php"
+                | "/mod/panoptocourseembed/view_content.php"
+                | "/mod/lti/launch.php"
+        );
+    let pano = origins.is_panopto(u)
+        && (matches!(
+            u.path(),
+            "/Panopto/Pages/Embed.aspx"
+                | "/Panopto/Pages/Sessions/List.aspx"
+                | "/Panopto/Pages/Auth/CookieCheck.aspx"
+                | "/Panopto/Pages/EmbeddedList.aspx"
+                | "/Panopto/LTI/LTI.aspx"
+                | "/Panopto/Pages/Viewer/DeliveryInfo.aspx"
+                | "/Panopto/Services/Data.svc/GetSessions"
+        ) || (u
+            .path()
+            .to_ascii_lowercase()
+            .starts_with("/panopto/lti/adv/platforms/")
+            && u.path().ends_with("/login")))
+        && (!delivery_only
+            || matches!(
+                u.path(),
+                "/Panopto/Pages/Viewer/DeliveryInfo.aspx"
+                    | "/Panopto/Services/Data.svc/GetSessions"
+            ));
+    if (!delivery_only && klms || pano) && u.username().is_empty() && u.password().is_none() {
+        Ok(())
+    } else {
+        Err(AppError::content_unavailable(
+            "Panopto exchange refused an unexpected origin or endpoint",
+        ))
+    }
 }

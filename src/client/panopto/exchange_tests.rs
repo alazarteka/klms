@@ -11,6 +11,7 @@ fn url(value: &str) -> Url {
 fn policy() -> Policy {
     Policy {
         klms: url("https://klms.kaist.ac.kr/"),
+        origins: Origins::production().unwrap(),
         cookie: "MoodleSession=synthetic-klms".into(),
         jar: Jar::default(),
         bearer: Some("synthetic-panopto-token".into()),
@@ -184,7 +185,15 @@ fn static_embed_metadata_needs_no_player_or_network_execution() {
     let embed = url(
         "https://kaist.ap.panopto.com/Panopto/Pages/Embed.aspx?id=11111111-2222-3333-4444-555555555555&access_token=synthetic",
     );
-    let session = launch(&base, "MoodleSession=synthetic", 2, "<html></html>", &embed).unwrap();
+    let session = launch(
+        &base,
+        "MoodleSession=synthetic",
+        2,
+        "<html></html>",
+        &embed,
+        &Origins::production().unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         session.recording_id.as_deref(),
         Some("11111111-2222-3333-4444-555555555555")
