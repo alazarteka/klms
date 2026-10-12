@@ -97,7 +97,8 @@ pub struct Cli {
     )]
     pub base_url: String,
 
-    /// Timeout per HTTP request, in seconds (1-120).
+    /// Time limit for each request, in seconds (1-120), covering its redirects
+    /// and the body read.
     #[arg(long, global = true, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=120))]
     pub timeout: u64,
 
