@@ -158,9 +158,10 @@ impl Corpus {
             )));
         }
         if version == 0 {
-            (transaction.execute_batch(schema::SCHEMA))
-                .and_then(|()| transaction.pragma_update(None, "user_version", schema::VERSION))
-                .map_err(sql)?;
+            transaction.execute_batch(schema::SCHEMA).map_err(sql)?;
+        }
+        if version < schema::VERSION {
+            (transaction.pragma_update(None, "user_version", schema::VERSION)).map_err(sql)?;
         }
         transaction.commit().map_err(sql)?;
         Ok(Self {
@@ -266,11 +267,49 @@ mod tests {
         }
     }
 
+    fn user_version(dir: &Path) -> u32 {
+        Connection::open(dir.join("klms/library.db"))
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn version_one_libraries_upgrade_in_place_and_version_two_opens() {
+        let temp = tempfile::tempdir().unwrap();
+        // A schema-1 library as earlier releases wrote it, with the since-dropped columns.
+        let connection = Connection::open(library_db(&temp)).unwrap();
+        connection.execute_batch(schema::SCHEMA).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE sync_runs ADD COLUMN failures TEXT NOT NULL DEFAULT '[]';
+                 INSERT INTO sync_runs(started_at, scope, status) VALUES (7, 'all', 'complete');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+        let corpus = Corpus::open_at(temp.path(), Duration::ZERO).unwrap();
+        let rows: i64 = (corpus.connection)
+            .query_row(
+                "SELECT count(*) FROM sync_runs WHERE started_at = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        drop(corpus);
+        assert_eq!(user_version(temp.path()), 2);
+        Corpus::open_at(temp.path(), Duration::ZERO).unwrap();
+        assert_eq!(user_version(temp.path()), 2);
+    }
+
     #[test]
     fn storage_rejects_newer_schema_locked_and_invalid_databases() {
         let temp = tempfile::tempdir().unwrap();
         let connection = Connection::open(library_db(&temp)).unwrap();
-        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .pragma_update(None, "user_version", schema::VERSION + 1)
+            .unwrap();
         drop(connection);
         let error = Corpus::open_at(temp.path(), Duration::ZERO).unwrap_err();
         assert_eq!(error.code, "MIGRATION_REQUIRED");
