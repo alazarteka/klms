@@ -118,6 +118,21 @@ pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
         .and_then(|href| base_url.join(href).ok())
 }
 
+/// An absolute link in a scheme other than http(s) (`mailto:`, `tel:`, ...),
+/// kept as written without its fragment so it is shown but never fetched.
+/// Script and inline-data URLs are not links a reader can follow.
+fn foreign_link(href: &str) -> Option<String> {
+    let href = href.trim();
+    let (scheme, _) = href.split_once(':')?;
+    let mut chars = scheme.chars();
+    let valid = chars.next()?.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let scheme = scheme.to_ascii_lowercase();
+    let foreign = !matches!(scheme.as_str(), "http" | "https" | "javascript" | "data");
+    let link = href.split('#').next()?;
+    (valid && foreign).then(|| link.to_owned())
+}
+
 /// Titled, de-duplicated links from `anchors`, stopping at `limit`.
 pub(super) fn link_items<'a>(
     anchors: impl Iterator<Item = ElementRef<'a>>,
@@ -128,16 +143,20 @@ pub(super) fn link_items<'a>(
     let mut rows = Vec::new();
     for anchor in anchors {
         let title = text(anchor);
-        let Some(url) = href_url(anchor, base_url) else {
+        let Some(href) = anchor.value().attr("href") else {
             continue;
         };
-        if title.is_empty() || !seen.insert(url.to_string()) {
+        let url = match base_url.join(href) {
+            Ok(url) => safe_url::display(&url),
+            Err(_) => match foreign_link(href) {
+                Some(link) => link,
+                None => continue,
+            },
+        };
+        if title.is_empty() || !seen.insert(url.clone()) {
             continue;
         }
-        rows.push(LinkItem {
-            title,
-            url: safe_url::display(&url),
-        });
+        rows.push(LinkItem { title, url });
         if rows.len() == limit {
             break;
         }

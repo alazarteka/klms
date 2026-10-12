@@ -56,6 +56,7 @@ fn test_update(
             downloads_url: server.url(),
             current_version: current.into(),
             destination: home.join("klms"),
+            legacy_skill: legacy_skill_paths_at(home, &home.join("data")),
         },
     )
 }
@@ -122,42 +123,55 @@ exit 0
 }
 
 #[cfg(unix)]
-#[test]
-fn legacy_skill_removal_touches_only_klms_managed_paths() {
-    let root = tempfile::tempdir().unwrap();
-    let (home, data) = (root.path().join("home"), root.path().join("data"));
-    let payload_dir = data.join("klms/skills/klms");
+fn install_legacy_skill(home: &Path) -> (PathBuf, PathBuf) {
+    let payload_dir = home.join("data/klms/skills/klms");
     let link = home.join(".agents/skills/klms");
     fs::create_dir_all(&payload_dir).unwrap();
     fs::create_dir_all(link.parent().unwrap()).unwrap();
     fs::write(payload_dir.join("SKILL.md"), b"legacy").unwrap();
     std::os::unix::fs::symlink(&payload_dir, &link).unwrap();
-    remove_legacy_skill_at(&home, &data);
-    assert!(fs::symlink_metadata(&link).is_err());
-    assert!(!data.join("klms/skills").exists());
-    assert!(data.join("klms").exists());
+    (payload_dir, link)
+}
 
-    // A symlink to somewhere else, or an unknown file in the payload directory, stays.
-    let elsewhere = root.path().join("mine");
-    fs::create_dir(&elsewhere).unwrap();
-    std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-    fs::create_dir_all(&payload_dir).unwrap();
-    fs::write(payload_dir.join("SKILL.md"), b"legacy").unwrap();
-    fs::write(payload_dir.join("extra.md"), b"user file").unwrap();
-    remove_legacy_skill_at(&home, &data);
-    assert_eq!(fs::read_link(&link).unwrap(), elsewhere);
-    assert_eq!(
-        fs::read(payload_dir.join("extra.md")).unwrap(),
-        b"user file"
-    );
-    assert!(!payload_dir.join("SKILL.md").exists());
+#[cfg(unix)]
+#[test]
+fn legacy_skill_is_reported_but_never_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let (home, data) = (root.path().join("home"), root.path().join("home/data"));
+    assert!(legacy_skill_warning(&legacy_skill_paths_at(&home, &data)).is_none());
+    let (payload_dir, link) = install_legacy_skill(&home);
+    let paths = legacy_skill_paths_at(&home, &data);
+    assert_eq!(paths, [link.clone(), payload_dir.clone()]);
+    let warning = legacy_skill_warning(&paths).unwrap();
+    assert!(warning.contains("deprecated") && warning.contains("`klms --help`"));
+    assert!(warning.contains(&link.display().to_string()));
+    assert!(warning.contains(&payload_dir.display().to_string()));
+    assert_eq!(fs::read_link(&link).unwrap(), payload_dir);
+    assert_eq!(fs::read(payload_dir.join("SKILL.md")).unwrap(), b"legacy");
 
-    // A real directory at the link path is the user's own and is kept.
+    // A symlink elsewhere or a real directory at the link path is the user's.
     fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(data.join("klms")).unwrap();
     fs::create_dir(&link).unwrap();
-    fs::write(link.join("SKILL.md"), b"user skill").unwrap();
-    remove_legacy_skill_at(&home, &data);
-    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), b"user skill");
+    assert!(legacy_skill_paths_at(&home, &data).is_empty());
+    fs::remove_dir(&link).unwrap();
+    std::os::unix::fs::symlink(root.path(), &link).unwrap();
+    assert!(legacy_skill_paths_at(&home, &data).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn update_check_warns_about_the_legacy_skill_and_removes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let server = release_server(vec![], true, "200 OK");
+    let quiet = test_update(&server, "0.2.0", true, home.path()).unwrap();
+    assert!(quiet.warnings.is_empty());
+    let (payload_dir, link) = install_legacy_skill(home.path());
+    let result = test_update(&server, "0.2.0", true, home.path()).unwrap();
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("deprecated"));
+    assert_eq!(fs::read_link(&link).unwrap(), payload_dir);
+    assert!(payload_dir.join("SKILL.md").is_file());
 }
 
 #[test]
@@ -180,7 +194,9 @@ fn verified_candidate_receives_install_destination_and_failure_is_propagated() {
                 "fixture install failure"
             );
         } else {
-            assert_eq!(result.unwrap().data["updated"], true);
+            let result = result.unwrap();
+            assert_eq!(result.data["updated"], true);
+            assert!(result.warnings.is_empty());
         }
         // Validate the candidate's CLI contract, not the sender's flag order.
         use clap::Parser;

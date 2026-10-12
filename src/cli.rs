@@ -25,7 +25,7 @@ JSON contract (global --json goes before the command):
 Exit codes:
   0 ok (a partial sync also exits 0: check data.status, failures, truncated, warnings)
   2 USAGE (bad syntax, value or ref)      10 AUTH_REQUIRED (ask the user to run `klms auth login`;
-                                             `auth login --code` may give CODE_INCORRECT or CODE_EXPIRED)
+                                             `auth login` may also give CODE_INCORRECT or CODE_EXPIRED)
   11 AUTH_PROTOCOL_CHANGED                12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED                    20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR                           30 UPSTREAM_SHAPE_CHANGED
@@ -106,7 +106,8 @@ pub struct Cli {
     )]
     pub base_url: String,
 
-    /// Timeout per HTTP request, in seconds (1-120).
+    /// Time limit for each request, in seconds (1-120), covering its redirects
+    /// and the body read.
     #[arg(long, global = true, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=120))]
     pub timeout: u64,
 
@@ -414,7 +415,7 @@ pub struct ListArgs {
 
 /// Row `kind` values `today`/`upcoming` can produce: the Moodle module name
 /// of the event's activity (calendar.rs), or `event` when it has none.
-const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate), matched against each row's `kind`. Common kinds: assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, event; any other Moodle module name also works. Case-insensitive.";
+const KIND_HELP: &str = "Only rows of this kind (repeat or comma-separate), matched against each row's `kind`. Common kinds: assign, quiz, courseboard, resource, coursefile, page, folder, url, vod, lti, panopto, event; any other Moodle module name also works. Case-insensitive. A kind that matches no row in the range adds a warning listing the kinds present.";
 
 fn parse_agenda_kind(value: &str) -> Result<String, String> {
     let kind = value.trim().to_ascii_lowercase();
@@ -464,7 +465,7 @@ pub enum AuthCommand {
     Logout,
     /// Delete the remembered login and any stored password.
     #[command(
-        long_about = "Delete the remembered login file (login.json) and the stored password from whichever place holds it: the macOS keychain, the Linux Secret Service, or the plaintext credentials file. Also discards a pending verification code. Safe to repeat; with nothing remembered it succeeds and reports nothing removed. The saved KLMS session is not touched; `klms auth logout` removes that.",
+        long_about = "Delete the remembered login file (login.json) and the stored password from whichever place holds it: the macOS keychain, the Linux Secret Service, or the plaintext credentials file. Also discards a pending verification code. If the password's backend cannot be reached (for example `secret-tool` is gone or the keychain is locked), everything else is still removed and a warning says the password may remain there. Safe to repeat; with nothing remembered it succeeds and reports nothing removed. The saved KLMS session is not touched; `klms auth logout` removes that.",
         after_help = "Example:\n  klms auth forget"
     )]
     Forget,
@@ -495,7 +496,9 @@ Remembering the password (opt-in):
   Backends are chosen automatically: macOS keychain, or the Linux Secret
   Service (needs `secret-tool`). With neither (headless Linux) klms refuses and
   explains; add --insecure-storage to keep the password in a plaintext file
-  readable only by you ($XDG_CONFIG_HOME/klms/credentials.json).
+  readable only by you ($XDG_CONFIG_HOME/klms/credentials.json). Passwords
+  over 1024 bytes are not remembered, nor (in the macOS keychain) ones with
+  characters outside printable ASCII; the sign-in still succeeds with a warning.
 
 Without a terminal (agents, scripts, or --json):
   Easy Login needs a phone approval and fails, so a remembered Easy method must
@@ -509,12 +512,13 @@ Without a terminal (agents, scripts, or --json):
   code, never the password.
   CODE_REQUIRED details carry {channel, expires_at, resume}. The pending state
   (SSO cookies only, never the password) is a private file that expires after
-  5 minutes and is deleted after one attempt.
+  5 minutes and is deleted after one attempt that KAIST answered; a
+  NETWORK_ERROR (exit 20) keeps it, so retry the same --code.
 
 Exit codes: 0 signed in; 12 CODE_REQUIRED (resume with --code); 2 bad flags;
 11 KAIST protocol changed; 10 for all of these, told apart by error.code:
   AUTH_REQUIRED    KAIST rejected the sign-in (ID, password, lockout)
-  CODE_INCORRECT   wrong verification code (the pending login is consumed)
+  CODE_INCORRECT   wrong verification code (with --code, the pending login is consumed)
   CODE_EXPIRED     no pending login, or it or its code expired (start over)
 
 Examples:

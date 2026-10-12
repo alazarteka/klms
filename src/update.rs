@@ -38,6 +38,7 @@ pub fn run(check: bool, timeout: u64) -> Result<output::CommandResult, AppError>
             downloads_url: format!("https://github.com/{REPO}/releases/download"),
             current_version: env!("CARGO_PKG_VERSION").into(),
             destination: env::current_exe().and_then(fs::canonicalize).map_err(io)?,
+            legacy_skill: legacy_skill_paths(),
         },
     )
 }
@@ -47,6 +48,7 @@ struct ReleaseSource {
     downloads_url: String,
     current_version: String,
     destination: PathBuf,
+    legacy_skill: Vec<PathBuf>,
 }
 
 fn run_with_source(
@@ -66,7 +68,7 @@ fn run_with_source(
     let current = version(&source.current_version)?;
     let available = latest > current;
     let report = |updated: bool, available: bool, text: String| {
-        output::result(
+        let mut result = output::result(
             "update",
             &json!({
                 "current_version": source.current_version,
@@ -76,7 +78,11 @@ fn run_with_source(
                 "path": source.destination,
             }),
             text,
-        )
+        )?;
+        result
+            .warnings
+            .extend(legacy_skill_warning(&source.legacy_skill));
+        Ok(result)
     };
     if check || !available {
         let (tag, installed) = (&release.tag_name, &source.current_version);
@@ -142,8 +148,8 @@ fn run_with_source(
 }
 
 /// Called by the verified candidate itself. Stage a copy on the destination
-/// filesystem, then atomically rename it over the binary. Removing the legacy
-/// skill afterwards is best effort and never turns a switch into a failure.
+/// filesystem, then atomically rename it over the binary. A leftover legacy
+/// skill is only reported, never removed.
 pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
     if !destination.is_absolute() {
         return Err(AppError::usage("installation destination must be absolute"));
@@ -184,49 +190,56 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
         ),
     )?;
     fs::rename(&staged, &destination).map_err(io)?;
-    remove_legacy_skill();
+    let mut result = result;
+    result
+        .warnings
+        .extend(legacy_skill_warning(&legacy_skill_paths()));
     Ok(result)
 }
 
-/// Earlier releases installed an Agent Skill copy of the help text. Remove only
-/// what klms itself created: the payload under its data directory and a symlink
-/// that points at exactly that directory. Anything else is the user's.
-fn remove_legacy_skill() {
+/// Earlier releases installed an Agent Skill copy of the help text. klms no
+/// longer removes it; it only reports what is still there, so the user decides.
+fn legacy_skill_paths() -> Vec<PathBuf> {
     let nonempty = |name| {
         env::var_os(name)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
     let Some(home) = nonempty("HOME") else {
-        return;
+        return Vec::new();
     };
     let data_home = nonempty("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
-    remove_legacy_skill_at(&home, &data_home);
+    legacy_skill_paths_at(&home, &data_home)
 }
 
-fn remove_legacy_skill_at(home: &Path, data_home: &Path) {
-    let skills = data_home.join("klms/skills");
-    let payload_dir = skills.join("klms");
+/// The klms-managed leftovers: the payload under its data directory and a
+/// symlink that points at exactly that directory. Anything else is the user's.
+fn legacy_skill_paths_at(home: &Path, data_home: &Path) -> Vec<PathBuf> {
+    let payload_dir = data_home.join("klms/skills/klms");
     let link = home.join(".agents/skills/klms");
+    let payload = payload_dir.join("SKILL.md");
+    let mut found = Vec::new();
     // read_link fails for anything that is not a symlink, so real files and
-    // directories at the discovery path are never touched.
+    // directories at the discovery path are never reported.
     if fs::read_link(&link).is_ok_and(|target| target == payload_dir) {
-        let _ = fs::remove_file(&link);
+        found.push(link);
     }
-    let is_real = |path: &Path, dir: bool| {
-        fs::symlink_metadata(path).is_ok_and(|m| {
-            !m.file_type().is_symlink() && if dir { m.is_dir() } else { m.is_file() }
-        })
-    };
-    if is_real(&skills, true) && is_real(&payload_dir, true) {
-        let payload = payload_dir.join("SKILL.md");
-        if is_real(&payload, false) {
-            let _ = fs::remove_file(payload);
-        }
-        // Fail on non-empty directories rather than deleting unknown files.
-        let _ = fs::remove_dir(&payload_dir);
-        let _ = fs::remove_dir(&skills);
+    if fs::symlink_metadata(&payload).is_ok_and(|m| m.is_file()) {
+        found.push(payload_dir);
     }
+    found
+}
+
+fn legacy_skill_warning(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let list: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+    Some(format!(
+        "The `klms skill` command and its SKILL.md are deprecated; `klms --help` is now the manual. \
+         An old installed skill is still present and klms no longer manages it; you can delete: {}",
+        list.join(", ")
+    ))
 }
 
 fn version(value: &str) -> Result<(u64, u64, u64), AppError> {

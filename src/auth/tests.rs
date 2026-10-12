@@ -11,6 +11,8 @@ use std::{
 
 use tempfile::TempDir;
 
+use serde_json::Value;
+
 use super::*;
 use crate::fixture_server::{Request, Response, Server};
 
@@ -533,23 +535,121 @@ fn saved_password_notice_names_the_backend_and_stays_quiet_for_json() {
     let path = PathBuf::from("/cfg/klms/credentials.json");
     let file = Backend::File(path.clone());
     assert_eq!(
-        password_saved_notice(false, &file, Some("plaintext-file")).unwrap(),
+        password_saved_notice(false, &file).unwrap(),
         "Password saved in plaintext at /cfg/klms/credentials.json (0600)."
     );
     let keychain = Backend::Keychain(PathBuf::from("security"));
     assert_eq!(
-        password_saved_notice(false, &keychain, Some("keychain")).unwrap(),
+        password_saved_notice(false, &keychain).unwrap(),
         "Password saved to the macOS Keychain."
     );
     let service = Backend::SecretService(PathBuf::from("secret-tool"));
     assert_eq!(
-        password_saved_notice(false, &service, Some("secret-service")).unwrap(),
+        password_saved_notice(false, &service).unwrap(),
         "Password saved to the Secret Service keyring."
     );
-    assert_eq!(
-        password_saved_notice(true, &file, Some("plaintext-file")),
-        None
+    assert_eq!(password_saved_notice(true, &file), None);
+}
+
+#[test]
+fn a_failed_save_does_not_claim_success_or_keep_the_old_password() {
+    /// Types a new password too long for any backend to remember.
+    struct LongPassword;
+    impl AuthPrompt for LongPassword {
+        fn identifier(&mut self) -> Result<String, AppError> {
+            Ok("student".into())
+        }
+        fn password(&mut self) -> Result<Zeroizing<String>, AppError> {
+            Ok(Zeroizing::new("p".repeat(1025)))
+        }
+        fn otp(&mut self, _channel: &str) -> Result<Zeroizing<String>, AppError> {
+            Ok(Zeroizing::new("123456".into()))
+        }
+    }
+    let fx = Fixture::new();
+    fx.seed_remembered_password();
+    let previous = fx.identity();
+    let env = Env {
+        dirs: &fx.dirs,
+        klms: &fx.klms.url,
+        sso: &fx.sso.url,
+        timeout: 5,
+        secrets: &fx.secrets,
+        interactive: true,
+        defer_code: false,
+        json: false,
+    };
+    let backend = Backend::File(fx.dirs.credentials());
+    let login = Identity::new("student", LoginMethod::Password, Some(SecondFactor::Email));
+    let long = Zeroizing::new("p".repeat(1025));
+    let mut warnings = Vec::new();
+    let (identity, stored_now) = remember_login(
+        &env,
+        previous.as_ref(),
+        login,
+        Some((&backend, &long)),
+        &mut warnings,
     );
-    assert_eq!(password_saved_notice(false, &file, None), None);
-    assert_eq!(password_saved_notice(false, &file, Some("keychain")), None);
+    assert!(!stored_now, "no \"Password saved\" notice");
+    assert_eq!(identity.password_backend, None);
+    assert_eq!(
+        warnings,
+        [
+            "could not remember the password: a remembered password cannot be longer than 1024 bytes",
+            "the previously remembered password was removed",
+        ]
+    );
+
+    // The same through a full sign-in: login.json no longer points at a
+    // stored password, and the stale one is gone.
+    fx.seed_remembered_password();
+    let result = fx.login_as(true, false, &remember(), LongPassword).unwrap();
+    assert_eq!(result.data["password_backend"], Value::Null);
+    assert_eq!(result.warnings, warnings);
+    let identity = fx.identity().unwrap();
+    assert_eq!(
+        (identity.username.as_str(), identity.password_backend),
+        ("student", None)
+    );
+    assert_eq!(fx.password("student"), None);
+    assert!(!fx.dirs.credentials().exists());
+}
+
+#[test]
+fn a_code_that_never_reached_kaist_keeps_the_pending_login() {
+    let fx = Fixture::new();
+    fx.seed_remembered_password();
+    fx.pend();
+    // Drop the SSO page the pending login came from so it can be resumed
+    // against another SSO origin: one that refuses connections.
+    let path = fx.dirs.pending();
+    let mut pending: store::PendingLogin =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    pending.document_url = None;
+    store::save_json(&path, &pending, "pending login").unwrap();
+    let refused = Url::parse("http://127.0.0.1:9/").unwrap();
+    let env = Env {
+        dirs: &fx.dirs,
+        klms: &fx.klms.url,
+        sso: &refused,
+        timeout: 5,
+        secrets: &fx.secrets,
+        interactive: false,
+        defer_code: true,
+        json: true,
+    };
+    let error = failure(login_with(
+        &env,
+        &code("654321"),
+        Terminal(fx.asked.clone()),
+    ));
+    assert_eq!((error.code, error.exit_code()), ("NETWORK_ERROR", 20));
+    assert!(path.is_file(), "the pending login survives");
+    assert!(!fx.dirs.session().exists());
+
+    // The retry against a working SSO finishes the same login.
+    let result = fx.login(false, true, &code("654321")).unwrap();
+    assert_eq!(result.data["user"], "student");
+    assert!(fx.dirs.session().is_file() && !path.exists());
+    assert_eq!(fx.sso.count(VALIDATE), 1);
 }

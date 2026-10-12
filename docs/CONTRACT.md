@@ -18,6 +18,10 @@ succeed with `command` set to `help` or `version`. Collections set
 null. Library search and changes add `source_complete` (true, false, or null
 when there is no evidence) and `fresh_through` (the finish time of the latest
 complete global sync). A scoped sync never claims global coverage.
+`complete` is about the rows that passed the filters: a `today`/`upcoming`
+`--kind` that matches no row in the date range adds a warning naming that kind
+and the kinds that were present, so a misspelled kind is not mistaken for
+"nothing due".
 
 ## Course discovery
 
@@ -46,9 +50,14 @@ must match it. Exit 0 covers a partial sync too: read `data.status`,
 and CORPUS_BUSY (52).
 
 Exit 10 carries three error codes: AUTH_REQUIRED (no session, or KAIST rejected
-the sign-in), CODE_INCORRECT (`auth login --code` with a wrong code; the pending
-login is consumed) and CODE_EXPIRED (no pending login, or it or its code
+the sign-in), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
+`auth login --code`; with `--code` the pending login is consumed) and
+CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or it
 expired; run `auth login` again). Branch on `error.code`, not the exit status.
+A NETWORK_ERROR during `auth login --code` keeps the pending login, so the same
+code can be retried. `auth forget` always removes login.json, the credentials
+file and the pending login; a password backend it cannot reach becomes a
+warning (the password may remain there) instead of an error.
 
 ## Refs
 
@@ -80,7 +89,10 @@ not scrape URLs.
 
 Storage: `$XDG_DATA_HOME/klms/library.db` plus `objects/sha256/` beside it
 (default `~/.local/share/klms`), directories 0700 and the database 0600; schema
-`user_version = 1`. Back both up together, and keep a corrupt library intact
+`user_version = 2` (version 2 only marks the dropped `sync_runs.failures` and
+`representations.observed_*` columns; a 1-to-2 migration changes no data and
+older libraries keep those unused columns, so an older binary refuses a newer
+library with `MIGRATION_REQUIRED`; a newer schema than supported does too). Back both up together, and keep a corrupt library intact
 before recovering it.
 
 ## Safety
@@ -94,12 +106,26 @@ from a hidden prompt or the two-step `--code` flow. The session file
 trusted-device IDs. Remembered login lives in `$XDG_CONFIG_HOME/klms`. The KLMS
 base URL must be HTTPS, with plain HTTP allowed only for loopback. `update`
 contacts only GitHub, verifies the archive SHA-256 and the candidate version,
-and keeps the old binary on failure.
+and keeps the old binary on failure. A legacy installed skill (the `klms skill`
+command and SKILL.md are deprecated; `klms --help` is the manual) is never
+removed: `update` lists its paths in `warnings` so the user can delete them.
+
+Proxies are chosen per request as curl does: `https_proxy`/`HTTPS_PROXY` for
+HTTPS and `http_proxy`/`HTTP_PROXY` for HTTP, then `all_proxy`/`ALL_PROXY`
+(lowercase wins). `no_proxy`/`NO_PROXY` takes `*` or comma-separated hosts,
+each also covering its subdomains (`kaist.ac.kr` covers `klms.kaist.ac.kr`; a
+leading dot and IPv6 brackets are optional). Ports and CIDR ranges in
+`NO_PROXY` are not supported. Loopback targets are never proxied.
+
+Link lists in detail and dashboard output show `mailto:`, `tel:` and other
+non-HTTP links as written (fragment removed) but never fetch them, and the
+library does not record them. `javascript:` and `data:` links, and HTTP links
+to non-ASCII (IDN) hosts, are omitted.
 
 ## Videos (JSON schema 5)
 
 Schema 5 replaces the former activity-shaped video rows; the local SQLite schema
-remains version 1. Video grammar is independent of assignment/quiz grammar. `videos list --course`
+is version 2. Video grammar is independent of assignment/quiz grammar. `videos list --course`
 is metadata-only: it reads the course page and never opens an activity, so it
 makes no `mod/*/view.php`, LTI launch or Panopto request. Its rows have
 `video_type` `recording` (native VOD), `panopto` (a Panopto activity: one

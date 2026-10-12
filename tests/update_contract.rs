@@ -38,6 +38,9 @@ fn clean_install_replaces_and_follows_binary_symlinks_without_replacing_the_link
     let expected = format!("klms {}", env!("CARGO_PKG_VERSION"));
     assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), expected);
     assert!(!temp.path().join("data").exists() && !temp.path().join(".agents").exists());
+    let clean = install(temp.path(), &destination);
+    let envelope: serde_json::Value = serde_json::from_slice(&clean.stdout).unwrap();
+    assert_eq!(envelope["warnings"], serde_json::json!([]));
     fs::write(&destination, b"old executable").unwrap();
     #[cfg(unix)]
     let (payload_dir, link) = {
@@ -50,8 +53,23 @@ fn clean_install_replaces_and_follows_binary_symlinks_without_replacing_the_link
         (payload_dir, link)
     };
     assert_installed(temp.path(), &destination);
+    // The old skill is reported in `warnings`, never removed.
     #[cfg(unix)]
-    assert!(fs::symlink_metadata(&link).is_err() && !payload_dir.exists());
+    {
+        let output = install(temp.path(), &destination);
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let warnings = envelope["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        let warning = warnings[0].as_str().unwrap();
+        assert!(warning.contains("deprecated") && warning.contains("`klms --help`"));
+        assert!(warning.contains(&link.display().to_string()));
+        assert!(warning.contains(&payload_dir.display().to_string()));
+        assert_eq!(fs::read_link(&link).unwrap(), payload_dir);
+        assert_eq!(
+            fs::read(payload_dir.join("SKILL.md")).unwrap(),
+            b"legacy skill"
+        );
+    }
 
     #[cfg(unix)]
     {

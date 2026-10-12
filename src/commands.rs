@@ -1,7 +1,7 @@
 mod library;
 mod videos;
 
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 use serde::Serialize;
 
@@ -633,23 +633,37 @@ impl Ctx<'_> {
             ));
         }
         let undated = page.undated_events;
-        let mut rows: Vec<_> = (page.events.into_iter())
+        let in_range: Vec<_> = (page.events.into_iter())
             .filter(|event| {
                 let date = event.starts_at.as_deref().and_then(|value| value.get(..10));
                 date.is_some_and(|d| d >= today.as_str() && d <= through.as_str())
                     && course_id
                         .as_ref()
                         .is_none_or(|id| event.course_id.as_ref() == Some(id))
-                    && (kinds.is_empty() || kinds.contains(&event.kind.to_ascii_lowercase()))
             })
             .collect();
+        let present: BTreeSet<_> = in_range
+            .iter()
+            .map(|event| event.kind.to_ascii_lowercase())
+            .collect();
+        let unmatched: BTreeSet<_> = kinds
+            .iter()
+            .filter(|kind| !present.contains(*kind))
+            .collect();
+        let mut rows: Vec<_> = (in_range.into_iter())
+            .filter(|event| kinds.is_empty() || kinds.contains(&event.kind.to_ascii_lowercase()))
+            .collect();
         rows.sort_by(|left, right| left.starts_at.cmp(&right.starts_at));
+        let single = today == through;
+        let span = match single {
+            true => format!("for {today}"),
+            false => format!("from {today} through {through}"),
+        };
         let mut result = listing(label, rows, limit, true, |rows, available| {
-            let single = today == through;
             if rows.is_empty() {
-                return match single {
-                    true => format!("Nothing scheduled for {today}."),
-                    false => format!("Nothing scheduled from {today} through {through}."),
+                return match kinds.is_empty() {
+                    true => format!("Nothing scheduled {span}."),
+                    false => format!("Nothing of kind {} scheduled {span}.", kinds.join(", ")),
                 };
             }
             let title = match single {
@@ -663,6 +677,17 @@ impl Ctx<'_> {
                 event_row,
             )
         })?;
+        if !unmatched.is_empty() {
+            let unmatched: Vec<_> = unmatched.into_iter().map(String::as_str).collect();
+            let present = match present.is_empty() {
+                true => "none".to_owned(),
+                false => present.into_iter().collect::<Vec<_>>().join(", "),
+            };
+            result.warnings.push(format!(
+                "--kind {} matched no calendar row {span} (kinds present: {present})",
+                unmatched.join(", ")
+            ));
+        }
         if undated > 0 {
             result.warnings.push(format!(
                 "{undated} calendar event(s) have no date and are not shown; see `klms calendar list`"

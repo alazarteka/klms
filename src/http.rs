@@ -2,12 +2,13 @@
 //! every caller supplies its own origin policy to [`follow`].
 use std::{
     io,
+    net::IpAddr,
     time::{Duration, Instant},
 };
 
 use crate::url::Url;
 use ureq::{
-    Agent, BodyReader,
+    Agent, BodyReader, Proxy,
     config::Config,
     http::{self},
     tls::{RootCerts, TlsConfig},
@@ -20,8 +21,8 @@ pub use ureq::http::{HeaderMap, HeaderValue, Method, header::SET_COOKIE};
 pub const USER_AGENT: &str = concat!("klms/", env!("CARGO_PKG_VERSION"));
 
 /// Builds an agent that reports every HTTP status as a normal response and
-/// leaves redirects to the caller. Proxy settings come from the environment
-/// (`HTTPS_PROXY`, `NO_PROXY`, ...) and trust roots from the platform store.
+/// leaves redirects to the caller. Each request picks its own proxy (see
+/// [`proxy_for`]); trust roots come from the platform store.
 pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
     let tls = TlsConfig::builder()
         .root_certs(RootCerts::PlatformVerifier)
@@ -33,6 +34,7 @@ pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
+        .proxy(None)
         .tls_config(tls)
         .build();
     Agent::new_with_config(config)
@@ -59,8 +61,11 @@ impl Response {
         &self.headers
     }
 
+    /// The header as text. Raw UTF-8 is accepted (servers send it in
+    /// `Location`), unlike `HeaderValue::to_str`, which allows only ASCII.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).and_then(|value| value.to_str().ok())
+        let value = self.headers.get(name)?;
+        std::str::from_utf8(value.as_bytes()).ok()
     }
 
     pub fn content_length(&self) -> Option<u64> {
@@ -91,15 +96,47 @@ pub enum Failure {
     Refused(AppError),
 }
 
+/// The proxy URL for a request to `url`, read through `env` like curl does:
+/// `https_proxy`/`HTTPS_PROXY` for https and `http_proxy`/`HTTP_PROXY` for
+/// http, then `all_proxy`/`ALL_PROXY`. `no_proxy`/`NO_PROXY` lists `*` or
+/// hosts that are bypassed along with their subdomains (a leading dot is
+/// optional, IPv6 brackets too). Loopback targets are never proxied.
+fn proxy_for(url: &Url, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let unbracket = |host: &str| {
+        let host = host.trim().trim_start_matches('.');
+        let inner = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        inner.unwrap_or(host).to_ascii_lowercase()
+    };
+    let host = unbracket(url.host_str()?);
+    if host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+        return None;
+    }
+    let first = |names: &[&str]| {
+        let mut values = names.iter().filter_map(|name| env(name));
+        values.find(|value| !value.trim().is_empty())
+    };
+    let proxy = match url.scheme() {
+        "https" => first(&["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]),
+        _ => first(&["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]),
+    }?;
+    let bypass = first(&["no_proxy", "NO_PROXY"]).unwrap_or_default();
+    let bypassed = bypass.split(',').map(unbracket).any(|entry| {
+        entry == "*" || !entry.is_empty() && (host == entry || host.ends_with(&format!(".{entry}")))
+    });
+    (!bypassed).then_some(proxy)
+}
+
 fn run<B: ureq::AsSendBody>(
     agent: &Agent,
     request: http::Request<B>,
     remaining: Option<Duration>,
+    proxy: Option<Proxy>,
 ) -> Result<http::Response<ureq::Body>, ureq::Error> {
     agent.run(
         agent
             .configure_request(request)
             .timeout_global(remaining)
+            .proxy(proxy)
             .build(),
     )
 }
@@ -124,6 +161,13 @@ fn send_until(
         ),
         None => None,
     };
+    let proxy = match proxy_for(url, |name| std::env::var(name).ok()) {
+        Some(proxy) => Some(
+            Proxy::new(&proxy)
+                .map_err(|_| Failure::Transport("invalid proxy URL in the environment".into()))?,
+        ),
+        None => None,
+    };
     let mut builder = http::Request::builder().method(method).uri(url.as_str());
     for (name, value) in headers {
         builder = builder.header(*name, value.as_str());
@@ -132,10 +176,10 @@ fn send_until(
         Some(payload) => builder
             .header("content-type", payload.content_type)
             .body(payload.bytes.clone())
-            .map(|request| run(agent, request, remaining)),
+            .map(|request| run(agent, request, remaining, proxy)),
         None => builder
             .body(())
-            .map(|request| run(agent, request, remaining)),
+            .map(|request| run(agent, request, remaining, proxy)),
     };
     let response = result
         .map_err(|error| transport(error.to_string()))?
@@ -174,10 +218,10 @@ pub struct Follow {
     pub strict: bool,
 }
 
-/// Sends the request and follows redirects by hand. 301/302 rewrite POST,
-/// and 303 rewrites methods other than GET/HEAD to a body-less GET. Other
-/// methods and 307/308 retain their method and body. The agent's global
-/// timeout bounds the whole chain, not each hop.
+/// Sends the request and follows redirects by hand. 307/308 keep the method
+/// and body; any other redirect drops the body and turns every method except
+/// HEAD into GET. The agent's global timeout bounds the whole chain, not each
+/// hop.
 pub fn follow(
     agent: &Agent,
     request: Follow,
@@ -224,10 +268,10 @@ pub fn follow(
         redirects += 1;
         let next = url.join(&location).map_err(|_| Failure::InvalidLocation)?;
         policy.allow(&next).map_err(Failure::Refused)?;
-        if (matches!(status, 301 | 302) && method == Method::POST)
-            || (status == 303 && !matches!(method, Method::GET | Method::HEAD))
-        {
-            method = Method::GET;
+        if !matches!(status, 307 | 308) {
+            if method != Method::HEAD {
+                method = Method::GET;
+            }
             payload = None;
         }
         url = next;
@@ -237,55 +281,166 @@ pub fn follow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture_server::{Response as FixtureResponse, Server};
+    use crate::fixture_server::{Response as Served, Server};
 
-    struct LocalPolicy;
-    impl Policy for LocalPolicy {
-        fn allow(&mut self, url: &Url) -> Result<(), AppError> {
-            assert!(url.is_http_loopback());
+    struct AllowAll;
+
+    impl Policy for AllowAll {
+        fn allow(&mut self, _url: &Url) -> Result<(), AppError> {
             Ok(())
         }
     }
 
+    /// The request lines and bodies seen when `method` meets `status` with a
+    /// `Location` of `/next`.
+    fn redirected(method: Method, status: &'static str, strict: bool) -> Vec<(String, String)> {
+        let server = Server::new(move |request| {
+            if request.target == "/start" {
+                Served::bytes("text/plain", "")
+                    .status(status)
+                    .header("Location", "/next")
+            } else {
+                Served::bytes("text/plain", "done")
+            }
+        });
+        let payload = (method == Method::POST).then(|| Payload {
+            content_type: "application/x-www-form-urlencoded",
+            bytes: b"a=1".to_vec(),
+        });
+        let request = Follow {
+            method,
+            url: Url::parse(&format!("{}/start", server.url())).unwrap(),
+            payload,
+            max_redirects: 5,
+            strict,
+        };
+        follow(&agent(Duration::from_secs(5), None), request, &mut AllowAll).unwrap();
+        let recorded = server.recorded().into_iter();
+        recorded.map(|r| (r.line, r.body)).collect()
+    }
+
+    fn hop(line: &str, body: &str) -> (String, String) {
+        (format!("{line} HTTP/1.1"), body.to_owned())
+    }
+
     #[test]
-    fn head_remains_head_through_every_redirect_status() {
-        let server = Server::new(|request| {
-            let step = request
-                .target
-                .trim_start_matches('/')
-                .parse::<usize>()
-                .unwrap();
-            let statuses = [
+    fn head_stays_head_and_post_keeps_its_body_only_through_307_and_308() {
+        for strict in [false, true] {
+            for status in [
                 "301 Moved Permanently",
                 "302 Found",
                 "303 See Other",
                 "307 Temporary Redirect",
                 "308 Permanent Redirect",
-            ];
-            if step < statuses.len() {
-                FixtureResponse::bytes("text/plain", "")
-                    .status(statuses[step])
-                    .header("Location", &format!("/{}", step + 1))
+            ] {
+                assert_eq!(
+                    redirected(Method::HEAD, status, strict),
+                    [hop("HEAD /start", ""), hop("HEAD /next", "")],
+                    "HEAD through {status}, strict={strict}"
+                );
+                let kept = matches!(&status[..3], "307" | "308");
+                let next = if kept {
+                    hop("POST /next", "a=1")
+                } else {
+                    hop("GET /next", "")
+                };
+                assert_eq!(
+                    redirected(Method::POST, status, strict),
+                    [hop("POST /start", "a=1"), next],
+                    "POST through {status}, strict={strict}"
+                );
+            }
+        }
+        // Strict mode follows every 3xx; the unusual ones never resend a POST.
+        for status in [
+            "300 Multiple Choices",
+            "304 Not Modified",
+            "305 Use Proxy",
+            "306 Switch Proxy",
+        ] {
+            assert_eq!(
+                redirected(Method::POST, status, true),
+                [hop("POST /start", "a=1"), hop("GET /next", "")],
+                "POST through {status}, strict"
+            );
+            assert_eq!(
+                redirected(Method::POST, status, false),
+                [hop("POST /start", "a=1")],
+                "POST through {status}, not strict"
+            );
+        }
+    }
+
+    #[test]
+    fn follows_a_raw_utf8_location_with_the_path_percent_encoded() {
+        let server = Server::new(|request| {
+            if request.target == "/start" {
+                Served::bytes("text/plain", "")
+                    .status("302 Found")
+                    .header("Location", "/files/한.pdf")
             } else {
-                FixtureResponse::bytes("application/octet-stream", "metadata")
+                Served::bytes("application/pdf", "%PDF")
             }
         });
-        let response = follow(
-            &agent(Duration::from_secs(5), None),
-            Follow {
-                method: Method::HEAD,
-                url: Url::parse(&format!("{}/0", server.url())).unwrap(),
-                payload: None,
-                max_redirects: 5,
-                strict: false,
-            },
-            &mut LocalPolicy,
-        )
-        .unwrap();
+        let request = Follow {
+            method: Method::GET,
+            url: Url::parse(&format!("{}/start", server.url())).unwrap(),
+            payload: None,
+            max_redirects: 5,
+            strict: false,
+        };
+        let agent = agent(Duration::from_secs(5), None);
+        let response = follow(&agent, request, &mut AllowAll).unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(response.content_length(), Some(8));
-        let requests = server.requests();
-        assert_eq!(requests.len(), 6);
-        assert!(requests.iter().all(|line| line.starts_with("HEAD ")));
+        assert_eq!(response.url().path(), "/files/%ED%95%9C.pdf");
+        assert_eq!(
+            server.requests(),
+            ["GET /start HTTP/1.1", "GET /files/%ED%95%9C.pdf HTTP/1.1"]
+        );
+    }
+
+    #[test]
+    fn proxy_is_chosen_per_scheme_and_bypassed_for_no_proxy_and_loopback() {
+        let pick = |url: &str, vars: &[(&str, &str)]| {
+            let url = Url::parse(url).unwrap();
+            proxy_for(&url, |name| {
+                let found = vars.iter().find(|(key, _)| *key == name);
+                found.map(|(_, value)| value.to_string())
+            })
+        };
+        let klms = "https://klms.kaist.ac.kr/my/";
+        let both = [("HTTPS_PROXY", "http://s:1"), ("HTTP_PROXY", "http://p:1")];
+        assert_eq!(pick(klms, &both).as_deref(), Some("http://s:1"));
+        assert_eq!(
+            pick("http://example.com/", &both).as_deref(),
+            Some("http://p:1")
+        );
+        assert_eq!(pick(klms, &[("HTTP_PROXY", "http://p:1")]), None);
+        let all = [("ALL_PROXY", "http://a:1"), ("https_proxy", "")];
+        assert_eq!(pick(klms, &all).as_deref(), Some("http://a:1"));
+        let lower = [("https_proxy", "http://l:1"), ("HTTPS_PROXY", "http://u:1")];
+        assert_eq!(pick(klms, &lower).as_deref(), Some("http://l:1"));
+
+        let proxied = |url: &str, no_proxy: &str| {
+            let vars = [("ALL_PROXY", "http://a:1"), ("NO_PROXY", no_proxy)];
+            pick(url, &vars).is_some()
+        };
+        for no_proxy in ["kaist.ac.kr", ".kaist.ac.kr", "x, KAIST.ac.kr", "*"] {
+            assert!(!proxied(klms, no_proxy), "{no_proxy}");
+            assert!(!proxied("https://kaist.ac.kr/", no_proxy), "{no_proxy}");
+        }
+        assert!(proxied("https://notkaist.ac.kr/", "kaist.ac.kr"));
+        assert!(proxied(klms, "sso.kaist.ac.kr"));
+        assert!(proxied(klms, ""));
+        for no_proxy in ["2001:db8::1", "[2001:db8::1]"] {
+            assert!(!proxied("https://[2001:db8::1]/", no_proxy), "{no_proxy}");
+        }
+        for loopback in [
+            "http://127.0.0.1:9/",
+            "http://localhost:9/",
+            "http://[::1]:9/",
+        ] {
+            assert!(!proxied(loopback, "example.com"), "{loopback}");
+        }
     }
 }
