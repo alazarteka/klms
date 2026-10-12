@@ -28,6 +28,9 @@ output    -> models, error
 - `client`: KLMS URL policy, cookie selection, timeouts, redirects, response
   bounds, and authentication checks. It also has a separate unauthenticated
   HTTPS client for release downloads used by `update`.
+- `client/stream`: the one bounded copy loop for video bodies (native and
+  Panopto): byte caps, MP4/HTML sniffing before writing, the overall deadline
+  and the stall timeout.
 - `client/panopto`: transient Panopto delivery/folder reads and credential-free
   media transport, including bounded HLS retrieval and local ffmpeg remux.
   `Origins` names the Panopto and media CDN origins every policy trusts (fixed
