@@ -250,7 +250,7 @@ fn login_with(
     )?;
     // KAIST accepted the credentials (even if it still wants a code), so it
     // is safe to remember them now.
-    let identity = remember_login(
+    let (identity, stored_now) = remember_login(
         env,
         remembered.as_ref(),
         Identity::new(&begun.username, method, factor),
@@ -259,17 +259,10 @@ fn login_with(
     );
     match begun.outcome {
         Outcome::Complete(completed) => {
-            let saved =
-                new_backend
-                    .as_ref()
-                    .zip(begun.password.as_ref())
-                    .and_then(|(backend, _)| {
-                        password_saved_notice(
-                            env.json,
-                            backend,
-                            identity.password_backend.as_deref(),
-                        )
-                    });
+            let saved = new_backend
+                .as_ref()
+                .filter(|_| stored_now)
+                .and_then(|backend| password_saved_notice(env.json, backend));
             let result = finish_login(env, completed, &identity, warnings)?;
             if let Some(notice) = saved {
                 eprintln!("{notice}");
@@ -289,9 +282,9 @@ fn login_with(
 }
 
 /// Human-mode stderr line naming where a just-saved password lives; `None`
-/// under `--json` or when the password did not end up in `backend`.
-fn password_saved_notice(json: bool, backend: &Backend, stored: Option<&str>) -> Option<String> {
-    if json || stored != Some(backend.kind()) {
+/// under `--json`.
+fn password_saved_notice(json: bool, backend: &Backend) -> Option<String> {
+    if json {
         return None;
     }
     Some(match backend {
@@ -331,15 +324,16 @@ fn stored_password(
 }
 
 /// Persist `login.json` (and the password, when asked) after KAIST accepted
-/// the credentials; returns what was saved. Failures are warnings: the
-/// sign-in itself already worked.
+/// the credentials; returns what was saved and whether this call stored the
+/// password. Failures are warnings: the sign-in itself already worked.
 fn remember_login(
     env: &Env<'_>,
     previous: Option<&Identity>,
     mut identity: Identity,
     new_password: Option<(&Backend, &Zeroizing<String>)>,
     warnings: &mut Vec<String>,
-) -> Identity {
+) -> (Identity, bool) {
+    let mut stored_now = false;
     let username = identity.username.clone();
     let same = previous.filter(|found| found.username == username);
     identity.second_factor = identity
@@ -372,17 +366,31 @@ fn remember_login(
                     let _ = env.secrets.open(&kind).and_then(|old| old.clear(&username));
                 }
                 identity.password_backend = Some(backend.kind().to_owned());
+                stored_now = true;
             }
-            Err(error) => warnings.push(format!(
-                "could not remember the password: {}",
-                error.message
-            )),
+            Err(error) => {
+                warnings.push(format!(
+                    "could not remember the password: {}",
+                    error.message
+                ));
+                // The old password is now stale: never keep using it.
+                if let Some(kind) = identity.password_backend.take() {
+                    let cleared = env.secrets.open(&kind).and_then(|old| old.clear(&username));
+                    warnings.push(match cleared {
+                        Ok(()) => "the previously remembered password was removed".to_owned(),
+                        Err(error) => format!(
+                            "the previously remembered password is no longer used but could not be removed from the {kind} backend: {}",
+                            error.message
+                        ),
+                    });
+                }
+            }
         }
     }
     if let Err(error) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
         warnings.push(format!("could not remember the login: {}", error.message));
     }
-    identity
+    (identity, stored_now)
 }
 
 fn finish_login(
@@ -423,9 +431,12 @@ fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
     flow::check_code_format(code)?;
     let pending_path = env.dirs.pending();
     let pending = store::load_pending(&pending_path, env.klms, epoch_now() as u64)?;
-    let completed = flow::resume(env.klms, env.sso, env.timeout, &pending, code);
-    // The challenge is single-use whether or not the code was right.
-    let _ = store::remove_file(&pending_path, "pending login");
+    let (answered, completed) = flow::resume(env.klms, env.sso, env.timeout, &pending, code);
+    // Once KAIST has answered, the challenge is used up whether or not the
+    // code was right; without an answer the same code can be retried.
+    if answered {
+        let _ = store::remove_file(&pending_path, "pending login");
+    }
     let completed = completed?;
     let previous = store::load_identity(&env.dirs.identity()).ok().flatten();
     let mut warnings = Vec::new();
@@ -434,7 +445,7 @@ fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
         LoginMethod::Password,
         Some(pending.second_factor),
     );
-    let identity = remember_login(env, previous.as_ref(), login, None, &mut warnings);
+    let (identity, _) = remember_login(env, previous.as_ref(), login, None, &mut warnings);
     finish_login(env, completed, &identity, warnings)
 }
 
@@ -460,16 +471,26 @@ pub fn forget() -> Result<CommandResult, AppError> {
 fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError> {
     // A corrupt login.json must still be removable.
     let found = store::load_identity(&dirs.identity()).ok().flatten();
-    let mut backend = None;
+    let (mut backend, mut cleared) = (None, false);
+    let mut warnings = Vec::new();
     if let Some((found, kind)) = found
         .as_ref()
         .and_then(|found| Some((found, found.password_backend.clone()?)))
+        .filter(|(_, kind)| kind != secret::PLAINTEXT_FILE)
     {
-        secrets.open(&kind)?.clear(&found.username)?;
+        // A broken backend must not keep the user from forgetting the rest.
+        match secrets.open(&kind).and_then(|b| b.clear(&found.username)) {
+            Ok(()) => cleared = true,
+            Err(error) => warnings.push(format!(
+                "could not remove the stored password of {} from the {kind} backend ({}); it may remain there",
+                found.username, error.message
+            )),
+        }
         backend = Some(kind);
     }
     // The plaintext file only ever holds klms passwords; drop it entirely.
     if store::remove_file(&dirs.credentials(), "credentials file")? {
+        cleared |= backend.is_none();
         backend.get_or_insert_with(|| secret::PLAINTEXT_FILE.to_owned());
     }
     let removed = [
@@ -477,7 +498,7 @@ fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError
             store::remove_file(&dirs.identity(), "remembered login")?,
             "remembered login",
         ),
-        (backend.is_some(), "stored password"),
+        (cleared, "stored password"),
         (
             store::remove_file(&dirs.pending(), "pending login")?,
             "pending verification",
@@ -502,7 +523,9 @@ fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError
         "password_backend": backend,
         "pending_removed": removed[2].0,
     });
-    output::result("auth.forget", &data, human)
+    let mut result = output::result("auth.forget", &data, human)?;
+    result.warnings = warnings;
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -28,6 +28,8 @@ const SECRET_SERVICE: &str = "secret-service";
 const SERVICE: &str = "klms";
 const PROBE_ACCOUNT: &str = "klms-availability-probe";
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest password (in bytes) any backend will remember.
+const MAX_SECRET: usize = 1024;
 
 /// Chooses and reopens backends. Tests point it at fake helpers.
 pub struct Secrets {
@@ -186,10 +188,16 @@ impl Finished {
     }
 }
 
-/// Quote one word for the `security -i` command parser.
-fn security_quote(word: &str) -> String {
-    let escaped = word.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+/// Append one word quoted for the `security -i` command parser.
+fn push_quoted(out: &mut String, word: &str) {
+    out.push('"');
+    for c in word.chars() {
+        if matches!(c, '\\' | '"') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -242,22 +250,44 @@ impl Backend {
                 "a remembered password cannot be empty or contain control characters",
             ));
         }
-        if account.is_empty() || account.chars().any(char::is_control) {
+        // Keeps a `security -i` command line far below its 4096-byte limit.
+        if secret.len() > MAX_SECRET {
+            return Err(AppError::usage(format!(
+                "a remembered password cannot be longer than {MAX_SECRET} bytes"
+            )));
+        }
+        if account.is_empty() || account.len() > MAX_SECRET || account.chars().any(char::is_control)
+        {
             return Err(AppError::usage("invalid account name for password storage"));
         }
         match self {
             Self::Keychain(program) => {
-                let command = Zeroizing::new(format!(
-                    "add-generic-password -U -s {SERVICE} -a {} -w {}\n",
-                    security_quote(account),
-                    security_quote(secret)
+                // `security -w` prints a password with any byte outside
+                // printable ASCII as hex, so it could never be read back.
+                if !secret.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+                    return Err(AppError::usage(
+                        "the macOS keychain can only remember passwords of printable ASCII characters",
+                    )
+                    .with_hint("Omit `--remember-password` and enter the password each time."));
+                }
+                let mut command = Zeroizing::new(String::with_capacity(
+                    64 + 2 * (account.len() + secret.len()),
                 ));
+                command.push_str("add-generic-password -U -s ");
+                command.push_str(SERVICE);
+                command.push_str(" -a ");
+                push_quoted(&mut command, account);
+                command.push_str(" -w ");
+                push_quoted(&mut command, secret);
+                command.push('\n');
                 let finished = run_helper(program, &["-i"], Some(command.as_bytes()))?;
                 // `security -i` can report command failures only on stderr, so
                 // prove the write by reading it back.
-                let stored = self.lookup(account)?;
-                if finished.code != Some(0) || stored.as_deref().map(String::as_str) != Some(secret)
-                {
+                let stored = self.lookup(account);
+                let stored = stored.as_ref().ok().and_then(Option::as_deref);
+                if finished.code != Some(0) || stored.map(String::as_str) != Some(secret) {
+                    // Whatever did land there is not the password we meant.
+                    let _ = self.clear(account);
                     return Err(AppError::config("the macOS keychain did not accept the password")
                         .with_hint("Unlock the login keychain and retry, or omit `--remember-password`."));
                 }
@@ -445,12 +475,64 @@ esac"#,
         assert_eq!(error.code, "CONFIG_ERROR");
     }
 
+    fn keychain_refuses_what_it_cannot_read_back_and_removes_a_bad_write() {
+        let missing = Backend::Keychain("/nonexistent/security".into());
+        for (secret, message) in [
+            (
+                "pässword",
+                "the macOS keychain can only remember passwords of printable ASCII characters",
+            ),
+            (
+                &"p".repeat(1025)[..],
+                "a remembered password cannot be longer than 1024 bytes",
+            ),
+        ] {
+            let error = missing.store("student", secret).unwrap_err();
+            assert_eq!((error.code, error.message.as_str()), ("USAGE", message));
+        }
+        assert!(
+            missing
+                .store("student", &"p".repeat(1024))
+                .is_err_and(|error| {
+                    error.message == "cannot run `security`: No such file or directory (os error 2)"
+                })
+        );
+
+        // The write lands, but reads back as something else (as `security`
+        // does with hex): the item is deleted again.
+        let (bin, store) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let program = script(
+            bin.path(),
+            "security",
+            &format!(
+                r#"case "$1" in
+  -i) cat >/dev/null; touch "{s}/item" ;;
+  find-generic-password) echo 70c3a4; exit 0 ;;
+  delete-generic-password) rm "{s}/item" ;;
+esac"#,
+                s = store.path().display()
+            ),
+        );
+        let error = Backend::Keychain(program)
+            .store("student", "pw")
+            .unwrap_err();
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (
+                "CONFIG_ERROR",
+                "the macOS keychain did not accept the password"
+            )
+        );
+        assert!(!store.path().join("item").exists());
+    }
+
     /// One test: the fake helper scripts are written and executed in turn,
     /// never while another thread forks (which can make `exec` fail with ETXTBSY).
     #[test]
     fn helper_programs_and_backend_choice() {
         helpers_get_secrets_on_stdin_only();
         keychain_store_fails_loudly_when_nothing_was_written();
+        keychain_refuses_what_it_cannot_read_back_and_removes_a_bad_write();
         backend_choice_follows_the_platform_and_consent();
     }
 
