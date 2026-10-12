@@ -9,6 +9,7 @@ use std::{
 
 use cbc::cipher::{BlockEncryptMut, KeyIvInit, block_padding::AnsiX923};
 use kisaseed::SEED;
+use serde::Serialize;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -261,13 +262,13 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
             return Err(AppError::usage("password cannot be empty"));
         }
         let factor = factor.unwrap_or(SecondFactor::Email);
-        let payload = json!({
-            "login_id": username,
-            "login_pwd": password.as_str(),
-            "agt_id": AGENT_ID,
-            "linkUrl": LINK_URL,
-            "device_cd": previous_devices,
-        });
+        let payload = PasswordLogin {
+            agt_id: AGENT_ID,
+            device_cd: previous_devices,
+            link_url: LINK_URL,
+            login_id: &username,
+            login_pwd: &password,
+        };
         let response = auth_request(&mut transport, &payload, "/auth/user/login/auth")?;
         match next(Stage::Password, result_code(&response)?)? {
             Next::Link => link(&mut transport)?,
@@ -298,14 +299,34 @@ pub fn begin(attempt: Attempt<'_>, prompt: &mut impl AuthPrompt) -> Result<Begun
     })
 }
 
-/// Finish a login whose code was requested by an earlier process.
+/// Finish a login whose code was requested by an earlier process. The flag
+/// is false when KAIST gave no answer to the code (a NETWORK_ERROR while
+/// sending it), so the same pending login can be retried.
 pub fn resume(
     klms: &Url,
     sso: &Url,
     timeout: u64,
     pending: &PendingLogin,
     code: &str,
-) -> Result<CompletedLogin, AppError> {
+) -> (bool, Result<CompletedLogin, AppError>) {
+    let mut transport = match prepare(klms, sso, timeout, pending) {
+        Ok(transport) => transport,
+        Err(error) => return (true, Err(error)),
+    };
+    let answer = send_code(&mut transport, code);
+    let answered = !matches!(&answer, Err(error) if error.code == "NETWORK_ERROR");
+    let completed = answer
+        .and_then(|response| check_code(&mut transport, &response))
+        .and_then(|()| finish(&transport, &pending.previous_devices));
+    (answered, completed)
+}
+
+fn prepare(
+    klms: &Url,
+    sso: &Url,
+    timeout: u64,
+    pending: &PendingLogin,
+) -> Result<SsoTransport, AppError> {
     let mut transport = SsoTransport::new(klms.clone(), sso.clone(), timeout)?;
     transport.cookies = pending.jar.clone().checked()?;
     if let Some(document) = &pending.document_url {
@@ -313,8 +334,7 @@ pub fn resume(
             .map_err(|_| AppError::config("saved login state has an invalid document URL"))?;
         transport.set_document_url(url)?;
     }
-    verify_code(&mut transport, code)?;
-    finish(&transport, &pending.previous_devices)
+    Ok(transport)
 }
 
 fn finish(transport: &SsoTransport, previous: &[String]) -> Result<CompletedLogin, AppError> {
@@ -331,10 +351,45 @@ fn finish(transport: &SsoTransport, previous: &[String]) -> Result<CompletedLogi
     Ok(CompletedLogin { cookies, devices })
 }
 
+/// The password step's JSON body, serialized straight into a zeroized buffer
+/// (fields in the order `json!` used to emit them).
+#[derive(Serialize)]
+struct PasswordLogin<'a> {
+    agt_id: &'a str,
+    device_cd: &'a [String],
+    #[serde(rename = "linkUrl")]
+    link_url: &'a str,
+    login_id: &'a str,
+    login_pwd: &'a str,
+}
+
+/// Serialize `value` into a buffer sized exactly up front, so no copy of a
+/// secret is left behind by a reallocation, and zeroized on drop.
+fn encode_secret_json(value: &impl Serialize) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    struct Count(usize);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let failed = |error: serde_json::Error| {
+        AppError::internal(format!("failed to encode login request: {error}"))
+    };
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).map_err(failed)?;
+    let mut buffer = Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(&mut *buffer, value).map_err(failed)?;
+    Ok(buffer)
+}
+
 /// Encrypt `payload` with a fresh login key and POST it to `path`.
 fn auth_request(
     transport: &mut SsoTransport,
-    payload: &Value,
+    payload: &impl Serialize,
     path: &str,
 ) -> Result<Value, AppError> {
     let init = transport.ajax("/auth/user/login/init", &[])?;
@@ -344,10 +399,7 @@ fn auth_request(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::auth_protocol("KAIST SSO login init omitted its key"))?;
     let key = Zeroizing::new(key.to_owned());
-    let payload =
-        Zeroizing::new(serde_json::to_vec(payload).map_err(|error| {
-            AppError::internal(format!("failed to encode login request: {error}"))
-        })?);
+    let payload = encode_secret_json(payload)?;
     let encrypted = Zeroizing::new(encrypt_user_data(&key, &payload)?);
     transport.ajax(path, &[("user_data", encrypted.as_str())])
 }
@@ -403,10 +455,18 @@ fn second_factor(
 
 /// Check a six-digit code with KAIST and finish the link/device step.
 fn verify_code(transport: &mut SsoTransport, otp: &str) -> Result<(), AppError> {
+    let response = send_code(transport, otp)?;
+    check_code(transport, &response)
+}
+
+fn send_code(transport: &mut SsoTransport, otp: &str) -> Result<Value, AppError> {
     check_code_format(otp)?;
     let path = "/auth/kaist/user/login/second/ajaxValidCrtfcNo";
-    let response = transport.ajax(path, &[("crtfc_no", otp)])?;
-    let step = next(Stage::Otp, result_code(&response)?)?;
+    transport.ajax(path, &[("crtfc_no", otp)])
+}
+
+fn check_code(transport: &mut SsoTransport, response: &Value) -> Result<(), AppError> {
+    let step = next(Stage::Otp, result_code(response)?)?;
     proceed(transport, step)
 }
 
@@ -590,6 +650,28 @@ fn register_device(transport: &mut SsoTransport) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_body_is_exactly_sized_and_matches_the_old_json() {
+        let devices = ["d1".to_owned(), "d\"2".to_owned()];
+        let body = encode_secret_json(&PasswordLogin {
+            agt_id: AGENT_ID,
+            device_cd: &devices,
+            link_url: LINK_URL,
+            login_id: "student",
+            login_pwd: "pa\"ss\\é",
+        })
+        .unwrap();
+        let old = json!({
+            "login_id": "student",
+            "login_pwd": "pa\"ss\\é",
+            "agt_id": AGENT_ID,
+            "linkUrl": LINK_URL,
+            "device_cd": devices,
+        });
+        assert_eq!(body.as_slice(), serde_json::to_vec(&old).unwrap());
+        assert_eq!(body.capacity(), body.len(), "never reallocated");
+    }
 
     #[test]
     fn result_codes_map_per_stage_and_unknown_ones_are_protocol_changes() {
