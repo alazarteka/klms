@@ -91,3 +91,10 @@ contacts only GitHub, verifies the archive SHA-256 and the candidate version,
 and keeps the old binary on failure. A legacy installed skill (the `klms skill`
 command and SKILL.md are deprecated; `klms --help` is the manual) is never
 removed: `update` lists its paths in `warnings` so the user can delete them.
+
+Proxies are chosen per request as curl does: `https_proxy`/`HTTPS_PROXY` for
+HTTPS and `http_proxy`/`HTTP_PROXY` for HTTP, then `all_proxy`/`ALL_PROXY`
+(lowercase wins). `no_proxy`/`NO_PROXY` takes `*` or comma-separated hosts,
+each also covering its subdomains (`kaist.ac.kr` covers `klms.kaist.ac.kr`; a
+leading dot and IPv6 brackets are optional). Ports and CIDR ranges in
+`NO_PROXY` are not supported. Loopback targets are never proxied.
