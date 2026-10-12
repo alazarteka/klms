@@ -286,6 +286,29 @@ mod tests {
     }
 
     #[test]
+    fn keeps_non_http_links_as_written_but_drops_scripts() {
+        let html = "<main><a href='mailto:ta@example.test?subject=HW#top'>Mail the TA</a>\
+            <a href=' tel:+82-42-000-0000 '>Office</a>\
+            <a href='javascript:void(0)'>Toggle</a>\
+            <a href='/pluginfile.php/1/a.pdf'>Slides</a></main>";
+        let url = base().join("/mod/page/view.php?id=7").unwrap();
+        let detail = resource_detail(html, &base(), &url, "page").unwrap();
+        let links: Vec<_> = detail
+            .links
+            .iter()
+            .map(|link| (link.title.as_str(), link.url.as_str()))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("Mail the TA", "mailto:ta@example.test?subject=HW"),
+                ("Office", "tel:+82-42-000-0000"),
+                ("Slides", "https://klms.example/pluginfile.php/1/a.pdf"),
+            ]
+        );
+    }
+
+    #[test]
     fn pagination_stays_on_origin() {
         let base = Url::parse("https://klms.example/").unwrap();
         let next = "<div class='pagination'><span class='next'><a href='/mod/courseboard/view.php?id=8&page=2'>Next</a></span></div>";

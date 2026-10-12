@@ -98,3 +98,8 @@ HTTPS and `http_proxy`/`HTTP_PROXY` for HTTP, then `all_proxy`/`ALL_PROXY`
 each also covering its subdomains (`kaist.ac.kr` covers `klms.kaist.ac.kr`; a
 leading dot and IPv6 brackets are optional). Ports and CIDR ranges in
 `NO_PROXY` are not supported. Loopback targets are never proxied.
+
+Link lists in detail and dashboard output show `mailto:`, `tel:` and other
+non-HTTP links as written (fragment removed) but never fetch them, and the
+library does not record them. `javascript:` and `data:` links, and HTTP links
+to non-ASCII (IDN) hosts, are omitted.
