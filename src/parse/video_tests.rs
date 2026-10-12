@@ -31,7 +31,7 @@ fn lti13_forms_preserve_encoded_protocol_fields_without_execution() {
 #[test]
 fn signed_lti11_and_local_repost_forms_are_recognized() {
     let legacy = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="oauth_signature" value="synthetic"><input name="lti_message_type" value="basic-lti-launch-request"><input name="oauth_consumer_key" value="synthetic-key"></form>"#;
-    assert!(is_panopto_launch(legacy, &klms()).unwrap());
+    assert!(launch_form(legacy, &klms()).unwrap().is_some());
     let repost = r#"<form method="post" action="/mod/lti/auth.php"><input name="repost" value="synthetic"></form>"#;
     assert!(launch_form(repost, &klms()).unwrap().is_some());
 }
@@ -70,7 +70,7 @@ fn malformed_recognized_protocol_forms_fail_visibly() {
         ),
     ] {
         assert_eq!(
-            is_panopto_launch(&body, &klms()).unwrap_err().code,
+            launch_form(&body, &klms()).err().unwrap().code,
             "UPSTREAM_SHAPE_CHANGED"
         );
     }

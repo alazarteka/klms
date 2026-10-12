@@ -61,9 +61,10 @@ Safety:
 
 Row fields (--json; every `ref` can be passed back in as a ref):
   courses list      id, ref, title, code, term, url (default dashboard; --all or --year/--semester for history)
-  videos list/show  ref, kind, title, video_type (recording/collection), course_ref, duration_seconds,
-                    downloadable, official_download_available (null until inspected), stream_count,
-                    output_composition (composed_podcast/single_stream/separate_tracks); collections expand recordings
+  videos list/show  ref, kind, title, video_type (recording/collection; list: recording/panopto/lti),
+                    course_ref, duration_seconds, downloadable, official_download_available (null until
+                    inspected), stream_count, output_composition (composed_podcast/single_stream/
+                    separate_tracks); list never opens activities, show/download do (logged as a view)
   videos download   path, bytes, source_url (launch locator for Panopto), content_type
   files list        ref (null if not downloadable), id, kind, title, course_ref, week, section, url, downloadable
   today/upcoming    ref, kind, title, course, course_id, starts_at, when_text, url (Korea time;
@@ -650,7 +651,10 @@ pub struct ModuleArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VideosCommand {
-    /// List native recordings and verified Panopto recordings in a course.
+    /// List a course's video activities from the course page alone; opens no activity.
+    #[command(
+        after_help = "Metadata only: reads the course page and never opens an activity, so KLMS logs no view. Rows have video_type recording (native VOD), panopto (Panopto activity: one recording or a collection) or lti (external tool that may be Panopto), and downloadable is null. `videos show REF` opens the activity to verify it and expand collections."
+    )]
     List {
         #[arg(help = COURSE_HELP, long, value_name = "COURSE")]
         course: String,
@@ -658,6 +662,9 @@ pub enum VideosCommand {
         list: ListArgs,
     },
     /// Inspect one recording or collection without running its player.
+    #[command(
+        after_help = "Side effect: opens the activity in KLMS and, for Panopto, performs its LTI launch and reads Panopto delivery metadata. Moodle logs this as an activity view (and may mark view completion); Panopto may create your account on first launch. No playback/progress endpoints are called."
+    )]
     Show {
         /// Typed video reference printed by videos list (bare numbers are ambiguous).
         #[arg(value_name = "REF")]
@@ -665,7 +672,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. HLS requires ffmpeg. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. HLS requires ffmpeg. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.

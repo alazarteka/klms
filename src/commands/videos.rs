@@ -11,96 +11,33 @@ impl Ctx<'_> {
                 let activities = course_pages::activities(self.client, self.base, &resolved.id)?;
                 let mut videos = Vec::new();
                 let mut complete = true;
-                let mut warnings = Vec::new();
-                let mut seen = std::collections::HashSet::new();
+                // Metadata only: opening an activity (mod/*/view.php or its LTI
+                // launch) is logged by Moodle as a view, so `list` never does.
                 for activity in activities {
-                    if activity.kind == "vod" {
-                        if let Some(reference) = activity.reference {
-                            videos.push(Video {
-                                reference,
-                                kind: "vod".into(),
-                                title: activity.title,
-                                video_type: "recording",
-                                course_ref: Some(resolved.reference.clone()),
-                                duration_seconds: None,
-                                downloadable: None,
-                                official_download_available: None,
-                                stream_count: None,
-                                output_composition: None,
-                            });
-                        }
-                    } else if ["lti", "panopto", "panoptocourseembed"]
-                        .contains(&activity.kind.as_str())
-                    {
-                        let Some(reference) = activity.reference.as_deref() else {
-                            complete = false;
-                            continue;
-                        };
-                        let inspected = (|| {
-                            let page = self.video_page(reference)?;
-                            if !parse::video::is_panopto_launch(&page.text, &page.url)? {
-                                if activity.kind == "lti" {
-                                    return Ok(None);
-                                }
-                                return Err(AppError::shape(
-                                    "Panopto activity omitted recognized launch markup",
-                                ));
-                            }
-                            let mut session = self.client.panopto_launch(&page, self.timeout)?;
-                            let collection = session.recording_id.is_none();
-                            let recordings = session.recordings()?;
-                            Ok(Some((collection, recordings)))
-                        })();
-                        match inspected {
-                            Ok(Some((collection, recordings))) => {
-                                complete &= recordings.complete;
-                                if collection {
-                                    videos.push(Video {
-                                        reference: reference.into(),
-                                        kind: activity.kind.clone(),
-                                        title: activity.title.clone(),
-                                        video_type: "collection",
-                                        course_ref: Some(resolved.reference.clone()),
-                                        duration_seconds: None,
-                                        downloadable: Some(false),
-                                        official_download_available: None,
-                                        stream_count: None,
-                                        output_composition: None,
-                                    });
-                                }
-                                for recording in recordings.rows {
-                                    if seen.insert(recording.id.clone()) {
-                                        videos.push(Video {
-                                            reference: recording_ref(reference, &recording.id)?,
-                                            kind: "panopto".into(),
-                                            title: recording.title,
-                                            video_type: "recording",
-                                            course_ref: Some(resolved.reference.clone()),
-                                            duration_seconds: recording.duration_seconds,
-                                            downloadable: None,
-                                            official_download_available: None,
-                                            stream_count: None,
-                                            output_composition: None,
-                                        });
-                                    }
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(error)
-                                if error
-                                    .details
-                                    .as_ref()
-                                    .and_then(|d| d.get("non_video"))
-                                    .and_then(serde_json::Value::as_bool)
-                                    == Some(true) => {}
-                            Err(error) => {
-                                complete = false;
-                                warnings.push(format!("{reference}: {}", error.message));
-                            }
-                        }
-                    }
+                    let video_type = match activity.kind.as_str() {
+                        "vod" => "recording",
+                        "panopto" | "panoptocourseembed" => "panopto",
+                        "lti" => "lti",
+                        _ => continue,
+                    };
+                    let Some(reference) = activity.reference else {
+                        complete = false;
+                        continue;
+                    };
+                    videos.push(Video {
+                        reference,
+                        kind: activity.kind,
+                        title: activity.title,
+                        video_type,
+                        course_ref: Some(resolved.reference.clone()),
+                        duration_seconds: None,
+                        downloadable: None,
+                        official_download_available: None,
+                        stream_count: None,
+                        output_composition: None,
+                    });
                 }
-                let mut result = listing(
+                listing(
                     "videos.list",
                     videos,
                     list.limit,
@@ -110,9 +47,7 @@ impl Ctx<'_> {
                             row(&[&v.reference, v.video_type, &v.title])
                         })
                     },
-                )?;
-                result.warnings = warnings;
-                Ok(result)
+                )
             }
             VideosCommand::Show { target } => {
                 if !target.starts_with("vod:") && !target.contains("/mod/vod/") {
@@ -141,7 +76,7 @@ impl Ctx<'_> {
                         video_type: "collection",
                         course_ref: None,
                         duration_seconds: None,
-                        downloadable: Some(false),
+                        downloadable: None,
                         official_download_available: None,
                         stream_count: None,
                         output_composition: None,

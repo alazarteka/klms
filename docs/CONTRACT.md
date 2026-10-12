@@ -95,13 +95,20 @@ and keeps the old binary on failure.
 
 Schema 5 replaces the former activity-shaped video rows; the local SQLite schema
 remains version 1. Video grammar is independent of assignment/quiz grammar. `videos list --course`
-returns recordings and collections with `video_type`; verified Panopto
-collections expand into recording rows. A failed launch or incomplete folder
-page makes `meta.complete` false and produces a warning. LTI recognition uses
-launch protocol markup, never its title. `downloadable` and
-`official_download_available` are null when delivery sources have not been
-inspected. The official DownloadUrl permission is separate from readable
-playback MP4/HLS availability.
+is metadata-only: it reads the course page and never opens an activity, so it
+makes no `mod/*/view.php`, LTI launch or Panopto request. Its rows have
+`video_type` `recording` (native VOD), `panopto` (a Panopto activity: one
+recording or a collection) or `lti` (an external tool that may be Panopto), and
+`downloadable` null. `videos show` and `videos download` open the activity in
+KLMS and, for Panopto, perform its LTI launch and read Panopto delivery
+metadata; Moodle logs that as an activity view (and may mark view completion),
+and Panopto may create an account on first launch. `videos show` on a collection
+lists its recordings; a failed or incomplete folder enumeration sets `complete`
+false and produces a warning. LTI recognition uses launch protocol markup, never
+its title. `downloadable` and `official_download_available` are null when
+delivery sources have not been inspected, including on collections. The
+official DownloadUrl permission is separate from readable playback MP4/HLS
+availability.
 
 `panopto-recording:KIND:CM:UUID` identifies an actual recording and preserves its
 KLMS launch activity for renewed authentication. KIND is `lti`, `panopto` or
