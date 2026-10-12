@@ -728,31 +728,36 @@ fn video_grammar_rejects_ambiguous_ids_and_invalid_limits() {
 }
 
 #[test]
-fn video_list_inspects_lti_protocol_instead_of_titles_and_reports_failed_coverage() {
+fn video_list_reads_only_the_course_page_and_never_opens_activities() {
     let server = Server::new(|request| match request.target.as_str() {
         "/course/view.php?id=42" => Response::html(
-            r#"<main class="course-content"><li class="activity modtype_lti" id="module-7"><a href="/mod/lti/view.php?id=7"><span class="instancename">Panopto Lecture</span></a></li><li class="activity modtype_panoptocourseembed" id="module-8"><span class="instancename">Embedded collection</span></li></main>"#,
+            r#"<main class="course-content"><li class="activity modtype_vod" id="module-6"><a href="/mod/vod/view.php?id=6"><span class="instancename">Native lecture</span></a></li><li class="activity modtype_lti" id="module-7"><a href="/mod/lti/view.php?id=7"><span class="instancename">Panopto Lecture</span></a></li><li class="activity modtype_panoptocourseembed" id="module-8"><span class="instancename">Embedded collection</span></li><li class="activity modtype_assign" id="module-9"><a href="/mod/assign/view.php?id=9"><span class="instancename">Homework</span></a></li></main>"#,
         ),
-        "/mod/lti/view.php?id=7" => Response::html(
-            "<main><h1>Panopto Lecture</h1><a href='https://example.org'>Unrelated LTI</a></main>",
-        ),
-        "/mod/panoptocourseembed/view.php?id=8" => {
-            Response::html("<main><h1>Unavailable collection</h1></main>")
-        }
-        _ => panic!("unexpected request: {}", request.target),
+        _ => panic!("videos list opened an activity: {}", request.target),
     });
     let result = Env::at(&server).ok("videos list --course course:42");
-    assert_eq!(result["data"], json!([]));
-    assert_eq!(result["meta"]["complete"], false);
-    assert_eq!(result["meta"]["source_complete"], false);
-    assert!(result["meta"]["total"].is_null());
-    assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
-    assert!(
-        result["warnings"][0]
-            .as_str()
-            .unwrap()
-            .starts_with("panoptocourseembed:8:")
+    assert_eq!(server.requests(), ["GET /course/view.php?id=42 HTTP/1.1"]);
+    let rows = result["data"].as_array().unwrap();
+    let summary = rows
+        .iter()
+        .map(|v| {
+            (
+                v["ref"].as_str().unwrap(),
+                v["video_type"].as_str().unwrap(),
+                v["downloadable"].is_null(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary,
+        [
+            ("vod:6", "recording", true),
+            ("lti:7", "lti", true),
+            ("panoptocourseembed:8", "panopto", true),
+        ]
     );
+    assert_eq!(result["meta"]["complete"], true);
+    assert_eq!(result["warnings"], json!([]));
 }
 
 #[test]

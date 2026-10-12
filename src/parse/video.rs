@@ -74,9 +74,6 @@ pub fn launch_form(html: &str, base: &Url) -> Result<Option<LaunchForm>, AppErro
     }
     Ok(None)
 }
-pub fn is_panopto_launch(html: &str, url: &Url) -> Result<bool, AppError> {
-    Ok(launch_form(html, url)?.is_some() || embedded_launch(html, url).is_some())
-}
 pub fn embedded_launch(html: &str, base: &Url) -> Option<Url> {
     let doc = Html::parse_document(html);
     let allowed = |u: &Url| {
@@ -176,14 +173,19 @@ mod tests {
     #[test]
     fn recognition_uses_protocol_not_title() {
         let u = Url::parse("https://klms.kaist.ac.kr/mod/lti/view.php?id=1").unwrap();
-        assert!(!is_panopto_launch("<h1>Panopto Lecture</h1>", &u).unwrap());
-        assert!(is_panopto_launch(
+        assert!(
+            launch_form("<h1>Panopto Lecture</h1>", &u)
+                .unwrap()
+                .is_none()
+        );
+        assert!(embedded_launch("<h1>Panopto Lecture</h1>", &u).is_none());
+        assert!(launch_form(
             r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/lti/adv/platforms/test/login"><input name="iss" value="x"><input name="login_hint" value="x"><input name="target_link_uri" value="x"></form>"#,
             &u
-        ).unwrap());
-        assert!(!is_panopto_launch(
+        ).unwrap().is_some());
+        assert!(launch_form(
             r#"<form method="post" action="https://evil.test/Panopto/LTI/LTI.aspx"><input name="id_token" value="secret"><input name="state" value="secret"></form>"#,
             &u
-        ).unwrap());
+        ).unwrap().is_none());
     }
 }
