@@ -45,9 +45,11 @@ klms library sync --notices --files && klms library search "compiler"
 
 `klms update --check` reports the latest stable release; `klms update` installs
 it after verifying its SHA-256. Nothing checks for updates unless you ask.
-Earlier releases installed an Agent Skill copy of the help text. Installing or
-updating removes that managed copy and leaves anything else alone; the help
-text is the agent guidance now.
+Earlier releases installed an Agent Skill copy of the help text. The `klms
+skill` command and its SKILL.md are deprecated and `klms --help` is the manual.
+Updating never deletes the old copy; if it is still present, `klms update`
+lists its paths in a warning (the `warnings` array with `--json`) so you can
+delete them yourself.
 
 ## Development
 
