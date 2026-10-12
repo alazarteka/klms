@@ -242,6 +242,103 @@ impl KlmsClient {
         Ok(response)
     }
 
+    /// Native VOD bytes only. Video transfers get a separate, bounded time
+    /// budget without changing the shorter timeout used for ordinary reads.
+    pub fn download_video_to(
+        &self,
+        path: &str,
+        max_bytes: usize,
+        max_seconds: u64,
+        writer: &mut impl Write,
+    ) -> Result<DownloadResponse, AppError> {
+        if max_bytes == 0 || !(1..=7200).contains(&max_seconds) {
+            return Err(AppError::config(
+                "video limits require positive bytes and 1..7200 seconds",
+            ));
+        }
+        let url = self.resolve(path)?;
+        let mut policy = NativeVideoPolicy {
+            origin: self.base_url.origin(),
+            cookie: self.cookie.clone(),
+        };
+        http::Policy::allow(&mut policy, &url)?;
+        let agent = http::agent(
+            Duration::from_secs(max_seconds),
+            Some(Duration::from_secs(8)),
+        );
+        let mut response = http::follow(
+            &agent,
+            Follow {
+                method: Method::GET,
+                url,
+                payload: None,
+                max_redirects: MAX_REDIRECTS,
+                strict: false,
+            },
+            &mut policy,
+        )
+        .map_err(|failure| {
+            AppError::network(format!(
+                "native video request failed: {}",
+                describe(failure, "video redirect")
+            ))
+        })?;
+        if !matches!(response.status(), 200 | 206) {
+            return Err(bad_status(&response));
+        }
+        let metadata = remote_metadata(&response);
+        if metadata
+            .content_length
+            .is_some_and(|n| n > max_bytes as u64)
+        {
+            return Err(too_big(max_bytes));
+        }
+        // Validate the container before writing anything to the publisher.
+        let mut prefix = [0_u8; 12];
+        response
+            .read_exact(&mut prefix)
+            .map_err(|error| AppError::network(format!("incomplete video header: {error}")))?;
+        check_logged_out(&response, &prefix)?;
+        if metadata
+            .content_type
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("html"))
+            || &prefix[4..8] != b"ftyp"
+            || u32::from_be_bytes(prefix[..4].try_into().expect("four bytes")) < 12
+        {
+            return Err(AppError::upstream("native video response is not an MP4"));
+        }
+        if prefix.len() > max_bytes {
+            return Err(too_big(max_bytes));
+        }
+        writer
+            .write_all(&prefix)
+            .map_err(|error| AppError::config(format!("failed to write video: {error}")))?;
+        let mut total = prefix.len();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .map_err(|error| AppError::network(format!("failed to read video: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            total = total.checked_add(read).ok_or_else(|| too_big(max_bytes))?;
+            if total > max_bytes {
+                return Err(too_big(max_bytes));
+            }
+            writer
+                .write_all(&buffer[..read])
+                .map_err(|error| AppError::config(format!("failed to write video: {error}")))?;
+        }
+        validate_complete_bytes(&metadata, total)?;
+        Ok(DownloadResponse {
+            url: metadata.url,
+            content_type: metadata.content_type,
+            bytes: total,
+        })
+    }
+
     /// One request with same-origin, userinfo-free redirect following. The
     /// cookie header accompanies every hop because every hop is same-origin.
     fn fetch(
@@ -518,6 +615,33 @@ struct KlmsPolicy {
     headers: Vec<(&'static str, String)>,
 }
 
+struct NativeVideoPolicy {
+    origin: Origin,
+    cookie: String,
+}
+
+impl http::Policy for NativeVideoPolicy {
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        if self.cookie.is_empty() {
+            Vec::new()
+        } else {
+            vec![("cookie", self.cookie.clone())]
+        }
+    }
+
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.origin() != self.origin || has_userinfo(url) {
+            return Err(AppError::network("native video cross-origin URL refused"));
+        }
+        if !url.path().starts_with("/vod1/") || !url.path().ends_with(".mp4") {
+            return Err(AppError::network(
+                "native video requires a /vod1/...mp4 path",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl http::Policy for KlmsPolicy {
     fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
         self.headers.clone()
@@ -661,5 +785,140 @@ mod tests {
         let error = client(&server, None, 5).head("/loop").unwrap_err();
         assert!(error.message.contains("too many redirects"));
         assert_eq!(server.requests().len(), 6);
+    }
+
+    fn mp4() -> Vec<u8> {
+        b"\0\0\0\x18ftypisom\0\0\0\0isommp42payload".to_vec()
+    }
+
+    #[test]
+    fn native_video_streams_mp4_with_its_own_budget_and_cookie() {
+        let body = mp4();
+        let server = serve(vec![
+            redirect("/vod1/final.mp4"),
+            Response::bytes("video/mp4", body.clone()),
+        ]);
+        let mut output = Vec::new();
+        let result = client(&server, Some("MoodleSession=fixture"), 1)
+            .download_video_to("/vod1/start.mp4", 1024, 5, &mut output)
+            .unwrap();
+        assert_eq!(output, body);
+        assert_eq!(result.bytes, body.len());
+        assert_eq!(result.url.path(), "/vod1/final.mp4");
+        assert!(
+            seen(&server)
+                .iter()
+                .all(|r| r.contains("cookie: moodlesession=fixture"))
+        );
+    }
+
+    #[test]
+    fn native_video_rejects_html_and_invalid_mp4_before_writing() {
+        let server = serve(vec![
+            Response::html("<!doctype html><html>permission denied</html>"),
+            Response::bytes("video/mp4", "<!doctype html><html>login</html>"),
+            Response::bytes("text/html", mp4()),
+        ]);
+        let client = client(&server, None, 5);
+        for _ in 0..3 {
+            let mut output = Vec::new();
+            let error = client
+                .download_video_to("/vod1/file.mp4", 1024, 5, &mut output)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "UPSTREAM_ERROR");
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn native_video_rejects_unrelated_paths_and_origins_without_requests() {
+        let server = serve(Vec::new());
+        let client = client(&server, Some("MoodleSession=fixture"), 5);
+        for path in [
+            "/pluginfile.php/7",
+            "/vod1/file.m3u8",
+            "http://127.0.0.2:1/vod1/file.mp4",
+        ] {
+            assert!(
+                client
+                    .download_video_to(path, 1024, 5, &mut Vec::new())
+                    .is_err()
+            );
+        }
+        assert!(server.requests().is_empty());
+        let server = serve(vec![redirect("http://127.0.0.2:1/vod1/file.mp4")]);
+        let error = super::KlmsClient::new(&server.url(), Some("MoodleSession=fixture"), 5)
+            .unwrap()
+            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
+            .err()
+            .unwrap();
+        assert!(error.message.contains("cross-origin"));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn native_video_caps_declared_and_streamed_bytes_and_rejects_partial_ranges() {
+        let body = mp4();
+        let server = serve(vec![
+            Response::bytes("video/mp4", body.clone()),
+            Response::open_ended(body.clone()),
+            Response::bytes("video/mp4", body)
+                .status("206 Partial Content")
+                .header("Content-Range", "bytes 0-30/100"),
+        ]);
+        let client = client(&server, None, 5);
+        let mut output = Vec::new();
+        let error = client
+            .download_video_to("/vod1/file.mp4", 16, 5, &mut output)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        assert!(output.is_empty());
+        let error = client
+            .download_video_to("/vod1/file.mp4", 16, 5, &mut output)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "LIMIT_EXCEEDED");
+        let error = client
+            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "UPSTREAM_ERROR");
+    }
+
+    #[test]
+    fn native_video_deadline_interrupts_a_stalled_stream() {
+        let server = serve(vec![Response::open_ended(mp4())]);
+        let started = Instant::now();
+        let error = client(&server, None, 5)
+            .download_video_to("/vod1/file.mp4", 1024, 1, &mut Vec::new())
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(started.elapsed() < Duration::from_millis(1600));
+    }
+
+    #[test]
+    fn native_video_rejects_a_premature_eof() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.read(&mut [0_u8; 4096]).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n").unwrap();
+            stream.write_all(&mp4()).unwrap();
+        });
+        let error = KlmsClient::new(&base, None, 5)
+            .unwrap()
+            .download_video_to("/vod1/file.mp4", 1024, 5, &mut Vec::new())
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
     }
 }
