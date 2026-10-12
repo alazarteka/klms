@@ -1,4 +1,8 @@
-pub const VERSION: u32 = 1;
+/// Version 2 dropped `sync_runs.failures` and `representations.observed_*`.
+/// Migrating 1 to 2 changes no data: old libraries keep the unused columns.
+/// The bump exists so an older binary, which still needs them, refuses the
+/// library (MIGRATION_REQUIRED) instead of failing mid-sync.
+pub const VERSION: u32 = 2;
 pub const SCHEMA: &str = r#"
 CREATE TABLE sync_runs (
   id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER, scope TEXT NOT NULL,

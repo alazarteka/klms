@@ -62,7 +62,10 @@ not scrape URLs.
 
 Storage: `$XDG_DATA_HOME/klms/library.db` plus `objects/sha256/` beside it
 (default `~/.local/share/klms`), directories 0700 and the database 0600; schema
-`user_version = 1`. Back both up together, and keep a corrupt library intact
+`user_version = 2` (version 2 only marks the dropped `sync_runs.failures` and
+`representations.observed_*` columns; a 1-to-2 migration changes no data and
+older libraries keep those unused columns, so an older binary refuses a newer
+library with `MIGRATION_REQUIRED`; a newer schema than supported does too). Back both up together, and keep a corrupt library intact
 before recovering it.
 
 ## Safety
@@ -76,4 +79,6 @@ from a hidden prompt or the two-step `--code` flow. The session file
 trusted-device IDs. Remembered login lives in `$XDG_CONFIG_HOME/klms`. The KLMS
 base URL must be HTTPS, with plain HTTP allowed only for loopback. `update`
 contacts only GitHub, verifies the archive SHA-256 and the candidate version,
-and keeps the old binary on failure.
+and keeps the old binary on failure. A legacy installed skill (the `klms skill`
+command and SKILL.md are deprecated; `klms --help` is the manual) is never
+removed: `update` lists its paths in `warnings` so the user can delete them.
