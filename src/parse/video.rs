@@ -1,0 +1,189 @@
+//! Static Panopto launch markup; no script execution or player telemetry.
+#[cfg(test)]
+#[path = "video_tests.rs"]
+mod protocol_tests;
+use crate::{error::AppError, url::Url};
+use scraper::{Html, Selector};
+
+pub struct LaunchForm {
+    pub action: Url,
+    pub fields: Vec<(String, String)>,
+}
+pub fn panopto_origin(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("kaist.ap.panopto.com")
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+pub fn launch_form(html: &str, base: &Url) -> Result<Option<LaunchForm>, AppError> {
+    let doc = Html::parse_document(html);
+    for f in doc.select(&Selector::parse("form[action]").unwrap()) {
+        let Some(action) = f.value().attr("action").and_then(|a| base.join(a).ok()) else {
+            continue;
+        };
+        let repost = action.origin() == base.origin()
+            && matches!(
+                action.path(),
+                "/blocks/panopto/lib/lti/auth.php" | "/mod/lti/auth.php"
+            );
+        if !panopto_origin(&action) && !repost {
+            continue;
+        }
+        let path = action.path().to_ascii_lowercase();
+        if !(repost
+            || path.starts_with("/panopto/lti/adv/platforms/") && path.ends_with("/login")
+            || path == "/panopto/lti/lti.aspx")
+        {
+            continue;
+        }
+        if !f
+            .value()
+            .attr("method")
+            .unwrap_or("get")
+            .eq_ignore_ascii_case("post")
+        {
+            return Err(AppError::shape("Panopto launch form is not POST"));
+        }
+        let mut fields = Vec::new();
+        for input in f.select(&Selector::parse("input[name]").unwrap()) {
+            let name = input.value().attr("name").unwrap();
+            let value = input.value().attr("value").unwrap_or("");
+            if fields.len() >= 32
+                || value.len() > 65536
+                || name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            {
+                return Err(AppError::shape("Panopto launch form exceeds safe bounds"));
+            }
+            fields.push((name.to_owned(), value.to_owned()));
+        }
+        let has = |n: &str| fields.iter().any(|(k, v)| k == n && !v.is_empty());
+        if !(repost && has("repost")
+            || has("id_token") && has("state")
+            || has("iss") && has("login_hint") && has("target_link_uri")
+            || has("oauth_signature") && has("lti_message_type"))
+        {
+            return Err(AppError::shape(
+                "Panopto launch form omitted required protocol fields",
+            ));
+        }
+        return Ok(Some(LaunchForm { action, fields }));
+    }
+    Ok(None)
+}
+pub fn is_panopto_launch(html: &str, url: &Url) -> Result<bool, AppError> {
+    Ok(launch_form(html, url)?.is_some() || embedded_launch(html, url).is_some())
+}
+pub fn embedded_launch(html: &str, base: &Url) -> Option<Url> {
+    let doc = Html::parse_document(html);
+    let allowed = |u: &Url| {
+        u.origin() == base.origin()
+            && (u.path() == "/mod/panoptocourseembed/view_content.php"
+                || u.path() == "/mod/lti/launch.php"
+                    && u.query_value("id") == base.query_value("id"))
+            || panopto_origin(u)
+                && matches!(
+                    u.path(),
+                    "/Panopto/Pages/Embed.aspx" | "/Panopto/Pages/Sessions/List.aspx"
+                )
+    };
+    for f in doc.select(&Selector::parse("iframe[src],a[href]").unwrap()) {
+        if let Some(u) = f
+            .value()
+            .attr("src")
+            .or_else(|| f.value().attr("href"))
+            .and_then(|v| base.join(v).ok())
+            .filter(allowed)
+        {
+            return Some(u);
+        }
+    }
+    // Moodle's static iframe setup stores its launch URL in a quoted JS literal.
+    // Read only a complete literal for this exact endpoint; never evaluate script.
+    for script in doc.select(&Selector::parse("script:not([src])").unwrap()) {
+        let script = script.text().collect::<String>();
+        for quote in ['\"', '\''] {
+            for literal in script.split(quote).skip(1).step_by(2) {
+                if literal.len() < 2048 && !literal.contains(['\\', '\n', '\r']) {
+                    if let Ok(u) = base.join(literal) {
+                        if u.origin() == base.origin()
+                            && u.path() == "/mod/lti/launch.php"
+                            && u.query_value("id") == base.query_value("id")
+                        {
+                            return Some(u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+pub fn non_panopto_lti_form(html: &str, base: &Url) -> bool {
+    let doc = Html::parse_document(html);
+    doc.select(&Selector::parse("form[action]").unwrap())
+        .any(|form| {
+            let Some(u) = form.value().attr("action").and_then(|v| base.join(v).ok()) else {
+                return false;
+            };
+            if u.origin() == base.origin() || panopto_origin(&u) {
+                return false;
+            }
+            let names = form
+                .select(&Selector::parse("input[name]").unwrap())
+                .filter_map(|i| i.value().attr("name"))
+                .collect::<Vec<_>>();
+            names.contains(&"lti_message_type") && names.contains(&"oauth_signature")
+                || names.contains(&"iss")
+                    && names.contains(&"login_hint")
+                    && names.contains(&"target_link_uri")
+        })
+}
+/// Panopto list fragments encode state values as JSON strings; query values may be plain UUIDs.
+pub fn folder_id(url: &Url) -> Option<String> {
+    let direct = url
+        .query_value("folderID")
+        .or_else(|| url.query_value("folderId"));
+    let fragment = || {
+        url.fragment()
+            .and_then(|fragment| {
+                Url::parse(&format!("https://kaist.ap.panopto.com/?{fragment}")).ok()
+            })
+            .and_then(|u| u.query_value("folderID"))
+    };
+    let value = direct.or_else(fragment)?;
+    let decoded = serde_json::from_str::<String>(&value).unwrap_or(value);
+    uuid(&decoded).then(|| decoded.to_ascii_lowercase())
+}
+
+pub fn uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recognition_uses_protocol_not_title() {
+        let u = Url::parse("https://klms.kaist.ac.kr/mod/lti/view.php?id=1").unwrap();
+        assert!(!is_panopto_launch("<h1>Panopto Lecture</h1>", &u).unwrap());
+        assert!(is_panopto_launch(
+            r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/lti/adv/platforms/test/login"><input name="iss" value="x"><input name="login_hint" value="x"><input name="target_link_uri" value="x"></form>"#,
+            &u
+        ).unwrap());
+        assert!(!is_panopto_launch(
+            r#"<form method="post" action="https://evil.test/Panopto/LTI/LTI.aspx"><input name="id_token" value="secret"><input name="state" value="secret"></form>"#,
+            &u
+        ).unwrap());
+    }
+}

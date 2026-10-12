@@ -1,3 +1,4 @@
+pub mod panopto;
 use std::{
     borrow::Cow,
     io::{Read, Write},
@@ -79,6 +80,13 @@ fn has_userinfo(url: &Url) -> bool {
 }
 
 impl KlmsClient {
+    pub fn panopto_launch(
+        &self,
+        page: &HtmlResponse,
+        timeout: u64,
+    ) -> Result<panopto::Session, AppError> {
+        crate::auth::panopto::launch(&self.base_url, &self.cookie, timeout, &page.text, &page.url)
+    }
     pub fn new(
         base: &str,
         cookie_header: Option<&str>,
@@ -935,7 +943,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.read(&mut [0_u8; 4096]).unwrap();
+            assert!(stream.read(&mut [0_u8; 4096]).unwrap() > 0);
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n").unwrap();
             stream.write_all(&mp4()).unwrap();
         });

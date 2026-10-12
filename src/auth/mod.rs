@@ -4,6 +4,7 @@
 
 mod cookies;
 mod flow;
+pub mod panopto;
 mod secret;
 mod store;
 mod transport;

@@ -146,13 +146,6 @@ pub fn has_all_weeks_view(html: &str, course_id: &str) -> bool {
         })
 }
 
-pub fn is_video_activity(activity: &Activity) -> bool {
-    let kind = activity.kind.to_ascii_lowercase();
-    let title = activity.title.to_ascii_lowercase();
-    matches!(kind.as_str(), "vod" | "panopto" | "panoptocourseembed")
-        || kind == "lti" && (title.contains("panopto") || title.contains("vod"))
-}
-
 fn courses_from_document(document: &Html, base_url: &Url) -> Vec<Course> {
     let mut seen = HashSet::new();
     let mut courses = Vec::new();

@@ -233,7 +233,7 @@ fn status_distinguishes_never_synced_scoped_and_global_coverage() {
     // Never synced: initializes private storage without needing the network.
     for created in [true, false] {
         let initial = env.ok("library status");
-        assert_eq!(initial["schema_version"], "4");
+        assert_eq!(initial["schema_version"], "5");
         assert_eq!(initial["data"]["schema_version"], 1);
         assert_eq!(initial["data"]["created"], created);
         assert!(initial["data"]["last_sync"].is_null());

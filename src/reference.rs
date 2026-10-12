@@ -7,13 +7,27 @@ const VIDEO_KINDS: [&str; 4] = ["vod", "lti", "panopto", "panoptocourseembed"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceRef {
     Course(String),
+    PanoptoRecording {
+        kind: String,
+        module: String,
+        uuid: String,
+    },
     Assignment(String),
     Quiz(String),
     Board(String),
-    BoardPost { board: String, post: String },
+    BoardPost {
+        board: String,
+        post: String,
+    },
     File(String),
-    Activity { kind: String, id: String },
-    Video { kind: String, id: String },
+    Activity {
+        kind: String,
+        id: String,
+    },
+    Video {
+        kind: String,
+        id: String,
+    },
 }
 
 impl ResourceRef {
@@ -22,6 +36,17 @@ impl ResourceRef {
         let id = |s: &str| s.to_owned();
         match parts.as_slice() {
             ["course", i] if valid_id(i) => Ok(Self::Course(id(i))),
+            ["panopto-recording", kind, module, uuid]
+                if ["lti", "panopto", "panoptocourseembed"].contains(kind)
+                    && valid_id(module)
+                    && valid_uuid(uuid) =>
+            {
+                Ok(Self::PanoptoRecording {
+                    kind: id(kind),
+                    module: id(module),
+                    uuid: uuid.to_ascii_lowercase(),
+                })
+            }
             ["assign", i] if valid_id(i) => Ok(Self::Assignment(id(i))),
             ["quiz", i] if valid_id(i) => Ok(Self::Quiz(id(i))),
             ["board", i] if valid_id(i) => Ok(Self::Board(id(i))),
@@ -72,12 +97,15 @@ impl ResourceRef {
             Self::Board(_) => Some("courseboard"),
             Self::File(_) => Some("resource"),
             Self::Activity { kind, .. } | Self::Video { kind, .. } => Some(kind),
-            Self::Course(_) | Self::BoardPost { .. } => None,
+            Self::Course(_) | Self::BoardPost { .. } | Self::PanoptoRecording { .. } => None,
         }
     }
 
     pub fn path(&self) -> String {
         match self {
+            Self::PanoptoRecording { kind, module, .. } => {
+                format!("/mod/{kind}/view.php?id={module}")
+            }
             Self::Course(id) => format!("/course/view.php?id={id}"),
             Self::BoardPost { board, post } => {
                 format!("/mod/courseboard/article.php?id={board}&bwid={post}")
@@ -107,6 +135,9 @@ impl ResourceRef {
 impl fmt::Display for ResourceRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PanoptoRecording { kind, module, uuid } => {
+                write!(formatter, "panopto-recording:{kind}:{module}:{uuid}")
+            }
             Self::Course(id) => write!(formatter, "course:{id}"),
             Self::Assignment(id) => write!(formatter, "assign:{id}"),
             Self::Quiz(id) => write!(formatter, "quiz:{id}"),
@@ -169,6 +200,36 @@ mod tests {
                 ResourceRef::parse(&reference.to_string()).unwrap(),
                 reference
             );
+        }
+    }
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+    #[test]
+    fn recording_refs_retain_launch_provenance_and_reject_ambiguous_identity() {
+        let value = "panopto-recording:panoptocourseembed:7:11111111-2222-3333-4444-555555555555";
+        let r = ResourceRef::parse(value).unwrap();
+        assert_eq!(r.to_string(), value);
+        assert_eq!(r.path(), "/mod/panoptocourseembed/view.php?id=7");
+        for bad in [
+            "panopto-recording:11111111-2222-3333-4444-555555555555",
+            "panopto-recording:vod:7:11111111-2222-3333-4444-555555555555",
+            "panopto-recording:lti:7:not-a-uuid",
+        ] {
+            assert!(ResourceRef::parse(bad).is_err());
         }
     }
 }
