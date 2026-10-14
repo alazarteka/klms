@@ -99,7 +99,9 @@ fn help_documents_the_login_flags_and_the_parser_rejects_bad_combinations() {
     assert!(!help.contains("--password") && !help.contains("--otp"));
     let forget = String::from_utf8(home.run(&["auth", "forget", "--help"]).stdout).unwrap();
     assert!(forget.contains("plaintext credentials file") && forget.contains("keychain"));
-    assert!(forget.contains("a warning says the password may remain there"));
+    assert!(
+        forget.contains("login.json") && forget.contains("purge") && forget.contains("warning")
+    );
 
     for args in [
         &["--insecure-storage"][..],
@@ -229,6 +231,8 @@ fn forget_keeps_metadata_for_a_backend_it_cannot_open() {
 #[test]
 fn non_interactive_login_fails_clearly_before_touching_the_network() {
     let home = Home::new();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", socket.local_addr().unwrap());
     // (extra args, exit code, message part, hint part)
     for (extra, exit, message, hint) in [
         (
@@ -256,7 +260,7 @@ fn non_interactive_login_fails_clearly_before_touching_the_network() {
             "",
         ),
     ] {
-        let output = home.login("http://127.0.0.1:9", extra);
+        let output = home.login(&url, extra);
         assert_eq!(output.status.code(), Some(exit), "{extra:?}");
         let error = &json(&output.stderr)["error"];
         assert!(
