@@ -17,7 +17,9 @@ fn lti13_forms_preserve_encoded_protocol_fields_without_execution() {
     <input type="hidden" name="login_hint" value="synthetic&amp;hint">
     <input type="hidden" name="target_link_uri" value="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx">
     </form><script>throw new Error('must not execute')</script>"#;
-    let form = launch_form(html, &klms(), &pano()).unwrap().unwrap();
+    let form = launch_form(html, &klms(), &pano(), PageKind::Handoff)
+        .unwrap()
+        .unwrap();
     assert_eq!(form.action.host_str(), Some("kaist.ap.panopto.com"));
     assert!(
         form.fields
@@ -25,7 +27,7 @@ fn lti13_forms_preserve_encoded_protocol_fields_without_execution() {
     );
     let response = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="id_token" value="synthetic.jwt"><input name="state" value="synthetic-state"></form>"#;
     assert_eq!(
-        launch_form(response, &klms(), &pano())
+        launch_form(response, &klms(), &pano(), PageKind::Handoff)
             .unwrap()
             .unwrap()
             .fields,
@@ -39,9 +41,17 @@ fn lti13_forms_preserve_encoded_protocol_fields_without_execution() {
 #[test]
 fn signed_lti11_and_local_repost_forms_are_recognized() {
     let legacy = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="oauth_signature" value="synthetic"><input name="lti_message_type" value="basic-lti-launch-request"><input name="oauth_consumer_key" value="synthetic-key"></form>"#;
-    assert!(launch_form(legacy, &klms(), &pano()).unwrap().is_some());
+    assert!(
+        launch_form(legacy, &klms(), &pano(), PageKind::Handoff)
+            .unwrap()
+            .is_some()
+    );
     let repost = r#"<form method="post" action="/mod/lti/auth.php"><input name="repost" value="synthetic"></form>"#;
-    assert!(launch_form(repost, &klms(), &pano()).unwrap().is_some());
+    assert!(
+        launch_form(repost, &klms(), &pano(), PageKind::Handoff)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -57,7 +67,9 @@ fn non_protocol_forms_and_off_origin_actions_are_not_launches() {
             r#"<form method="post" action="{action}"><input name="id_token" value="synthetic"><input name="state" value="synthetic"></form>"#
         );
         assert!(
-            launch_form(&html, &klms(), &pano()).unwrap().is_none(),
+            launch_form(&html, &klms(), &pano(), PageKind::Handoff)
+                .unwrap()
+                .is_none(),
             "{action}"
         );
     }
@@ -81,7 +93,10 @@ fn malformed_recognized_protocol_forms_fail_visibly() {
         ),
     ] {
         assert_eq!(
-            launch_form(&body, &klms(), &pano()).err().unwrap().code,
+            launch_form(&body, &klms(), &pano(), PageKind::Handoff)
+                .err()
+                .unwrap()
+                .code,
             "UPSTREAM_SHAPE_CHANGED"
         );
     }
@@ -91,7 +106,7 @@ fn malformed_recognized_protocol_forms_fail_visibly() {
         r#"<input name="extra" value="synthetic">"#.repeat(31)
     );
     assert_eq!(
-        launch_form(&excessive, &klms(), &pano())
+        launch_form(&excessive, &klms(), &pano(), PageKind::Handoff)
             .err()
             .unwrap()
             .code,
@@ -102,12 +117,20 @@ fn malformed_recognized_protocol_forms_fail_visibly() {
 #[test]
 fn embedded_iframe_and_static_launch_wrapper_resolve_narrow_endpoints() {
     let embedded = r#"<iframe src="/mod/panoptocourseembed/view_content.php?course=42&amp;contenturl=synthetic"></iframe>"#;
-    let target = embedded_launch(embedded, &klms(), &pano()).unwrap();
+    let target = embedded_launch(embedded, &klms(), &pano(), PageKind::EmbeddedActivity)
+        .unwrap()
+        .unwrap();
     assert_eq!(target.path(), "/mod/panoptocourseembed/view_content.php");
     assert_eq!(query_value(&target, "course").as_deref(), Some("42"));
     let wrapper = r#"<script>require(['mod_lti/iframe'], function(m) { m.init('/mod/lti/launch.php?id=42'); });</script>"#;
     assert_eq!(
-        query_value(&embedded_launch(wrapper, &klms(), &pano()).unwrap(), "id").as_deref(),
+        query_value(
+            &embedded_launch(wrapper, &klms(), &pano(), PageKind::Handoff)
+                .unwrap()
+                .unwrap(),
+            "id"
+        )
+        .as_deref(),
         Some("42")
     );
     for html in [
@@ -115,7 +138,11 @@ fn embedded_iframe_and_static_launch_wrapper_resolve_narrow_endpoints() {
         r#"<script>m.init('https://unrelated.example/mod/lti/launch.php?id=42');</script>"#,
         r#"<iframe src="/mod/vod/viewer/playtime_ajax.php?id=42"></iframe>"#,
     ] {
-        assert!(embedded_launch(html, &klms(), &pano()).is_none());
+        assert!(
+            embedded_launch(html, &klms(), &pano(), PageKind::Handoff)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -140,14 +167,20 @@ fn embedded_launch_ignores_description_links_and_prefers_the_activity_frame() {
         ),
     ];
     for page in pages {
-        let target = embedded_launch(&page, &klms(), &pano()).unwrap();
+        let target = embedded_launch(&page, &klms(), &pano(), PageKind::Activity)
+            .unwrap()
+            .unwrap();
         assert_eq!(query_value(&target, "id").as_deref(), Some(OWN), "{page}");
     }
     let only_description = format!(
         r#"<div id="region-main"><div id="intro"><a href="{}">Other</a></div></div>"#,
         embed(OTHER)
     );
-    assert!(embedded_launch(&only_description, &klms(), &pano()).is_none());
+    assert!(
+        embedded_launch(&only_description, &klms(), &pano(), PageKind::Activity)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -189,19 +222,65 @@ fn launch_form_ignores_description_and_outside_activity_and_rejects_ambiguity() 
     let wrong = r#"<form method="post" action="/mod/lti/auth.php"><input name="repost" value="WRONG"></form>"#;
     let right = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="id_token" value="RIGHT"><input name="state" value="ok"></form>"#;
     let html = format!("{wrong}<main><div id='intro'>{wrong}</div>{right}</main>");
-    let form = launch_form(&html, &klms(), &pano()).unwrap().unwrap();
+    let form = launch_form(&html, &klms(), &pano(), PageKind::Activity)
+        .unwrap()
+        .unwrap();
     assert!(form.fields.iter().any(|(_, v)| v == "RIGHT"));
     assert!(!form.fields.iter().any(|(_, v)| v == "WRONG"));
-    assert!(launch_form(&format!("<main>{right}{right}</main>"), &klms(), &pano()).is_err());
+    assert!(
+        launch_form(
+            &format!("<main>{right}{right}</main>"),
+            &klms(),
+            &pano(),
+            PageKind::Activity
+        )
+        .is_err()
+    );
     assert!(
         launch_form(
             &format!("<main><div id='intro'>{wrong}</div></main>"),
             &klms(),
-            &pano()
+            &pano(),
+            PageKind::Activity
         )
         .unwrap()
         .is_none()
     );
+}
+
+#[test]
+fn initial_activity_requires_a_main_region_before_selecting_launch_targets() {
+    let html = r#"<aside><form method="post" action="/mod/lti/auth.php"><input name="repost" value="synthetic"></form><iframe src="/mod/lti/launch.php?id=42"></iframe></aside>"#;
+    assert_eq!(
+        launch_form(html, &klms(), &pano(), PageKind::Activity)
+            .err()
+            .unwrap()
+            .code,
+        "UPSTREAM_SHAPE_CHANGED"
+    );
+    assert_eq!(
+        embedded_launch(html, &klms(), &pano(), PageKind::Activity)
+            .unwrap_err()
+            .code,
+        "UPSTREAM_SHAPE_CHANGED"
+    );
+    for wrapper in [
+        "<main></main>",
+        "<div id='region-main'></div>",
+        "<div role='main'></div>",
+    ] {
+        let page = format!("{html}{wrapper}");
+        assert!(
+            launch_form(&page, &klms(), &pano(), PageKind::Activity)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            embedded_launch(&page, &klms(), &pano(), PageKind::Activity)
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[test]

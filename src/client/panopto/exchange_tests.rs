@@ -203,12 +203,69 @@ fn static_embed_metadata_needs_no_player_or_network_execution() {
         "<html></html>",
         &embed,
         &Config::production().unwrap(),
+        video::PageKind::Handoff,
     )
     .unwrap();
     assert_eq!(
         session.recording_id.as_deref(),
         Some("11111111-2222-3333-4444-555555555555")
     );
+}
+
+#[test]
+fn initial_activity_without_main_region_fails_before_any_handoff_request() {
+    let server = Server::new(|_| panic!("aside launch must not be contacted"));
+    let base = url(&server.url());
+    let error = launch(
+        &base,
+        "MoodleSession=synthetic",
+        2,
+        r#"<aside><form method="post" action="/mod/lti/auth.php"><input name="repost" value="synthetic"></form></aside>"#,
+        &base.join("/mod/lti/view.php?id=42").unwrap(),
+        &Config::production().unwrap(),
+        video::PageKind::Activity,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "UPSTREAM_SHAPE_CHANGED");
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn fetched_lti_handoff_without_moodle_layout_still_launches() {
+    let uuid = "11111111-2222-3333-4444-555555555555";
+    let panopto = Server::new(|_| FixtureResponse::html("player"));
+    let embed = format!("{}/Panopto/Pages/Embed.aspx?id={uuid}", panopto.url());
+    let klms = Server::new(move |request| match request.target.as_str() {
+        "/blocks/panopto/lib/lti/auth.php" => FixtureResponse::html(
+            r#"<form method="post" action="/mod/lti/auth.php"><input name="repost" value="synthetic-handoff"></form>"#,
+        ),
+        "/mod/lti/auth.php" => FixtureResponse::html("")
+            .status("302 Found")
+            .header("Location", &embed),
+        _ => panic!("unexpected handoff request"),
+    });
+    let base = url(&klms.url());
+    let session = launch(
+        &base,
+        "MoodleSession=synthetic",
+        2,
+        r#"<main><form method="post" action="/blocks/panopto/lib/lti/auth.php"><input name="repost" value="synthetic-initial"></form></main>"#,
+        &base.join("/mod/lti/view.php?id=42").unwrap(),
+        &Config::fixture(&panopto.url(), &panopto.url()),
+        video::PageKind::Activity,
+    )
+    .unwrap();
+    assert_eq!(session.recording_id.as_deref(), Some(uuid));
+    let requests = klms.recorded();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.line.starts_with("POST "))
+    );
+    assert_eq!(requests[1].body, "repost=synthetic-handoff");
+    assert_eq!(panopto.recorded().len(), 1);
 }
 
 #[test]

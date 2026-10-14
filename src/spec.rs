@@ -47,6 +47,8 @@ struct ArgSpec {
     name: String,
     kind: &'static str,
     required: bool,
+    requires: Vec<String>,
+    conflicts: Vec<String>,
     value: Option<String>,
     choices: Vec<String>,
     default: Option<String>,
@@ -78,7 +80,7 @@ fn build() -> Spec {
         overview: root.get_after_long_help().map(ToString::to_string),
         global_args: (root.get_arguments())
             .filter(|arg| arg.is_global_set() && visible(arg))
-            .map(arg_spec)
+            .map(|arg| arg_spec(&root, arg))
             .collect(),
         commands,
     }
@@ -94,7 +96,7 @@ fn collect(command: &Command, path: Vec<String>, out: &mut Vec<CommandSpec>) {
     if !subcommands.any(|sub| !sub.is_hide_set() && sub.get_name() != "help") {
         let args: Vec<ArgSpec> = (command.get_arguments())
             .filter(|arg| !arg.is_global_set() && visible(arg))
-            .map(arg_spec)
+            .map(|arg| arg_spec(command, arg))
             .collect();
         // Clap derive adds one unconstrained group per flattened struct;
         // only groups that require or exclude something are contractual.
@@ -136,7 +138,7 @@ fn visible(arg: &Arg) -> bool {
     !arg.is_hide_set() && !matches!(arg.get_id().as_str(), "help" | "version")
 }
 
-fn arg_spec(arg: &Arg) -> ArgSpec {
+fn arg_spec(command: &Command, arg: &Arg) -> ArgSpec {
     let choices: Vec<String> = (arg.get_possible_values().iter())
         .filter(|value| !value.is_hide_set())
         .map(|value| value.get_name().to_owned())
@@ -171,6 +173,13 @@ fn arg_spec(arg: &Arg) -> ArgSpec {
             _ => "option",
         },
         required: arg.is_required_set(),
+        requires: requirements(command, arg),
+        conflicts: command
+            .get_arg_conflicts_with(arg)
+            .into_iter()
+            .filter(|other| visible(other))
+            .map(argument_name)
+            .collect(),
         value,
         choices,
         default: (arg.get_default_values().first())
@@ -179,13 +188,40 @@ fn arg_spec(arg: &Arg) -> ArgSpec {
     }
 }
 
+fn argument_name(arg: &Arg) -> String {
+    match arg.get_long() {
+        Some(long) => format!("--{long}"),
+        None => arg.get_id().to_string(),
+    }
+}
+
+/// Clap has no public requires getter. Its usage renderer expands unconditional
+/// requirements when the source argument is required, without parsing values.
+fn requirements(command: &Command, arg: &Arg) -> Vec<String> {
+    let mut probe = command.clone().mut_args(|other| other.required(false));
+    for group in command.get_groups() {
+        probe = probe.mut_group(group.get_id().as_str(), |group| group.required(false));
+    }
+    let usage = probe
+        .mut_arg(arg.get_id().as_str(), |source| source.required(true))
+        .render_usage()
+        .to_string();
+    command
+        .get_arguments()
+        .filter(|other| other.get_id() != arg.get_id() && visible(other))
+        .filter(|other| other.get_long().is_some())
+        .map(argument_name)
+        .filter(|name| usage.split_whitespace().any(|word| word == name))
+        .collect()
+}
+
 fn group_spec(command: &Command, group: &ArgGroup) -> GroupSpec {
     GroupSpec {
         name: group.get_id().to_string(),
         args: (group.get_args())
             .filter_map(|id| command.get_arguments().find(|arg| arg.get_id() == id))
             .filter(|arg| visible(arg))
-            .map(|arg| arg_spec(arg).name)
+            .map(argument_name)
             .collect(),
         required: group.is_required_set(),
         multiple: group.clone().is_multiple(),
@@ -210,7 +246,11 @@ fn usage(path: &[String], args: &[ArgSpec], groups: &[GroupSpec]) -> String {
         words.push(optional(arg.required, arg.name.clone()));
     }
     let mut rendered_groups = Vec::new();
+    let mut rendered_args = Vec::new();
     for arg in args.iter().filter(|arg| arg.kind != "positional") {
+        if rendered_args.contains(&arg.name) {
+            continue;
+        }
         let exclusive = groups
             .iter()
             .find(|group| !group.multiple && group.args.contains(&arg.name));
@@ -229,7 +269,22 @@ fn usage(path: &[String], args: &[ArgSpec], groups: &[GroupSpec]) -> String {
                     format!("[{members}]")
                 });
             }
-            None => words.push(optional(arg.required, render(arg))),
+            None => {
+                let mut members = vec![render(arg)];
+                rendered_args.push(arg.name.clone());
+                for dependent in args
+                    .iter()
+                    .filter(|other| other.requires.contains(&arg.name))
+                {
+                    if rendered_args.contains(&dependent.name) {
+                        continue;
+                    }
+                    let mutual = arg.requires.contains(&dependent.name);
+                    members.push(optional(mutual || dependent.required, render(dependent)));
+                    rendered_args.push(dependent.name.clone());
+                }
+                words.push(optional(arg.required, members.join(" ")));
+            }
         }
     }
     words.join(" ")
@@ -268,5 +323,31 @@ mod tests {
         let group = &edit.groups[0];
         assert_eq!(group.args, ["--value", "--value-file"]);
         assert!(group.required && !group.multiple);
+    }
+
+    #[test]
+    fn usage_renders_mutual_and_one_way_dependencies_together() {
+        let spec = build();
+        let courses = spec
+            .commands
+            .iter()
+            .find(|c| c.path == ["courses", "list"])
+            .unwrap();
+        assert!(
+            courses
+                .usage
+                .contains("[--year YEAR --semester spring|summer|fall|winter]")
+        );
+        assert!(!courses.usage.contains("[--semester"));
+        let login = spec
+            .commands
+            .iter()
+            .find(|c| c.path == ["auth", "login"])
+            .unwrap();
+        assert!(
+            login
+                .usage
+                .contains("[--remember-password [--insecure-storage]]")
+        );
     }
 }

@@ -80,10 +80,10 @@ impl Ctx<'_> {
             VideosCommand::Show { target } => {
                 if VideoTarget::of(target) == VideoTarget::Panopto {
                     let (launch_ref, uuid) = panopto_target(target);
-                    let page = self.video_page(&launch_ref)?;
+                    let (page, kind) = self.video_page(&launch_ref)?;
                     let model = self.activity_video(&page, &launch_ref)?;
                     let launch_ref = model.reference.clone();
-                    let mut session = match self.client.panopto_launch(&page, self.timeout) {
+                    let mut session = match self.client.panopto_launch(&page, self.timeout, kind) {
                         Ok(session) => session,
                         Err(error) => return metadata_warning(model, error),
                     };
@@ -142,7 +142,7 @@ impl Ctx<'_> {
                     }
                     return Ok(result);
                 }
-                let page = self.video_page(target)?;
+                let (page, _) = self.video_page(target)?;
                 let mut model = self.activity_video(&page, target)?;
                 match self.native_source(&page) {
                     Ok(_) => {
@@ -212,24 +212,29 @@ impl Ctx<'_> {
         }
     }
 
-    fn video_page(&self, target: &str) -> Result<crate::client::HtmlResponse, AppError> {
+    fn video_page(
+        &self,
+        target: &str,
+    ) -> Result<(crate::client::HtmlResponse, parse::video::PageKind), AppError> {
         let path = module_path(target, &["vod", "lti", "panopto", "panoptocourseembed"])?;
         let mut page = self.client.get(&path)?;
         let requested = self
             .base
             .join(&path)
             .map_err(|_| AppError::usage("invalid video URL"))?;
-        if module_kind(&requested) == Some("panoptocourseembed")
+        let kind = if module_kind(&requested) == Some("panoptocourseembed")
             && page.url.path() == "/course/view.php"
         {
             let module = query_value(&requested, "id").ok_or_else(|| {
                 AppError::usage("embedded video reference requires a numeric module id")
             })?;
             page.text = parse::embedded_activity(&page.text, &module)?;
+            parse::video::PageKind::EmbeddedActivity
         } else {
             self.validate_detail_identity(&path, &page.url)?;
-        }
-        Ok(page)
+            parse::video::PageKind::Activity
+        };
+        Ok((page, kind))
     }
 
     fn panopto_video(
@@ -237,7 +242,7 @@ impl Ctx<'_> {
         target: &str,
     ) -> Result<(crate::client::panopto::Session, Option<String>, String), AppError> {
         let (launch_ref, uuid) = panopto_target(target);
-        let page = self.video_page(&launch_ref)?;
+        let (page, kind) = self.video_page(&launch_ref)?;
         let requested = self
             .base
             .join(&module_path(
@@ -250,7 +255,7 @@ impl Ctx<'_> {
         if !reference.matches_module(&["lti", "panopto", "panoptocourseembed"]) {
             return Err(AppError::shape("video detail has unexpected resource kind"));
         }
-        let session = self.client.panopto_launch(&page, self.timeout)?;
+        let session = self.client.panopto_launch(&page, self.timeout, kind)?;
         Ok((session, uuid, reference.to_string()))
     }
 
@@ -291,7 +296,7 @@ impl Ctx<'_> {
     }
 
     fn native_video(&self, target: &str) -> Result<(Video, Url), AppError> {
-        let page = self.video_page(target)?;
+        let (page, _) = self.video_page(target)?;
         let model = self.activity_video(&page, target)?;
         let source = self.native_source(&page)?;
         Ok((model, source))

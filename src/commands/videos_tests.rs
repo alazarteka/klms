@@ -167,6 +167,35 @@ fn panopto_show_launches_and_reports_delivery_without_media_or_secrets() {
 }
 
 #[test]
+fn isolated_embedded_activity_launches_without_moodle_layout() {
+    let panopto = Server::new(|_| Response::html("player"));
+    let iframe = format!("{}/Panopto/Pages/Embed.aspx?id={UUID}", panopto.url());
+    let klms = Server::new(move |request| match request.target.as_str() {
+        "/mod/panoptocourseembed/view.php?id=7" => Response::html("")
+            .status("302 Found")
+            .header("Location", "/course/view.php?id=42"),
+        "/course/view.php?id=42" => Response::html(format!(
+            r#"<main><li id="module-8" class="activity modtype_panoptocourseembed"><iframe src="https://unrelated.example/"></iframe></li><li id="module-7" class="activity modtype_panoptocourseembed"><iframe src="{iframe}"></iframe></li></main>"#
+        )),
+        _ => panic!("unexpected activity request"),
+    });
+    let base = Url::parse(&klms.url()).unwrap();
+    let client = KlmsClient::new(base.as_str(), Some("MoodleSession=synthetic"), 5)
+        .unwrap()
+        .with_panopto_config(Config::fixture(&panopto.url(), &panopto.url()));
+    let ctx = Ctx {
+        client: &client,
+        base: &base,
+        timeout: 5,
+    };
+    let (session, _, reference) = ctx.panopto_video("panoptocourseembed:7").unwrap();
+    assert_eq!(reference, "panoptocourseembed:7");
+    assert_eq!(session.recording_id.as_deref(), Some(UUID));
+    assert_eq!(klms.recorded().len(), 2);
+    assert_eq!(panopto.recorded().len(), 1);
+}
+
+#[test]
 fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().to_path_buf();
