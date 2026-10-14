@@ -1,16 +1,16 @@
-use std::path::Path;
-
-use super::{Ctx, resources::module_path};
+use super::{
+    Ctx,
+    download::{publish, validate_out, workspace},
+    resources::module_path,
+};
 use crate::{cli::VideosCommand, client::stream::Limits, models::Video, reference::module_kind};
 use crate::{
     course_pages,
     error::AppError,
-    models::DownloadResult,
     output::{self, CommandResult, listing, row, table},
     parse,
-    private_fs::{PublishError, publish_download},
+    private_fs::out_parent,
     reference::ResourceRef,
-    safe_url,
     url::{Url, query_value},
 };
 
@@ -29,129 +29,6 @@ impl VideoTarget {
             Self::Panopto
         }
     }
-}
-
-/// Prefix of every temporary entry a download leaves next to `--out`.
-const TEMP_PREFIX: &str = ".klms-video-";
-/// Stale temporaries older than this are swept by the next download.
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
-/// A private scratch directory beside `--out` (same filesystem, not a RAM
-/// tmpfs), removed when the download ends.
-struct Workspace(std::path::PathBuf);
-
-impl Workspace {
-    fn create(out: &Path) -> Result<Self, AppError> {
-        let parent = out_parent(out);
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        let mut path = parent.join(temporary_name("scratch"));
-        for attempt in 0..8 {
-            match builder.create(&path) {
-                Ok(()) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 7 => {
-                    path = parent.join(temporary_name("scratch"));
-                }
-                Err(e) => {
-                    return Err(AppError::config(format!(
-                        "could not create video workspace {}: {e}",
-                        path.display()
-                    )));
-                }
-            }
-        }
-        let workspace = Self(path);
-        if let Ok(own) = workspace.0.symlink_metadata() {
-            sweep_stale(parent, &own);
-        }
-        Ok(workspace)
-    }
-}
-
-fn temporary_name(suffix: &str) -> String {
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
-        + u128::from(SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    format!("{TEMP_PREFIX}{}-{nonce:x}.{suffix}", std::process::id())
-}
-
-/// Recognize generated scratch and part names, including exclusive-create retries.
-fn temporary_kind(name: &str) -> Option<&str> {
-    let (pid, rest) = name.strip_prefix(TEMP_PREFIX)?.split_once('-')?;
-    if pid.is_empty() || !pid.bytes().all(|c| c.is_ascii_digit()) || pid.parse::<u32>().is_err() {
-        return None;
-    }
-    let (nonce, suffix) = rest.split_once('.')?;
-    if nonce.is_empty() || !nonce.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    match suffix {
-        "scratch" | "part" => Some(suffix),
-        _ if suffix
-            .strip_prefix("part.")
-            .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_hexdigit())) =>
-        {
-            Some("part")
-        }
-        _ => None,
-    }
-}
-
-/// The CLI caps download/remux work at 24 hours; older temporaries are stale.
-fn sweep_stale(parent: &Path, own: &std::fs::Metadata) {
-    #[cfg(not(unix))]
-    let _ = own;
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(kind) = name.to_str().and_then(temporary_kind) else {
-            continue;
-        };
-        let path = entry.path();
-        let Ok(meta) = path.symlink_metadata() else {
-            continue;
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if meta.uid() != own.uid() {
-                continue;
-            }
-        }
-        if meta
-            .modified()
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .is_none_or(|age| age <= STALE_AFTER)
-        {
-            continue;
-        }
-        if meta.file_type().is_file() && kind == "part" {
-            let _ = std::fs::remove_file(&path);
-        } else if meta.file_type().is_dir() && kind == "scratch" {
-            let _ = std::fs::remove_dir_all(&path);
-        }
-    }
-}
-
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn out_parent(out: &Path) -> &Path {
-    out.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
 }
 
 impl Ctx<'_> {
@@ -284,14 +161,14 @@ impl Ctx<'_> {
                 max_seconds,
                 stall_seconds,
             } => {
-                validate_out(out)?;
+                validate_out(out, true)?;
                 let cap = usize::try_from(*max_bytes)
                     .map_err(|_| AppError::usage("max-bytes exceeds this platform's capacity"))?;
                 match VideoTarget::of(target) {
                     VideoTarget::Native => {
                         let (_, source) = self.native_video(target)?;
                         let limits = Limits::new(cap, *max_seconds, *stall_seconds);
-                        publish_video(out, |file| {
+                        publish("videos.download", out, |file| {
                             self.client.download_video_to(source.as_str(), limits, file)
                         })
                     }
@@ -303,11 +180,9 @@ impl Ctx<'_> {
                             .join(&ResourceRef::parse(&launch_ref)?.path())
                             .map_err(|_| AppError::shape("Panopto launch locator is invalid"))?;
                         let limits = Limits::new(cap, *max_seconds, *stall_seconds);
-                        let workspace = delivery
-                            .needs_remux()
-                            .then(|| Workspace::create(out))
-                            .transpose()?;
-                        publish_video(out, |file| {
+                        let workspace =
+                            delivery.needs_remux().then(|| workspace(out)).transpose()?;
+                        publish("videos.download", out, |file| {
                             let downloaded = session.download_to(
                                 &delivery,
                                 file,
@@ -466,71 +341,6 @@ fn metadata_warning(model: Video, error: AppError) -> Result<CommandResult, AppE
         "playback inspection failed ({}): {}",
         error.code, error.message
     ));
-    Ok(result)
-}
-
-fn validate_out(out: &Path) -> Result<(), AppError> {
-    if out.symlink_metadata().is_ok() {
-        return Err(AppError::config(format!(
-            "destination already exists: {}",
-            out.display()
-        )));
-    }
-    let parent = out_parent(out);
-    if !parent.is_dir() {
-        return Err(AppError::config(format!(
-            "destination directory does not exist: {}",
-            parent.display()
-        )));
-    }
-    Ok(())
-}
-
-fn publish_video(
-    out: &Path,
-    fill: impl FnOnce(&mut std::fs::File) -> Result<crate::client::DownloadResponse, AppError>,
-) -> Result<CommandResult, AppError> {
-    let temp = out_parent(out).join(temporary_name("part"));
-    let (response, linked) = publish_download(&temp, out, |file| {
-        if let Ok(own) = file.metadata() {
-            sweep_stale(out_parent(out), &own);
-        }
-        fill(file)
-    })
-    .map_err(|e| match e {
-        PublishError::Fill(e) => e,
-        PublishError::Create(e) | PublishError::Sync(e) | PublishError::Link(e) => {
-            AppError::config(format!("could not publish video: {e}"))
-        }
-    })?;
-    if linked.existed {
-        return Err(AppError::config("destination already exists"));
-    }
-    let model = DownloadResult {
-        path: out
-            .canonicalize()
-            .unwrap_or_else(|_| out.to_path_buf())
-            .display()
-            .to_string(),
-        bytes: response.bytes,
-        source_url: safe_url::display(&response.url),
-        content_type: response.content_type,
-    };
-    let mut result = output::result(
-        "videos.download",
-        &model,
-        format!("Downloaded {} bytes to {}", model.bytes, model.path),
-    )?;
-    if linked.copied {
-        result
-            .warnings
-            .push("download published by non-atomic copy because hard linking failed".into());
-    }
-    if linked.leftover.is_some() {
-        result
-            .warnings
-            .push("download published; temporary link cleanup failed".into());
-    }
     Ok(result)
 }
 

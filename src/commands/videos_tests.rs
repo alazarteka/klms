@@ -6,6 +6,7 @@ use crate::{
     client::{KlmsClient, panopto::Config},
     fixture_server::{Recorded, Response, Server},
 };
+use std::path::Path;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
 const MP4: &[u8] = b"\x00\x00\x00\x18ftypisomsynthetic-panopto-media";
@@ -278,53 +279,29 @@ fn missing_ffmpeg_fails_before_any_media_is_fetched() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-#[test]
-fn temporary_names_match_only_generated_entries() {
-    for (name, expected) in [
-        (".klms-video-42-ab.part", Some("part")),
-        (".klms-video-42-ab.part.1a2", Some("part")),
-        (".klms-video-42-ab.scratch", Some("scratch")),
-        (".klms-video-project.part-notes", None),
-        (".klms-video-42.scratch", None),
-        (".klms-video--ab.part", None),
-        (".klms-video-4294967296-ab.part", None),
-        (".klms-video-42-.part", None),
-        (".klms-video-42-xyz.part", None),
-        (".klms-video-42-ab.part-notes", None),
-        (".klms-video-42-ab.part.", None),
-        (".klms-video-42-ab.part.1z", None),
-        (".klms-video-42-ab.scratch.1a2", None),
-    ] {
-        assert_eq!(temporary_kind(name), expected, "{name}");
-    }
-    for kind in ["scratch", "part"] {
-        assert_eq!(temporary_kind(&temporary_name(kind)), Some(kind));
-    }
-}
-
 #[cfg(unix)]
 #[test]
 fn download_sweeps_only_stale_temporaries_beside_the_output() {
     use std::time::{Duration, SystemTime};
     let f = fixtures(mp4, true);
     let dir = tempfile::tempdir().unwrap();
-    let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+    let old = SystemTime::now() - Duration::from_secs(49 * 60 * 60);
     let age = |path: &Path| {
         std::fs::File::open(path)
             .unwrap()
             .set_modified(old)
             .unwrap()
     };
-    let stale_part = dir.path().join(".klms-video-4294967294-ab.part");
-    let stale_retry = dir.path().join(".klms-video-4294967294-ab.part.1a2");
-    let stale_scratch = dir.path().join(".klms-video-4294967294-cd.scratch");
+    let stale_part = dir.path().join(".klms-download-4294967294-ab.part");
+    let stale_retry = dir.path().join(".klms-download-4294967294-ab.part.1a2");
+    let stale_scratch = dir.path().join(".klms-download-4294967294-cd.scratch");
     let reused_pid = dir
         .path()
-        .join(format!(".klms-video-{}-ab.part", std::process::id()));
-    let fresh_part = dir.path().join(".klms-video-4294967294-ef.part");
-    let symlink = dir.path().join(".klms-video-4294967294-ff.part");
+        .join(format!(".klms-download-{}-ab.part", std::process::id()));
+    let fresh_part = dir.path().join(".klms-download-4294967294-ef.part");
+    let symlink = dir.path().join(".klms-download-4294967294-ff.part");
     let unrelated = dir.path().join("notes.part");
-    let misnamed_dir = dir.path().join(".klms-video-4294967294-12.part");
+    let misnamed_dir = dir.path().join(".klms-download-4294967294-12.part");
     for file in [
         &stale_part,
         &stale_retry,
@@ -357,45 +334,13 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
     assert_eq!(
         left,
         [
-            ".klms-video-4294967294-12.part",
-            ".klms-video-4294967294-ef.part",
-            ".klms-video-4294967294-ff.part",
+            ".klms-download-4294967294-12.part",
+            ".klms-download-4294967294-ef.part",
+            ".klms-download-4294967294-ff.part",
             "lecture.mp4",
             "notes.part"
         ]
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn workspaces_are_unique_and_sweep_keeps_notes_and_active_work() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("video.mp4");
-    let legacy = dir
-        .path()
-        .join(format!(".klms-video-{}.scratch", std::process::id()));
-    std::fs::create_dir(&legacy).unwrap();
-    let notes = dir.path().join(".klms-video-project.part-notes");
-    std::fs::write(&notes, b"user notes").unwrap();
-    let old = std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(1);
-    std::fs::File::open(&notes)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    let first = Workspace::create(&out).unwrap();
-    let second = Workspace::create(&out).unwrap();
-    assert_ne!(first.0, second.0);
-    assert!(first.0.exists() && second.0.exists() && legacy.exists());
-    assert_eq!(std::fs::read(&notes).unwrap(), b"user notes");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    let (first_path, second_path) = (first.0.clone(), second.0.clone());
-    drop(first);
-    drop(second);
-    assert!(!first_path.exists() && !second_path.exists());
 }
 
 #[test]
