@@ -9,7 +9,7 @@ use std::{
 use crate::{
     error::AppError,
     http::{self, Failure, Follow, HeaderValue, Method, Payload, Response},
-    url::{Origin, Url},
+    url::{Origin, Url, has_userinfo, is_http_loopback},
 };
 
 pub type Client = ureq::Agent;
@@ -81,10 +81,6 @@ fn expired_session() -> AppError {
 
 fn bad_status(response: &Response) -> AppError {
     AppError::http(response.status(), response.url().path())
-}
-
-fn has_userinfo(url: &Url) -> bool {
-    !url.username().is_empty() || url.password().is_some()
 }
 
 impl KlmsClient {
@@ -548,7 +544,7 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
             "KLMS base URL must not contain credentials, query, or fragment",
         ));
     }
-    if url.scheme() != "https" && !url.is_http_loopback() {
+    if url.scheme() != "https" && !is_http_loopback(&url) {
         return Err(AppError::config(
             "KLMS base URL must use HTTPS (HTTP is loopback-only)",
         ));

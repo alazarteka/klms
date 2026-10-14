@@ -3,7 +3,7 @@ use super::{
     query::{refresh_subject, row, rows},
 };
 use crate::date::epoch_now as now;
-use crate::url::Url;
+use crate::url::{Url, query_value};
 use crate::{
     client::{KlmsClient, RemoteMetadata},
     error::AppError,
@@ -515,7 +515,7 @@ fn collect_board(
                 break;
             }
         };
-        let posts = match parse::board_posts(&page.text, base_url, page.url.query_value("id")) {
+        let posts = match parse::board_posts(&page.text, base_url, query_value(&page.url, "id")) {
             Ok(posts) => posts,
             Err(error) => {
                 fail(&mut failures, &error.message);

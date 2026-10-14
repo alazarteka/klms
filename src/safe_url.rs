@@ -18,7 +18,9 @@ pub fn display(url: &Url) -> String {
         let query = form_urlencode(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         safe.set_query((!query.is_empty()).then_some(query.as_str()));
     }
-    safe.clear_userinfo();
+    // Opaque URLs cannot carry userinfo; hierarchical URLs allow both setters.
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
     safe.set_fragment(None);
     safe.into()
 }

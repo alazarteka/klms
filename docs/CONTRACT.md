@@ -117,10 +117,11 @@ each also covering its subdomains (`kaist.ac.kr` covers `klms.kaist.ac.kr`; a
 leading dot and IPv6 brackets are optional). Ports and CIDR ranges in
 `NO_PROXY` are not supported. Loopback targets are never proxied.
 
-Link lists in detail and dashboard output show `mailto:`, `tel:` and other
-non-HTTP links as written (fragment removed) but never fetch them, and the
-library does not record them. `javascript:` and `data:` links, and HTTP links
-to non-ASCII (IDN) hosts, are omitted.
+Link lists in detail and dashboard output show opaque `mailto:` and `tel:`
+links as written (fragment removed), and redact credentials and sensitive query
+values in hierarchical non-HTTP links. They never fetch these links, and the
+library does not record them. Other opaque schemes, `javascript:` and `data:`
+links are omitted. Hosts use standard URL normalization, including IDN encoding.
 
 ## Videos (JSON schema 5)
 
