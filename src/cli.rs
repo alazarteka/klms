@@ -799,7 +799,7 @@ pub enum CourseShowCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RequestCommand {
-    /// GET a same-origin path or URL; redacted, bounded text preview (experimental last resort; prefer typed commands).
+    /// GET a same-origin path or URL; bounded preview with heuristic redaction (experimental last resort; prefer typed commands).
     #[command(
         after_help = "Example:\n  klms --json request get '/mod/assign/view.php?id=1210516' --max-bytes 65536"
     )]

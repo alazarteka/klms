@@ -180,6 +180,7 @@ pub struct RawGet {
     pub bytes: usize,
     pub body: String,
     pub truncated: bool,
+    /// Heuristic filtering changed or withheld the preview, not a guarantee of secrecy.
     pub redacted: bool,
 }
 
