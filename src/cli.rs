@@ -559,7 +559,7 @@ pub struct AuthLoginArgs {
     /// `klms auth login` (the second step of the non-interactive flow).
     ///
     /// Fails if no login is pending or it expired (5 minutes); the pending
-    /// state is deleted after this attempt, successful or not.
+    /// state is deleted once KAIST answers. NETWORK_ERROR retains it for retry.
     #[arg(
         long,
         value_name = "CODE",

@@ -81,7 +81,7 @@ fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> 
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));
     let temp = path.with_file_name(name);
-    let _ = fs::remove_file(&temp);
+    remove_file(&temp, what)?;
     let written = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -97,10 +97,14 @@ fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> 
             fs::rename(&temp, path)
                 .map_err(|error| AppError::config(format!("cannot install {what} file: {error}")))
         });
-    if written.is_err() {
-        let _ = fs::remove_file(&temp);
+    if let Err(error) = written {
+        let warnings = remove_file(&temp, what)
+            .err()
+            .map(|error| error.message)
+            .into_iter()
+            .collect::<Vec<_>>();
+        return Err(with_cleanup_warnings(error, &warnings));
     }
-    written?;
     secure(path, 0o600)
 }
 
@@ -134,6 +138,67 @@ pub fn remove_file(path: &Path, what: &str) -> Result<bool, AppError> {
             path.display()
         ))),
     }
+}
+
+/// Remove an owned file and its crash-leftover `<filename>.<pid>.tmp` files.
+/// Continue after failures so one bad path cannot prevent the rest of cleanup.
+pub fn remove_owned(path: &Path, what: &str, warnings: &mut Vec<String>) -> bool {
+    let removed = match remove_file(path, what) {
+        Ok(removed) => removed,
+        Err(error) => {
+            warnings.push(error.message);
+            false
+        }
+    };
+    let parent = path.parent().expect("auth file has a parent");
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return removed,
+        Err(error) => {
+            warnings.push(format!(
+                "cannot scan {} for {what} temporary files: {error}",
+                parent.display()
+            ));
+            return removed;
+        }
+    };
+    let prefix = format!("{}.", path.file_name().unwrap().to_string_lossy());
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!(
+                    "cannot scan {} for {what} temporary files: {error}",
+                    parent.display()
+                ));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+        {
+            if let Err(error) = remove_file(&entry.path(), what) {
+                warnings.push(error.message);
+            }
+        }
+    }
+    removed
+}
+
+pub fn with_cleanup_warnings(mut error: AppError, warnings: &[String]) -> AppError {
+    if !warnings.is_empty() {
+        error.details.get_or_insert_with(|| serde_json::json!({}))["warnings"] =
+            serde_json::json!(warnings);
+        // Human error output prints the message, not details.
+        error
+            .message
+            .push_str(&format!("; cleanup warnings: {}", warnings.join("; ")));
+    }
+    error
 }
 
 // ---- session ----
@@ -377,8 +442,9 @@ pub fn load_pending(path: &Path, klms: &Url, now: u64) -> Result<PendingLogin, A
         ));
     };
     let discard = |message: &str| {
-        let _ = remove_file(path, "pending login");
-        AppError::code_expired(message.to_owned())
+        let mut warnings = Vec::new();
+        remove_owned(path, "pending login", &mut warnings);
+        with_cleanup_warnings(AppError::code_expired(message.to_owned()), &warnings)
     };
     let pending: PendingLogin = serde_json::from_slice(&bytes)
         .map_err(|_| discard("the pending login file is unreadable"))?;
