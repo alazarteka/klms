@@ -398,9 +398,8 @@ fn auth_request(
         .or_else(|| init.get("resultData"))
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::auth_protocol("KAIST SSO login init omitted its key"))?;
-    let key = Zeroizing::new(key.to_owned());
     let payload = encode_secret_json(payload)?;
-    let encrypted = Zeroizing::new(encrypt_user_data(&key, &payload)?);
+    let encrypted = encrypt_user_data(key, &payload)?;
     transport.ajax(path, &[("user_data", encrypted.as_str())])
 }
 
