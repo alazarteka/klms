@@ -94,6 +94,9 @@ fn tokens(input: &str) -> Result<Vec<Token>, AppError> {
         } else {
             out.push(Token::Punct(c));
         }
+        if out.ends_with(&[Token::Punct('}'), Token::Punct(')'), Token::Punct(';')]) {
+            break;
+        }
     }
     Ok(out)
 }
@@ -108,8 +111,7 @@ pub fn native_sources(html: &str, page: &Url) -> Result<Vec<Url>, AppError> {
             continue;
         };
         // Stop before event handlers/progress scripts following the config.
-        let config = text[start..].split("});").next().unwrap_or_default();
-        let ts = tokens(config)?;
+        let ts = tokens(&text[start..])?;
         let Some(start) = ts.windows(3).position(|t| {
             matches!(&t[0], Token::Word(w) | Token::String(w) if w == "sources")
                 && t[1] == Token::Punct(':')

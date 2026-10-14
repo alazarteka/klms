@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use super::{private_dir, private_file_options};
 use crate::{
     error::AppError,
-    private_fs::{PublishError, publish_new},
+    private_fs::{PublishError, publish_atomic},
 };
 
 fn io(context: &str) -> impl Fn(std::io::Error) -> AppError + '_ {
@@ -43,13 +43,11 @@ pub fn store(root: &Path, bytes: &[u8]) -> Result<String, AppError> {
         Err(_) => {}
     }
     let temporary = directory.join(format!(".{sha256}.{}.tmp", std::process::id()));
-    let (_, linked) =
-        publish_new(&temporary, &destination, |file| file.write_all(bytes)).map_err(|error| {
-            match error {
-                PublishError::Create(error) => io("create object")(error),
-                PublishError::Fill(error) | PublishError::Sync(error) => io("write object")(error),
-                PublishError::Link(error) => io("publish object")(error),
-            }
+    let (_, linked) = publish_atomic(&temporary, &destination, |file| file.write_all(bytes))
+        .map_err(|error| match error {
+            PublishError::Create(error) => io("create object")(error),
+            PublishError::Fill(error) | PublishError::Sync(error) => io("write object")(error),
+            PublishError::Link(error) => io("publish object")(error),
         })?;
     if linked.existed && !matches!(intact(), Ok(true)) {
         return Err(AppError::corpus_corrupt("object destination collision"));

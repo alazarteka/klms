@@ -22,7 +22,12 @@ pub fn launch_form(
     panopto: &Origin,
 ) -> Result<Option<LaunchForm>, AppError> {
     let doc = Html::parse_document(html);
-    for f in doc.select(&Selector::parse("form[action]").unwrap()) {
+    let region = activity_region(&doc);
+    let mut candidate = None;
+    for f in region
+        .select(&Selector::parse("form[action]").unwrap())
+        .filter(|f| !in_description(*f))
+    {
         let Some(action) = f.value().attr("action").and_then(|a| base.join(a).ok()) else {
             continue;
         };
@@ -74,9 +79,18 @@ pub fn launch_form(
                 "Panopto launch form omitted required protocol fields",
             ));
         }
-        return Ok(Some(LaunchForm { action, fields }));
+        if candidate.is_some() {
+            return Err(AppError::shape("ambiguous Panopto launch forms"));
+        }
+        candidate = Some(LaunchForm { action, fields });
     }
-    Ok(None)
+    Ok(candidate)
+}
+fn activity_region(doc: &Html) -> ElementRef<'_> {
+    ["#region-main", "[role=main]", "main"]
+        .into_iter()
+        .find_map(|css| doc.select(&Selector::parse(css).ok()?).next())
+        .unwrap_or_else(|| doc.root_element())
 }
 /// Whether `element` sits inside the activity description, which teachers
 /// write and which may link unrelated recordings.
@@ -89,10 +103,7 @@ fn in_description(element: ElementRef<'_>) -> bool {
 /// its first allowed link. Description blocks are skipped.
 pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> {
     let doc = Html::parse_document(html);
-    let region = ["#region-main", "[role=main]", "main"]
-        .into_iter()
-        .find_map(|css| doc.select(&Selector::parse(css).ok()?).next())
-        .unwrap_or_else(|| doc.root_element());
+    let region = activity_region(&doc);
     let allowed = |u: &Url| {
         u.origin() == base.origin()
             && (u.path() == "/mod/panoptocourseembed/view_content.php"
