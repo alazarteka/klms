@@ -23,17 +23,24 @@ pub(super) fn raw_get(
             "request get previews HTML and JSON only; use `files download` for other content",
         ));
     }
-    let body = if html {
-        redact_secrets(&parse::safe_html_preview(&String::from_utf8_lossy(
-            &response.bytes,
-        )))
+    let (body, redacted) = if html {
+        let original = String::from_utf8_lossy(&response.bytes);
+        let body = redact_secrets(&parse::safe_html_preview(&original));
+        let redacted = body != original;
+        (body, redacted)
     } else if response.truncated {
-        "[JSON preview omitted because the bounded response is incomplete]".into()
+        (
+            "[JSON preview omitted because the bounded response is incomplete]".into(),
+            true,
+        )
     } else {
         let mut value: serde_json::Value = serde_json::from_slice(&response.bytes)
             .map_err(|error| AppError::shape(format!("invalid JSON response: {error}")))?;
+        let original = value.to_string();
         redact_json(&mut value);
-        value.to_string()
+        let body = value.to_string();
+        let redacted = body != original;
+        (body, redacted)
     };
     let model = RawGet {
         url: safe_url::display(&response.url),
@@ -41,9 +48,13 @@ pub(super) fn raw_get(
         bytes: response.bytes.len(),
         body,
         truncated: response.truncated,
-        redacted: true,
+        redacted,
     };
-    output::result("request.get", &model, model.body.clone())
+    let mut result = output::result("request.get", &model, model.body.clone())?;
+    result
+        .warnings
+        .push("Preview redaction is heuristic and may miss sensitive data.".into());
+    Ok(result)
 }
 
 fn validate_read_target(value: &str) -> Result<(), AppError> {
@@ -113,6 +124,21 @@ fn redact_key_values(value: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_reports_filtering_without_promising_secret_free_output() {
+        use crate::fixture_server::{Response, Server};
+        for (body, redacted) in [
+            (r#"{"name":"safe"}"#, false),
+            (r#"{"token":"secret"}"#, true),
+        ] {
+            let server = Server::new(move |_| Response::bytes("application/json", body));
+            let client = KlmsClient::new(&server.url(), None, 5).unwrap();
+            let result = raw_get(&client, "/mod/assign/view.php?id=7", 1024).unwrap();
+            assert_eq!(result.data["redacted"], redacted);
+            assert!(result.warnings[0].contains("heuristic"));
+        }
+    }
 
     #[test]
     fn raw_preview_redacts_secret_assignments_and_json_fields() {
