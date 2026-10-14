@@ -387,10 +387,8 @@ fn media_that_sniffs_as_html_is_refused_before_writing() {
 
 #[cfg(unix)]
 fn fake_ffmpeg(dir: &Path, script: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let exe = dir.join("ffmpeg");
-    std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::fixture_executable::write_executable(&exe, &format!("#!/bin/sh\n{script}\n"));
     exe
 }
 

@@ -433,8 +433,7 @@ mod tests {
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::fixture_executable::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path
     }
 
@@ -573,8 +572,6 @@ esac"#,
         assert!(!store.path().join("item").exists());
     }
 
-    /// One test: the fake helper scripts are written and executed in turn,
-    /// never while another thread forks (which can make `exec` fail with ETXTBSY).
     #[test]
     fn helper_programs_and_backend_choice() {
         helpers_get_secrets_on_stdin_only();

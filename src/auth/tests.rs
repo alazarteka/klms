@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use serde_json::Value;
 
 use super::*;
+use crate::fixture_executable::write_executable;
 use crate::fixture_server::{Request, Response, Server};
 
 /// A fixture server plus its base URL; requests are logged as the lowercased
@@ -657,13 +658,12 @@ fn a_code_that_never_reached_kaist_keeps_the_pending_login() {
 
 /// Synthetic keyring with real secret-tool argument shapes and injectable failures.
 fn fake_keyring(fx: &mut Fixture) -> (Backend, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let root = fx._root.path().join("keyring");
     fs::create_dir_all(root.join("items")).unwrap();
     let helper = root.join("secret-tool");
-    fs::write(
+    write_executable(
         &helper,
-        format!(
+        &format!(
             r#"#!/bin/sh
 cd '{}' || exit 2
 printf '%s\n' "$*" >> calls
@@ -696,9 +696,7 @@ esac
 "#,
             root.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     fx.secrets.search_path = root.clone().into_os_string();
     (Backend::SecretService(helper), root)
 }
@@ -732,7 +730,6 @@ fn remember_direct(
 
 #[test]
 fn forget_corrupt_identity_purges_every_account_in_both_keyrings() {
-    use std::os::unix::fs::PermissionsExt;
     let mut fx = Fixture::new();
     let (backend, root) = fake_keyring(&mut fx);
     backend.store("one", "pw1").unwrap();
@@ -743,9 +740,9 @@ fn forget_corrupt_identity_purges_every_account_in_both_keyrings() {
     fs::write(root.join("mac-one"), "pw").unwrap();
     fs::write(root.join("mac-two"), "pw").unwrap();
     fx.secrets.security = root.join("security");
-    fs::write(
+    write_executable(
         &fx.secrets.security,
-        format!(
+        &format!(
             r#"#!/bin/sh
 [ "$*" = 'delete-generic-password -s klms' ] || exit 2
 for item in '{}'/mac-*; do
@@ -757,9 +754,7 @@ exit 44
 "#,
             root.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&fx.secrets.security, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
     assert_eq!(result.data["password_removed"], true);
     assert_eq!(result.data["password_cleanup_complete"], true);
@@ -991,14 +986,13 @@ fn consumed_code_cleanup_failures_are_reported_on_success_and_error() {
 
 #[test]
 fn forget_reports_partial_keychain_purge_as_incomplete() {
-    use std::os::unix::fs::PermissionsExt;
     let mut fx = Fixture::new();
     let (_, root) = fake_keyring(&mut fx);
     fs::write(root.join("first"), "pw").unwrap();
     fx.secrets.security = root.join("security");
-    fs::write(
+    write_executable(
         &fx.secrets.security,
-        format!(
+        &format!(
             r#"#!/bin/sh
 [ "$*" = 'delete-generic-password -s klms' ] || exit 2
 if [ -f '{0}/first' ]; then rm '{0}/first'; exit 0; fi
@@ -1007,9 +1001,7 @@ exit 1
 "#,
             root.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&fx.secrets.security, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
     assert!(!root.join("first").exists());
     assert_eq!(result.data["password_removed"], false);
