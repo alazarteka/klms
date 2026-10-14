@@ -3,6 +3,7 @@
 use std::{
     io,
     net::IpAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -25,6 +26,7 @@ pub const USER_AGENT: &str = concat!("klms/", env!("CARGO_PKG_VERSION"));
 /// [`proxy_for`]); trust roots come from the platform store.
 pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
     let tls = TlsConfig::builder()
+        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .root_certs(RootCerts::PlatformVerifier)
         .build();
     let config: Config = Agent::config_builder()
