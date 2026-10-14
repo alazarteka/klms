@@ -55,9 +55,22 @@ the sign-in), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
 CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or it
 expired; run `auth login` again). Branch on `error.code`, not the exit status.
 A NETWORK_ERROR during `auth login --code` keeps the pending login, so the same
-code can be retried. `auth forget` always removes login.json, the credentials
-file and the pending login; a password backend it cannot reach becomes a
-warning (the password may remain there) instead of an error.
+code can be retried. `auth forget` purges every account in klms's dedicated
+keyring service namespace across available backends, independently of login.json,
+and removes login.json, the plaintext credentials file and the pending login.
+It warns if the identity is unreadable or any deletion cannot be confirmed;
+retrying forget after unlocking/restoring a backend works even without login.json.
+`password_removed` is true only if a password was removed and password cleanup
+was complete; `password_backends` reports each attempted backend separately
+(true: removed, false: absent, null: failed or undetermined).
+`password_cleanup_complete` is false when a backend is unreachable or cleanup
+fails. Missing keyring helpers with no remembered backend also produce a warning.
+`auth logout` removes the session and pending login, keeping remembered credentials.
+Both commands remove crash-leftover `<owned filename>.<pid>.tmp` files for the
+files they own, and report cleanup failures. Login cleanup failures are warnings
+(in `error.details.warnings` if the login itself fails). Password writes are
+rolled back if saving login.json fails; rollback failures are reported and can
+be retried with forget.
 
 ## Refs
 

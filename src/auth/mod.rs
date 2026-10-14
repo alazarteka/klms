@@ -273,13 +273,10 @@ fn login_with(
             Ok(result)
         }
         Outcome::CodeRequired(pending) => {
-            store::save_json(&env.dirs.pending(), &pending, "pending login")?;
-            let mut error =
-                AppError::code_required(pending.second_factor.as_str(), pending.expires_at);
-            if let (false, Some(details)) = (warnings.is_empty(), error.details.as_mut()) {
-                details["warnings"] = json!(warnings);
-            }
-            Err(error)
+            store::save_json(&env.dirs.pending(), &pending, "pending login")
+                .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+            let error = AppError::code_required(pending.second_factor.as_str(), pending.expires_at);
+            Err(store::with_cleanup_warnings(error, &warnings))
         }
     }
 }
@@ -366,7 +363,10 @@ fn remember_login(
                     .password_backend
                     .take_if(|kind| kind.as_str() != backend.kind());
                 if let Some(kind) = stale {
-                    let _ = env.secrets.open(&kind).and_then(|old| old.clear(&username));
+                    if let Err(error) = env.secrets.open(&kind).and_then(|old| old.clear(&username))
+                    {
+                        warnings.push(format!("could not remove the previous password from the {kind} backend: {}; retry `klms auth forget` when it is available", error.message));
+                    }
                 }
                 identity.password_backend = Some(backend.kind().to_owned());
                 stored_now = true;
@@ -392,6 +392,14 @@ fn remember_login(
     }
     if let Err(error) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
         warnings.push(format!("could not remember the login: {}", error.message));
+        if stored_now {
+            let (backend, _) = new_password.expect("a password was just stored");
+            if let Err(error) = backend.clear(&username) {
+                warnings.push(format!("could not roll back the stored password: {}; retry `klms auth forget` when the backend is available", error.message));
+            }
+            identity.password_backend = None;
+            stored_now = false;
+        }
     }
     (identity, stored_now)
 }
@@ -400,7 +408,7 @@ fn finish_login(
     env: &Env<'_>,
     completed: flow::CompletedLogin,
     identity: &Identity,
-    warnings: Vec<String>,
+    mut warnings: Vec<String>,
 ) -> Result<CommandResult, AppError> {
     let (cookie_count, device_count) = (completed.cookies.len(), completed.devices.len());
     let session_path = env.dirs.session();
@@ -409,8 +417,9 @@ fn finish_login(
         env.klms,
         completed.cookies,
         completed.devices,
-    )?;
-    let _ = store::remove_file(&env.dirs.pending(), "pending login");
+    )
+    .map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+    store::remove_owned(&env.dirs.pending(), "pending login", &mut warnings);
     let method = identity.method.as_str();
     let human = format!(
         "Signed in to KLMS with {method} login.\nSession: {}",
@@ -437,12 +446,12 @@ fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
     let (answered, completed) = flow::resume(env.klms, env.sso, env.timeout, &pending, code);
     // Once KAIST has answered, the challenge is used up whether or not the
     // code was right; without an answer the same code can be retried.
-    if answered {
-        let _ = store::remove_file(&pending_path, "pending login");
-    }
-    let completed = completed?;
-    let previous = store::load_identity(&env.dirs.identity()).ok().flatten();
     let mut warnings = Vec::new();
+    if answered {
+        store::remove_owned(&pending_path, "pending login", &mut warnings);
+    }
+    let completed = completed.map_err(|error| store::with_cleanup_warnings(error, &warnings))?;
+    let previous = store::load_identity(&env.dirs.identity()).ok().flatten();
     let login = Identity::new(
         &pending.username,
         LoginMethod::Password,
@@ -453,17 +462,30 @@ fn resume_login(env: &Env<'_>, code: &str) -> Result<CommandResult, AppError> {
 }
 
 pub fn logout() -> Result<CommandResult, AppError> {
-    let state = Dirs::state_dir()?;
+    logout_with(&Dirs::state_dir()?)
+}
+
+fn logout_with(state: &std::path::Path) -> Result<CommandResult, AppError> {
     let path = state.join("session.json");
-    let removed = store::remove_file(&path, "KLMS session")?;
-    let _ = store::remove_file(&state.join("pending-login.json"), "pending login");
-    let human = if removed {
+    let mut warnings = Vec::new();
+    let removed = store::remove_owned(&path, "KLMS session", &mut warnings);
+    let pending_removed = store::remove_owned(
+        &state.join("pending-login.json"),
+        "pending login",
+        &mut warnings,
+    );
+    let human = if !warnings.is_empty() {
+        "Local logout cleanup was incomplete; see warnings.".to_owned()
+    } else if removed {
         format!("Removed local KLMS session: {}", path.display())
     } else {
         format!("No local KLMS session was present at {}", path.display())
     };
-    let data = json!({"session_path": path.display().to_string(), "removed": removed});
-    output::result("auth.logout", &data, human)
+    let data = json!({"session_path": path.display().to_string(), "removed": removed,
+        "pending_removed": pending_removed, "cleanup_complete": warnings.is_empty()});
+    let mut result = output::result("auth.logout", &data, human)?;
+    result.warnings = warnings;
+    Ok(result)
 }
 
 pub fn forget() -> Result<CommandResult, AppError> {
@@ -472,59 +494,111 @@ pub fn forget() -> Result<CommandResult, AppError> {
 }
 
 fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError> {
-    // A corrupt login.json must still be removable.
-    let found = store::load_identity(&dirs.identity()).ok().flatten();
-    let (mut backend, mut cleared) = (None, false);
     let mut warnings = Vec::new();
+    let found = match store::load_identity(&dirs.identity()) {
+        Ok(found) => found,
+        Err(error) => {
+            warnings.push(format!(
+                "remembered identity was unreadable: {}",
+                error.message
+            ));
+            None
+        }
+    };
+    let mut backend = found
+        .as_ref()
+        .and_then(|found| found.password_backend.clone());
+    // Metadata is only diagnostic. Always visit every available keyring, so a
+    // failed migration or a lost login.json cannot hide a password from forget.
+    let mut backends = Vec::new();
+    if secrets.mac || secrets.security.is_file() {
+        backends.push(Backend::Keychain(secrets.security.clone()));
+    }
+    if let Some(program) = secrets.secret_tool() {
+        backends.push(Backend::SecretService(program));
+    }
+    let mut password_complete = true;
+    let mut password_backends = std::collections::BTreeMap::new();
     if let Some((found, kind)) = found
         .as_ref()
-        .and_then(|found| Some((found, found.password_backend.clone()?)))
-        .filter(|(_, kind)| kind != secret::PLAINTEXT_FILE)
+        .and_then(|found| Some((found, found.password_backend.as_deref()?)))
+        .filter(|(_, kind)| {
+            *kind != secret::PLAINTEXT_FILE
+                && !backends.iter().any(|backend| backend.kind() == *kind)
+        })
     {
-        // A broken backend must not keep the user from forgetting the rest.
-        match secrets.open(&kind).and_then(|b| b.clear(&found.username)) {
-            Ok(()) => cleared = true,
-            Err(error) => warnings.push(format!(
-                "could not remove the stored password of {} from the {kind} backend ({}); it may remain there",
-                found.username, error.message
-            )),
+        let error = secrets
+            .open(kind)
+            .and_then(|backend| backend.clear_all())
+            .err();
+        if let Some(error) = error {
+            password_backends.insert(kind, None);
+            password_complete = false;
+            warnings.push(format!("could not remove the stored password of {} from the {kind} backend ({}); it may remain there", found.username, error.message));
         }
-        backend = Some(kind);
+    } else if backend.is_none() && backends.is_empty() {
+        // In particular, repeat forget must not silently succeed after a
+        // previous run removed metadata while the keyring was unavailable.
+        password_complete = false;
+        password_backends.insert(
+            if secrets.mac {
+                "keychain"
+            } else {
+                "secret-service"
+            },
+            None,
+        );
+        warnings.push("no OS keyring helper is available; keyring passwords could not be checked; retry `klms auth forget` when the helper is available".into());
     }
-    // The plaintext file only ever holds klms passwords; drop it entirely.
-    if store::remove_file(&dirs.credentials(), "credentials file")? {
-        cleared |= backend.is_none();
+    let mut password_removed = false;
+    for target in backends {
+        match target.clear_all() {
+            Ok(removed) => {
+                password_backends.insert(target.kind(), Some(removed));
+                password_removed |= removed;
+                if removed {
+                    backend.get_or_insert_with(|| target.kind().to_owned());
+                }
+            }
+            Err(error) => {
+                password_backends.insert(target.kind(), None);
+                password_complete = false;
+                warnings.push(format!(
+                    "could not purge {} passwords: {}; passwords may remain there",
+                    target.kind(),
+                    error.message
+                ));
+            }
+        }
+    }
+    let before = warnings.len();
+    let plaintext_removed =
+        store::remove_owned(&dirs.credentials(), "credentials file", &mut warnings);
+    password_complete &= warnings.len() == before;
+    password_backends.insert(
+        secret::PLAINTEXT_FILE,
+        (warnings.len() == before).then_some(plaintext_removed),
+    );
+    if plaintext_removed {
+        password_removed = true;
         backend.get_or_insert_with(|| secret::PLAINTEXT_FILE.to_owned());
     }
-    let removed = [
-        (
-            store::remove_file(&dirs.identity(), "remembered login")?,
-            "remembered login",
-        ),
-        (cleared, "stored password"),
-        (
-            store::remove_file(&dirs.pending(), "pending login")?,
-            "pending verification",
-        ),
-    ];
-    let human = if removed.iter().any(|(gone, _)| *gone) {
-        let parts: Vec<_> = removed
-            .iter()
-            .filter(|(gone, _)| *gone)
-            .map(|(_, name)| *name)
-            .collect();
-        format!(
-            "Forgot {}. The saved KLMS session is unchanged; `klms auth logout` removes it.",
-            parts.join(", ")
-        )
+    password_removed &= password_complete;
+    let login_removed = store::remove_owned(&dirs.identity(), "remembered login", &mut warnings);
+    let pending_removed = store::remove_owned(&dirs.pending(), "pending login", &mut warnings);
+    let human = if !password_complete || warnings.len() > before {
+        "Forget cleanup was incomplete; see warnings. The saved KLMS session is unchanged."
+            .to_owned()
     } else {
-        "Nothing remembered; nothing to forget.".to_owned()
+        "Remembered login cleanup finished. The saved KLMS session is unchanged; `klms auth logout` removes it.".to_owned()
     };
     let data = json!({
-        "login_removed": removed[0].0,
-        "password_removed": removed[1].0,
+        "login_removed": login_removed,
+        "password_removed": password_removed,
         "password_backend": backend,
-        "pending_removed": removed[2].0,
+        "password_backends": password_backends,
+        "password_cleanup_complete": password_complete,
+        "pending_removed": pending_removed,
     });
     let mut result = output::result("auth.forget", &data, human)?;
     result.warnings = warnings;
