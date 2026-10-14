@@ -2,8 +2,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    NEXT_PAGE_SELECTORS, first_text, has_any, link_items, query_id, resolve_http_url, sel,
-    visible_text,
+    NEXT_PAGE_SELECTORS, first_text, has_any, link_items, page_identity, query_id,
+    resolve_http_url, sel, visible_text,
 };
 use crate::{
     error::AppError,
@@ -44,6 +44,7 @@ pub fn resource_detail(
     let (title, text_value, mut links) = if board_post {
         notice_content(&document, base_url)?
     } else {
+        page_identity(&document, kind, query_id(url, &["id"]).as_deref())?;
         if !has_any(&document, &["#region-main", "[role=main]", "main"]) {
             return Err(AppError::shape(
                 "detail page contained no recognizable resource region",
@@ -207,7 +208,7 @@ mod tests {
 
     #[test]
     fn omits_escaped_lti_launch_forms_from_detail_text() {
-        let html = r#"<main><h1>Course tool</h1> &lt;form method=&quot;post&quot;&gt;&lt;input name=&quot;login_hint&quot; value=&quot;private-user-id&quot;/&gt;&lt;/form&gt; Ready</main>"#;
+        let html = r#"<body id='page-mod-lti-view' class='path-mod-lti cmid-7'><main><h1>Course tool</h1> &lt;form method=&quot;post&quot;&gt;&lt;input name=&quot;login_hint&quot; value=&quot;private-user-id&quot;/&gt;&lt;/form&gt; Ready</main>"#;
         let url = base().join("/mod/lti/view.php?id=7").unwrap();
         let detail = resource_detail(html, &base(), &url, "lti").unwrap();
         assert!(!detail.text.contains("private-user-id"));
@@ -292,7 +293,7 @@ mod tests {
 
     #[test]
     fn keeps_non_http_links_as_written_but_drops_scripts() {
-        let html = "<main><h1>Contact</h1><a href='mailto:ta@example.test?subject=HW#top'>Mail the TA</a>\
+        let html = "<body id='page-mod-page-view' class='path-mod-page cmid-7'><main><h1>Contact</h1><a href='mailto:ta@example.test?subject=HW#top'>Mail the TA</a>\
             <a href=' tel:+82-42-000-0000 '>Office</a>\
             <a href='javascript:void(0)'>Toggle</a>\
             <a href='/pluginfile.php/1/a.pdf'>Slides</a></main>";

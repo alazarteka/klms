@@ -56,7 +56,7 @@ fn fixtures(media: impl Fn() -> Response + Send + Sync + 'static, podcast: bool)
             },
         );
     let page = format!(
-        r#"<div id="region-main"><h2>Lecture</h2><iframe src="{}/Panopto/Pages/Embed.aspx?id={UUID}&amp;access_token=synthetic-bearer"></iframe></div>"#,
+        r#"<body id="page-mod-lti-view" class="path-mod-lti cmid-7"><div id="region-main"><h2>Lecture</h2><iframe src="{}/Panopto/Pages/Embed.aspx?id={UUID}&amp;access_token=synthetic-bearer"></iframe></div>"#,
         panopto.url()
     );
     let klms = Server::new(move |request| match request.target.as_str() {
@@ -423,7 +423,7 @@ fn collection_fixture(fail_second_page: bool) -> Fixtures {
         }
     });
     let html = format!(
-        r#"<main><h1>Lecture collection</h1><iframe src="{}/Panopto/Pages/Sessions/List.aspx?folderID={UUID}"></iframe></main>"#,
+        r#"<body id="page-mod-lti-view" class="path-mod-lti cmid-7"><main><h1>Lecture collection</h1><iframe src="{}/Panopto/Pages/Sessions/List.aspx?folderID={UUID}"></iframe></main>"#,
         panopto.url()
     );
     let klms = Server::new(move |_| Response::html(html.clone()));
@@ -453,9 +453,10 @@ fn show_keeps_activity_metadata_with_a_warning_when_launch_or_viewer_fails() {
             if native && request.target == "/mod/vod/viewer/index.php?id=7" {
                 Response::html("<main>unsupported player</main>")
             } else {
-                Response::html(
-                    "<main><h1>Fixture recording</h1><div id='intro'>Activity description</div></main>",
-                )
+                let kind = if native { "vod" } else { "lti" };
+                Response::html(format!(
+                    "<body id='page-mod-{kind}-view' class='path-mod-{kind} cmid-7'><main><h1>Fixture recording</h1><div id='intro'>Activity description</div></main></body>",
+                ))
             }
         });
         let f = Fixtures { klms, panopto, cdn };
@@ -491,7 +492,7 @@ fn show_keeps_activity_metadata_when_delivery_inspection_fails() {
         }
     });
     let page = format!(
-        r#"<main><h1>Fixture recording</h1><iframe src="{}/Panopto/Pages/Embed.aspx?id={UUID}"></iframe></main>"#,
+        r#"<body id="page-mod-lti-view" class="path-mod-lti cmid-7"><main><h1>Fixture recording</h1><iframe src="{}/Panopto/Pages/Embed.aspx?id={UUID}"></iframe></main>"#,
         panopto.url()
     );
     let klms = Server::new(move |_| Response::html(page.clone()));

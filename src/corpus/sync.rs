@@ -322,7 +322,7 @@ fn collect_course(
     course: &Course,
     options: SyncOptions,
 ) -> Result<(Vec<PendingResource>, Vec<String>), AppError> {
-    let activities = crate::course_pages::activities(client, base_url, &course.id)?;
+    let activities = crate::course_pages::activities(client, &course.id)?;
     let mut rows = Vec::new();
     let mut failures = Vec::new();
     for activity in activities {
@@ -410,7 +410,7 @@ fn collect_board(
                 break;
             }
         };
-        let posts = match parse::board_posts(&page.text, base_url, query_value(&page.url, "id")) {
+        let posts = match parse::board_posts(&page.text, &page.url, query_value(&page.url, "id")) {
             Ok(posts) => posts,
             Err(error) => {
                 fail(&mut failures, &error.message);

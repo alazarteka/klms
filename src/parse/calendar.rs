@@ -3,8 +3,10 @@ use std::collections::HashSet;
 use crate::url::Url;
 use scraper::{ElementRef, Html};
 
-use super::detail::preview_from_document;
-use super::shared::{NEXT_PAGE_SELECTORS, has_any, href_url, query_id, sel, text, visible_text};
+use super::shared::{
+    NEXT_PAGE_SELECTORS, collection_shape, has_any, href_url, module_view, query_id, sel, text,
+    visible_text,
+};
 use crate::{
     date,
     error::AppError,
@@ -27,12 +29,12 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
     let course_links = sel("a[href*='course/view.php']");
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
-    let mut skipped = 0;
-    for event in document.select(&sel(".event, [data-region=event-list-item]")) {
+    let mut parsed_events = HashSet::new();
+    for event in document.select(&sel(".calendarwrapper .event, .calendarwrapper [data-region=event-list-item], [data-region=event-list-content] .event, [data-region=event-list-content] [data-region=event-list-item]")) {
         let Some((anchor, url)) = event_link(event, base_url)? else {
-            skipped += 1;
             continue;
         };
+        parsed_events.insert(event.id());
         let attr = |name: &str| event.value().attr(name);
         let kind = attr("data-event-component")
             .and_then(|value| value.strip_prefix("mod_"))
@@ -72,27 +74,19 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
             url: safe_url::display(&url),
         });
     }
-    let explicit_empty = preview_from_document(&document)
-        .to_ascii_lowercase()
-        .contains("there are no upcoming events");
-    let empty_region = document
-        .select(&sel(".calendarwrapper, [data-region=event-list-content]"))
-        .any(|root| root.inner_html().trim().is_empty());
-    let unknown_links = document
-        .select(&sel(
-            ".calendarwrapper a[href*='/mod/'], [data-region=event-list-content] a[href*='/mod/']",
-        ))
-        .any(|anchor| {
-            !anchor
+    collection_shape(
+        &document,
+        ".calendarwrapper, [data-region=event-list-content]",
+        base_url,
+        |url| module_view(url) || url.path() == "/calendar/event.php",
+        |anchor, url| {
+            anchor
                 .ancestors()
-                .filter_map(ElementRef::wrap)
-                .any(|node| sel(".event, [data-region=event-list-item]").matches(&node))
-        });
-    if (rows.is_empty() && skipped == 0 && !explicit_empty && !empty_region) || unknown_links {
-        return Err(AppError::shape(
-            "calendar page contained no recognizable event region",
-        ));
-    }
+                .any(|node| parsed_events.contains(&node.id()))
+                && event_identity(url.clone())
+                    .is_some_and(|url| rows.iter().any(|row| row.url == safe_url::display(&url)))
+        },
+    )?;
     // A time that is present but unreadable suggests changed markup; an event
     // with no time at all (e.g. a quiz without a close date) is simply undated.
     let count = |keep: &dyn Fn(&CalendarEvent) -> bool| rows.iter().filter(|e| keep(e)).count();
@@ -102,7 +96,7 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
     let has_next = has_any(&document, NEXT_PAGE_SELECTORS);
     Ok(CalendarPage {
         events: rows,
-        complete: skipped == 0 && !has_next,
+        complete: !has_next,
         unparsed_times,
         undated_events,
         missing_course_ids,
@@ -119,24 +113,20 @@ fn event_link<'a>(
     }
     let mut selected: Option<(ElementRef<'a>, Url)> = None;
     for anchor in candidates {
-        let Some(mut url) = href_url(anchor, base_url) else {
+        let Some(url) = href_url(anchor, base_url) else {
             continue;
         };
         let path = url.path();
         if url.origin() != base_url.origin()
-            || !((path.starts_with("/mod/") && path.ends_with("/view.php"))
-                || path == "/calendar/event.php")
+            || !(module_view(&url) || path == "/calendar/event.php")
         {
             continue;
         }
         // A footer action identifies the module, but is never a read target.
         // Retain only its numeric identity, dropping action/token parameters.
-        let Some(id) = query_id(&url, &["id"]) else {
+        let Some(url) = event_identity(url) else {
             continue;
         };
-        url.set_query(None);
-        url.set_fragment(None);
-        url.query_pairs_mut().append_pair("id", &id);
         if selected
             .as_ref()
             .is_some_and(|(_, previous)| previous != &url)
@@ -148,6 +138,14 @@ fn event_link<'a>(
         selected = Some((anchor, url));
     }
     Ok(selected)
+}
+
+fn event_identity(mut url: Url) -> Option<Url> {
+    let id = query_id(&url, &["id"])?;
+    url.set_query(None);
+    url.set_fragment(None);
+    url.query_pairs_mut().append_pair("id", &id);
+    Some(url)
 }
 
 fn event_time(
@@ -269,13 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn counts_unreadable_undated_and_incomplete_events() {
+    fn counts_unreadable_and_undated_events_and_accepts_empty_chrome() {
         let work = "<a href='/mod/assign/view.php?id=7'>Work</a>";
         let invalid = page(&format!(
             "<div class='event'>{work}<time datetime='invalid'></time></div>"
         ));
         assert_eq!((invalid.unparsed_times, invalid.undated_events), (1, 0));
-        assert!(!page("<div class='event'>No detail link</div>").complete);
+        assert!(page("<div class='event'>No detail link</div>").complete);
         let unparsed = page(&format!(
             "<div class='event'>{work}<time>sometime</time></div>"
         ));
@@ -290,7 +288,7 @@ mod tests {
 
     #[test]
     fn parses_typed_event_with_course_and_time() {
-        let html = r#"<main id='region-main'><div class='event'>
+        let html = r#"<main id='region-main' class='calendarwrapper'><div class='event'>
           <a href='/mod/assign/view.php?id=7'>Written work is due</a>
           <a href='/course/view.php?id=42'>Compilers</a>
           <time datetime='2026-09-01T23:59:00+09:00'>Tuesday, 1 September 2026, 11:59 PM</time>
