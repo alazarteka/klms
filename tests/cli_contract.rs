@@ -568,7 +568,9 @@ fn typed_detail_redirects_cannot_silently_change_identity() {
                 .status("302 Found")
                 .header("Location", "/mod/assign/view.php?id=7")
         } else {
-            Response::html("<main><h1>Requested assignment</h1></main>")
+            Response::html(
+                "<body id='page-mod-assign-view' class='path-mod-assign cmid-7'><main><h1>Requested assignment</h1></main>",
+            )
         }
     });
     assert_eq!(
@@ -741,7 +743,9 @@ fn spec_serializes_argument_requires_and_conflicts() {
 fn native_video_download_is_static_private_complete_and_never_overwrites() {
     let mp4 = b"\x00\x00\x00\x18ftypisomsynthetic-media";
     let server = Server::new(move |request| match request.target.as_str() {
-        "/mod/vod/view.php?id=7" => Response::html("<main><h1>Synthetic lecture</h1></main>"),
+        "/mod/vod/view.php?id=7" => Response::html(
+            "<body id='page-mod-vod-view' class='path-mod-vod cmid-7'><main><h1>Synthetic lecture</h1></main>",
+        ),
         "/mod/vod/viewer/index.php?id=7" => Response::html(
             r#"<script>flowplayer('#player', {clip: {sources: [{type: "video/mp4", src: "/vod1/synthetic.mp4"}]}});</script>"#,
         ),
@@ -789,7 +793,9 @@ fn failed_native_video_download_cleans_temporary_and_output() {
         ),
     ] {
         let responses = std::sync::Mutex::new(std::collections::VecDeque::from([
-            Response::html("<main><h1>Lecture</h1></main>"),
+            Response::html(
+                "<body id='page-mod-vod-view' class='path-mod-vod cmid-7'><main><h1>Lecture</h1></main>",
+            ),
             Response::html(
                 r#"<script>flowplayer('#player', {clip: {sources: [{type: "video/mp4", src: "/vod1/synthetic.mp4"}]}});</script>"#,
             ),
@@ -842,7 +848,7 @@ fn video_grammar_rejects_ambiguous_ids_and_invalid_limits() {
 fn video_list_reads_only_the_course_page_and_never_opens_activities() {
     let server = Server::new(|request| match request.target.as_str() {
         "/course/view.php?id=42" => Response::html(
-            r#"<main class="course-content"><li class="activity modtype_vod" id="module-6"><a href="/mod/vod/view.php?id=6"><span class="instancename">Native lecture</span></a></li><li class="activity modtype_lti" id="module-7"><a href="/mod/lti/view.php?id=7"><span class="instancename">Panopto Lecture</span></a></li><li class="activity modtype_panoptocourseembed" id="module-8"><span class="instancename">Embedded collection</span></li><li class="activity modtype_assign" id="module-9"><a href="/mod/assign/view.php?id=9"><span class="instancename">Homework</span></a></li></main>"#,
+            r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="activity modtype_vod" id="module-6"><a href="/mod/vod/view.php?id=6"><span class="instancename">Native lecture</span></a></li><li class="activity modtype_lti" id="module-7"><a href="/mod/lti/view.php?id=7"><span class="instancename">Panopto Lecture</span></a></li><li class="activity modtype_panoptocourseembed" id="module-8"><span class="instancename">Embedded collection</span></li><li class="activity modtype_assign" id="module-9"><a href="/mod/assign/view.php?id=9"><span class="instancename">Homework</span></a></li></main>"#,
         ),
         _ => panic!("videos list opened an activity: {}", request.target),
     });
@@ -874,7 +880,9 @@ fn video_list_reads_only_the_course_page_and_never_opens_activities() {
 #[test]
 fn native_viewer_redirects_cannot_change_the_recording_identity() {
     let server = Server::new(|request| match request.target.as_str() {
-        "/mod/vod/view.php?id=7" => Response::html("<main><h1>Requested lecture</h1></main>"),
+        "/mod/vod/view.php?id=7" => Response::html(
+            "<body id='page-mod-vod-view' class='path-mod-vod cmid-7'><main><h1>Requested lecture</h1></main>",
+        ),
         "/mod/vod/viewer/index.php?id=7" => Response::html("")
             .status("302 Found")
             .header("Location", "/mod/vod/viewer/index.php?id=8"),
@@ -909,11 +917,11 @@ fn course_listings_read_every_week_of_the_paged_week_format() {
         )
     };
     let current = format!(
-        "<a href='javascript:M.course.format.dayselect(0, 42, 0)'>All</a><main class='course-content'>{}</main>",
+        "<a href='javascript:M.course.format.dayselect(0, 42, 0)'>All</a><body id='page-course-view-topics' class='course-42'><main class='course-content'>{}</main>",
         section(5, &module("resource", 7, "Week 5 slides"))
     );
     let all = format!(
-        "<main class='course-content'>{}{}</main>",
+        "<body id='page-course-view-topics' class='course-42'><main class='course-content'>{}{}</main>",
         section(
             1,
             &(module("resource", 3, "Week 1 slides") + &module("vod", 4, "Week 1 lecture"))
@@ -954,7 +962,7 @@ fn course_listings_read_every_week_of_the_paged_week_format() {
 
     // Other course formats stay a single request.
     let plain = format!(
-        "<main class='course-content'>{}</main>",
+        "<body id='page-course-view-topics' class='course-42'><main class='course-content'>{}</main>",
         module("resource", 7, "Slides")
     );
     let server = Server::new(move |request| match request.target.as_str() {

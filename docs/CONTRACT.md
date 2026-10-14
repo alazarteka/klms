@@ -89,10 +89,23 @@ zeros resolve to the same identity. Bare numeric video IDs are rejected.
 Same-origin KLMS URLs are a repair path only. Pass refs back as printed; do
 not scrape URLs. Typed detail URLs accept only their identity parameters and are
 rebuilt from the reference. `files download` accepts pluginfile locators and
-resource, coursefile, or folder references. `request get` allows dashboard,
-course, calendar, known module view/index and board-article endpoints, the user
-grade report, attendance index, native video viewer, and pluginfile paths only;
+resource or coursefile references. Folder ZIP downloads are unsupported.
+`request get` allows dashboard, course, calendar, known module view/index and
+board-article endpoints, the user grade report, attendance index, native video
+viewer, and pluginfile locators (path or `?file=...` form) only;
 endpoint-specific query keys are allowlisted, with no action or secret keys.
+Module reads allow `redirect`/`forceview`, course reads allow `section`/`sectionid`,
+and calendar reads allow the stock date, category and lookahead filters.
+Module redirects must retain kind and ID. Resource/coursefile views may redirect
+to pluginfile; inline folders may redirect to a course; URL activities may
+redirect to another allowed same-origin read endpoint. Refused server links or
+redirects are `UPSTREAM_SHAPE_CHANGED`; invalid typed operands are `USAGE`.
+
+Collection parsers require a known region and reject any resolved item-endpoint
+link there that did not become a row. Headings, empty sections and empty-state
+rows are valid empty collections. Detail pages require Moodle body attributes
+identifying the expected module kind and module ID, or course page and course ID;
+a generic `main` region alone is insufficient.
 
 ## Library invariants
 

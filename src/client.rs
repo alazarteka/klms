@@ -354,16 +354,23 @@ impl KlmsClient {
         })
     }
 
+    /// Typed operands are user mistakes; discovered URLs use upstream errors.
+    pub fn validate_operand(&self, path: &str) -> Result<(), AppError> {
+        self.resolve(path)
+            .map(|_| ())
+            .map_err(|error| AppError::usage(error.message))
+    }
+
     fn resolve(&self, path: &str) -> Result<Url, AppError> {
         let url = self
             .base_url
             .join(path)
-            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
+            .map_err(|error| AppError::shape(format!("invalid KLMS path: {error}")))?;
         if url.origin() != self.base_url.origin() {
-            return Err(AppError::config("cross-origin request path refused"));
+            return Err(AppError::shape("cross-origin request path refused"));
         }
         if has_userinfo(&url) {
-            return Err(AppError::config("request URL must not contain userinfo"));
+            return Err(AppError::shape("request URL must not contain userinfo"));
         }
         Ok(url)
     }
@@ -654,10 +661,10 @@ impl http::Policy for KlmsPolicy {
 
     fn allow(&mut self, url: &Url) -> Result<(), AppError> {
         if url.origin() != self.origin {
-            return Err(AppError::network("cross-origin redirect refused"));
+            return Err(AppError::shape("cross-origin redirect refused"));
         }
         if has_userinfo(url) {
-            return Err(AppError::network("URL userinfo refused"));
+            return Err(AppError::shape("URL userinfo refused"));
         }
         policy::redirect(&self.initial, url)
     }
@@ -778,13 +785,27 @@ mod tests {
     }
 
     #[test]
+    fn server_provided_invalid_links_fail_as_shape_before_transport() {
+        let server = serve(Vec::new());
+        for target in [
+            "/mod/resource/view.php?id=7&action=delete".to_owned(),
+            "https://foreign.invalid/mod/resource/view.php?id=7".into(),
+            server.url().replace("http://", "http://user@") + "/pluginfile.php/1/file",
+        ] {
+            let error = client(&server, None, 5).get(&target).err().unwrap();
+            assert_eq!(error.code, "UPSTREAM_SHAPE_CHANGED");
+        }
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
     fn refuses_cross_origin_redirects_before_sending_the_cookie() {
         let server = serve(vec![redirect("http://127.0.0.2:1/steal")]);
         let error = client(&server, Some("MoodleSession=a"), 5)
             .get_bytes("/pluginfile.php/start", 16)
             .err()
             .unwrap();
-        assert_eq!(error.code, "NETWORK_ERROR");
+        assert_eq!(error.code, "UPSTREAM_SHAPE_CHANGED");
         assert!(error.message.contains("cross-origin redirect refused"));
         assert_eq!(server.requests().len(), 1);
     }

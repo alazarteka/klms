@@ -18,12 +18,13 @@ pub(super) fn download(
 ) -> Result<CommandResult, AppError> {
     let base = Url::parse("https://klms.invalid/").expect("fixed URL");
     let url = base.join(source).ok();
-    let source = if let Some(url) = url.filter(|url| url.path().starts_with("/pluginfile.php/")) {
-        crate::client::policy::read_url(&url)?;
+    let source = if let Some(url) = url.filter(crate::client::policy::pluginfile) {
+        crate::client::policy::read_url(&url).map_err(|error| AppError::usage(error.message))?;
         source.to_owned()
     } else {
-        module_path(source, &["resource", "folder", "coursefile"])?
+        module_path(source, &["resource", "coursefile"])?
     };
+    client.validate_operand(&source)?;
     validate_out(out, false)?;
     publish("files.download", out, |file| {
         client.download_to(&source, MAX_DOWNLOAD_BYTES, file)
