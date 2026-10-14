@@ -155,9 +155,11 @@ makes no `mod/*/view.php`, LTI launch or Panopto request. Its rows have
 recording or a collection) or `lti` (an external tool that may be Panopto), and
 `downloadable` null. `videos show` and `videos download` open the activity in
 KLMS and, for Panopto, perform its LTI launch and read delivery metadata;
-Panopto may create an account on first launch. `videos show` on a collection
-lists recording refs, titles and durations. Failed folder enumeration is an
-error; only a successfully returned but incomplete enumeration sets `complete`
+Panopto may create an account on first launch. Launch parsing requires a main
+region on the initial Moodle activity page; an already-isolated embedded activity
+and subsequent protocol handoffs do not require Moodle layout. `videos show` on a
+collection lists recording refs, titles and durations. Failed folder enumeration
+is an error; only a successfully returned but incomplete enumeration sets `complete`
 false and produces a warning. If launch or playback-source inspection fails,
 `videos show` still returns readable activity metadata with a warning. LTI
 recognition uses launch protocol markup, never its title. `downloadable` and `official_download_available` are null when

@@ -109,6 +109,7 @@ pub(crate) fn launch(
     html: &str,
     url: &Url,
     config: &Config,
+    mut kind: video::PageKind,
 ) -> Result<Session, AppError> {
     let agent = http::agent(Duration::from_secs(timeout), Some(Duration::from_secs(8)));
     let pano = config.panopto.origin();
@@ -139,7 +140,7 @@ pub(crate) fn launch(
             policy.cookie.clear();
             return Ok(Session::new(agent, policy, recording, folder));
         }
-        let response = if let Some(form) = video::launch_form(&page, &current, &pano)? {
+        let response = if let Some(form) = video::launch_form(&page, &current, &pano, kind)? {
             let payload = Payload::form(form.fields.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             request(
                 &agent,
@@ -148,7 +149,7 @@ pub(crate) fn launch(
                 form.action,
                 Some(payload),
             )?
-        } else if let Some(embed) = video::embedded_launch(&page, &current, &pano) {
+        } else if let Some(embed) = video::embedded_launch(&page, &current, &pano, kind)? {
             request(&agent, &mut policy, Method::GET, embed, None)?
         } else {
             if video::non_panopto_lti_form(&page, &current, &pano) {
@@ -163,6 +164,7 @@ pub(crate) fn launch(
         };
         current = response.url().clone();
         page = text(response)?;
+        kind = video::PageKind::Handoff;
     }
     Err(AppError::shape(
         "Panopto launch exceeded its bounded exchange",
