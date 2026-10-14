@@ -26,6 +26,12 @@ complete global sync). A scoped sync never claims global coverage.
 and the kinds that were present, so a misspelled kind is not mistaken for
 "nothing due".
 
+## Command spec
+
+`klms spec --json` derives the argument tree from clap, including per-argument
+`requires` and `conflicts` arrays of flag names. The text grammar groups dependent
+flags together, such as `[--year YEAR --semester spring|summer|fall|winter]`.
+
 ## Course discovery
 
 `courses list` and `courses resolve` default to the selected dashboard scope.
