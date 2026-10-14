@@ -505,88 +505,54 @@ fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError
             None
         }
     };
-    let mut backend = found
+    let backend = found
         .as_ref()
-        .and_then(|found| found.password_backend.clone());
-    // Metadata is only diagnostic. Always visit every available keyring, so a
-    // failed migration or a lost login.json cannot hide a password from forget.
-    let mut backends = Vec::new();
+        .and_then(|found| found.password_backend.as_deref());
+    let mut password_backends = std::collections::BTreeMap::from([(secret::PLAINTEXT_FILE, None)]);
+    // Always purge available keyrings, including accounts absent from metadata.
     if secrets.mac || secrets.security.is_file() {
-        backends.push(Backend::Keychain(secrets.security.clone()));
+        password_backends.insert("keychain", None);
     }
-    if let Some(program) = secrets.secret_tool() {
-        backends.push(Backend::SecretService(program));
+    if secrets.secret_tool().is_some() {
+        password_backends.insert("secret-service", None);
     }
-    let mut password_complete = true;
-    let mut password_backends = std::collections::BTreeMap::new();
-    if let Some((found, kind)) = found
-        .as_ref()
-        .and_then(|found| Some((found, found.password_backend.as_deref()?)))
-        .filter(|(_, kind)| {
-            *kind != secret::PLAINTEXT_FILE
-                && !backends.iter().any(|backend| backend.kind() == *kind)
-        })
-    {
-        let error = secrets
-            .open(kind)
-            .and_then(|backend| backend.clear_all())
-            .err();
-        if let Some(error) = error {
-            password_backends.insert(kind, None);
-            password_complete = false;
-            warnings.push(format!("could not remove the stored password of {} from the {kind} backend ({}); it may remain there", found.username, error.message));
+    if let Some(kind) = backend {
+        password_backends.insert(kind, None);
+    }
+    for (kind, removed) in &mut password_backends {
+        if *kind == secret::PLAINTEXT_FILE {
+            let before = warnings.len();
+            let deleted =
+                store::remove_owned(&dirs.credentials(), "credentials file", &mut warnings);
+            *removed = (warnings.len() == before).then_some(deleted);
+            continue;
         }
-    } else if backend.is_none() && backends.is_empty() {
-        // In particular, repeat forget must not silently succeed after a
-        // previous run removed metadata while the keyring was unavailable.
-        password_complete = false;
-        password_backends.insert(
-            if secrets.mac {
-                "keychain"
-            } else {
-                "secret-service"
-            },
-            None,
-        );
-        warnings.push("no OS keyring helper is available; keyring passwords could not be checked; retry `klms auth forget` when the helper is available".into());
-    }
-    let mut password_removed = false;
-    for target in backends {
-        match target.clear_all() {
-            Ok(removed) => {
-                password_backends.insert(target.kind(), Some(removed));
-                password_removed |= removed;
-                if removed {
-                    backend.get_or_insert_with(|| target.kind().to_owned());
-                }
-            }
-            Err(error) => {
-                password_backends.insert(target.kind(), None);
-                password_complete = false;
-                warnings.push(format!(
-                    "could not purge {} passwords: {}; passwords may remain there",
-                    target.kind(),
-                    error.message
-                ));
-            }
+        match secrets.open(kind).and_then(|target| target.clear_all()) {
+            Ok(deleted) => *removed = Some(deleted),
+            Err(error) => warnings.push(format!(
+                "could not purge {kind} passwords: {}; passwords may remain there; retry `klms auth forget` when the backend is available",
+                error.message
+            )),
         }
     }
-    let before = warnings.len();
-    let plaintext_removed =
-        store::remove_owned(&dirs.credentials(), "credentials file", &mut warnings);
-    password_complete &= warnings.len() == before;
-    password_backends.insert(
-        secret::PLAINTEXT_FILE,
-        (warnings.len() == before).then_some(plaintext_removed),
-    );
-    if plaintext_removed {
-        password_removed = true;
-        backend.get_or_insert_with(|| secret::PLAINTEXT_FILE.to_owned());
-    }
-    password_removed &= password_complete;
-    let login_removed = store::remove_owned(&dirs.identity(), "remembered login", &mut warnings);
+    let password_complete = password_backends.values().all(Option::is_some);
+    let password_removed =
+        password_complete && password_backends.values().any(|v| *v == Some(true));
+    // Retain the backend pointer until that backend confirms its purge, so a
+    // later forget retries even when its helper is currently unavailable.
+    let login_removed = if backend.is_none_or(|kind| password_backends[kind].is_some()) {
+        store::remove_owned(&dirs.identity(), "remembered login", &mut warnings)
+    } else {
+        store::remove_temporaries(&dirs.identity(), "remembered login", &mut warnings);
+        false
+    };
+    let backend = backend.or_else(|| {
+        password_backends
+            .iter()
+            .find_map(|(kind, removed)| (*removed == Some(true)).then_some(*kind))
+    });
     let pending_removed = store::remove_owned(&dirs.pending(), "pending login", &mut warnings);
-    let human = if !password_complete || warnings.len() > before {
+    let human = if !warnings.is_empty() {
         "Forget cleanup was incomplete; see warnings. The saved KLMS session is unchanged."
             .to_owned()
     } else {

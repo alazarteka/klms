@@ -154,16 +154,21 @@ pub fn remove_owned(path: &Path, what: &str, warnings: &mut Vec<String>) -> bool
             false
         }
     };
+    remove_temporaries(path, what, warnings);
+    removed
+}
+
+pub fn remove_temporaries(path: &Path, what: &str, warnings: &mut Vec<String>) {
     let parent = path.parent().expect("auth file has a parent");
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return removed,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
         Err(error) => {
             warnings.push(format!(
                 "cannot scan {} for {what} temporary files: {error}",
                 parent.display()
             ));
-            return removed;
+            return;
         }
     };
     let prefix = format!("{}.", path.file_name().unwrap().to_string_lossy());
@@ -190,7 +195,6 @@ pub fn remove_owned(path: &Path, what: &str, warnings: &mut Vec<String>) -> bool
             }
         }
     }
-    removed
 }
 
 pub fn with_cleanup_warnings(mut error: AppError, warnings: &[String]) -> AppError {

@@ -105,7 +105,7 @@ impl Secrets {
             other => Err(AppError::config(format!(
                 "unknown password backend {other:?} in remembered login"
             ))
-            .with_hint("Run `klms auth forget` to discard it.")),
+            .with_hint("Check the password backend recorded in login.json.")),
         }
     }
 }
@@ -266,7 +266,7 @@ impl Backend {
         match self {
             Self::Keychain(program) => {
                 let mut removed = false;
-                loop {
+                for _ in 0..256 {
                     let finished =
                         run_helper(program, &["delete-generic-password", "-s", SERVICE], None)?;
                     match finished.code {
@@ -275,6 +275,9 @@ impl Backend {
                         _ => return Err(finished.failure("macOS keychain delete")),
                     }
                 }
+                Err(AppError::config(
+                    "macOS keychain purge reached the limit of 256 deletions; passwords may remain",
+                ))
             }
             Self::SecretService(program) => clear_secret_service(program, None),
             Self::File(path) => remove_file(path, "credentials file"),
@@ -435,6 +438,21 @@ mod tests {
         let path = dir.join(name);
         crate::fixture_executable::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
         path
+    }
+
+    #[test]
+    fn keychain_purge_stops_after_256_successful_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = dir.path().join("calls");
+        let program = script(
+            dir.path(),
+            "security",
+            &format!("echo delete >> '{}'; exit 0", calls.display()),
+        );
+        let error = Backend::Keychain(program).clear_all().unwrap_err();
+        assert_eq!(error.code, "CONFIG_ERROR");
+        assert!(error.message.contains("limit of 256 deletions"));
+        assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 256);
     }
 
     /// A fake `secret-tool` keeping secrets in `$STORE/<account>`; argv is
