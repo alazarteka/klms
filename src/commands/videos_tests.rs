@@ -278,7 +278,31 @@ fn missing_ffmpeg_fails_before_any_media_is_fetched() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-#[cfg(target_os = "linux")]
+#[test]
+fn temporary_names_match_only_generated_entries() {
+    for (name, expected) in [
+        (".klms-video-42-ab.part", Some("part")),
+        (".klms-video-42-ab.part.1a2", Some("part")),
+        (".klms-video-42-ab.scratch", Some("scratch")),
+        (".klms-video-project.part-notes", None),
+        (".klms-video-42.scratch", None),
+        (".klms-video--ab.part", None),
+        (".klms-video-4294967296-ab.part", None),
+        (".klms-video-42-.part", None),
+        (".klms-video-42-xyz.part", None),
+        (".klms-video-42-ab.part-notes", None),
+        (".klms-video-42-ab.part.", None),
+        (".klms-video-42-ab.part.1z", None),
+        (".klms-video-42-ab.scratch.1a2", None),
+    ] {
+        assert_eq!(temporary_kind(name), expected, "{name}");
+    }
+    for kind in ["scratch", "part"] {
+        assert_eq!(temporary_kind(&temporary_name(kind)), Some(kind));
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn download_sweeps_only_stale_temporaries_beside_the_output() {
     use std::time::{Duration, SystemTime};
@@ -294,18 +318,35 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
     let stale_part = dir.path().join(".klms-video-4294967294-ab.part");
     let stale_retry = dir.path().join(".klms-video-4294967294-ab.part.1a2");
     let stale_scratch = dir.path().join(".klms-video-4294967294-cd.scratch");
+    let reused_pid = dir
+        .path()
+        .join(format!(".klms-video-{}-ab.part", std::process::id()));
     let fresh_part = dir.path().join(".klms-video-4294967294-ef.part");
+    let symlink = dir.path().join(".klms-video-4294967294-ff.part");
     let unrelated = dir.path().join("notes.part");
     let misnamed_dir = dir.path().join(".klms-video-4294967294-12.part");
-    for file in [&stale_part, &stale_retry, &fresh_part, &unrelated] {
+    for file in [
+        &stale_part,
+        &stale_retry,
+        &reused_pid,
+        &fresh_part,
+        &unrelated,
+    ] {
         std::fs::write(file, b"partial").unwrap();
     }
     std::fs::create_dir(&stale_scratch).unwrap();
     std::fs::write(stale_scratch.join("stream-0.mp4"), b"fragment").unwrap();
     std::fs::create_dir(&misnamed_dir).unwrap();
-    for path in [&stale_part, &stale_retry, &unrelated, &misnamed_dir] {
+    for path in [
+        &stale_part,
+        &stale_retry,
+        &reused_pid,
+        &unrelated,
+        &misnamed_dir,
+    ] {
         age(path);
     }
+    std::os::unix::fs::symlink(&unrelated, &symlink).unwrap();
     age(&stale_scratch);
     run(&f, &download(&dir.path().join("lecture.mp4"))).unwrap();
     let mut left = std::fs::read_dir(dir.path())
@@ -318,6 +359,7 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
         [
             ".klms-video-4294967294-12.part",
             ".klms-video-4294967294-ef.part",
+            ".klms-video-4294967294-ff.part",
             "lecture.mp4",
             "notes.part"
         ]
@@ -341,10 +383,6 @@ fn workspaces_are_unique_and_sweep_keeps_notes_and_active_work() {
         .set_modified(old)
         .unwrap();
     let first = Workspace::create(&out).unwrap();
-    std::fs::File::open(&first.0)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
     let second = Workspace::create(&out).unwrap();
     assert_ne!(first.0, second.0);
     assert!(first.0.exists() && second.0.exists() && legacy.exists());
