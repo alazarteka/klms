@@ -386,7 +386,7 @@ impl KlmsClient {
         self.ajax_request(
             sesskey,
             "core_course_get_enrolled_courses_by_timeline_classification",
-            serde_json::json!({"classification":"all", "limit":limit, "offset":offset, "sort":"fullname"}),
+            serde_json::json!({"classification":"allincludinghidden", "limit":limit, "offset":offset, "sort":"fullname"}),
         )
     }
 
