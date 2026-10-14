@@ -4,12 +4,12 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::private_fs::ScratchDir;
 use crate::{
     client::{Client, release_bytes as fetch},
     error::AppError,
@@ -103,7 +103,7 @@ fn run_with_source(
     let checksum = fetch(client, &format!("{base}/{archive_name}.sha256"), 4096)?;
     let archive = fetch(client, &format!("{base}/{archive_name}"), MAX_ARCHIVE)?;
     verify_checksum(&archive, &checksum, &archive_name)?;
-    let work = WorkDir::new(&env::temp_dir())?;
+    let work = ScratchDir::create(&env::temp_dir()).map_err(|(_, e)| io(e))?;
     let archive_path = work.0.join(&archive_name);
     fs::write(&archive_path, archive).map_err(io)?;
     let candidate = work.0.join("klms");
@@ -169,7 +169,7 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
         .parent()
         .ok_or_else(|| AppError::usage("missing install directory"))?;
     fs::create_dir_all(parent).map_err(io)?;
-    let work = WorkDir::new(parent)?;
+    let work = ScratchDir::create(parent).map_err(|(_, e)| io(e))?;
     let staged = work.0.join("klms");
     fs::copy(env::current_exe().map_err(io)?, &staged).map_err(io)?;
     executable(&staged)?;
@@ -335,29 +335,6 @@ fn executable(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-struct WorkDir(PathBuf);
-impl WorkDir {
-    fn new(parent: &Path) -> Result<Self, AppError> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| AppError::internal(e.to_string()))?
-            .as_nanos();
-        let path = parent.join(format!(".klms-update-{}-{nonce}", std::process::id()));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path).map_err(io)?;
-        Ok(Self(path))
-    }
-}
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 fn io(error: std::io::Error) -> AppError {
     AppError::config(format!("release update failed: {error}"))
 }
