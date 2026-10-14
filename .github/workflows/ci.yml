@@ -27,6 +27,10 @@ jobs:
         uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a # 1.86.0
         with:
           components: clippy,rustfmt
+      - name: Check dependency policy
+        run: scripts/supply-chain.sh deny
+      - name: Check dependency audits
+        run: scripts/supply-chain.sh vet
       - name: Format
         run: cargo fmt --all -- --check
       - name: Tests
