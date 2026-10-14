@@ -60,7 +60,7 @@ fn historical_discovery_pages_deduplicates_and_keeps_resource_refs_usable() {
         );
         assert_eq!(
             body[0]["args"],
-            json!({"classification":"all","limit":100,"offset":offset,"sort":"fullname"})
+            json!({"classification":"allincludinghidden","limit":100,"offset":offset,"sort":"fullname"})
         );
     }
     let activities = env.ok("activities list --course course:42");
@@ -117,4 +117,34 @@ fn stalled_pagination_fails_instead_of_claiming_completeness() {
     let (code, error) = Env::at(&server).fail("courses list --all");
     assert_eq!(code, 30);
     assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED");
+}
+
+#[test]
+fn all_courses_includes_user_hidden_courses() {
+    let page = Arc::new(AtomicUsize::new(0));
+    let server = Server::new(move |request| {
+        if request.target == "/my/" {
+            return Response::html(DASHBOARD);
+        }
+        let courses = if page.fetch_add(1, Ordering::SeqCst) == 0 {
+            json!([{"id":45,"fullname":"Hidden course","shortname":"CS100_2024_3","hidden":true}])
+        } else {
+            json!([])
+        };
+        Response::bytes(
+            "application/json",
+            json!([{"data":{"courses":courses,"nextoffset":1}}]).to_string(),
+        )
+    });
+    let result = Env::at(&server).ok("courses list --all");
+    assert_eq!(result["data"][0]["ref"], "course:45");
+    assert_eq!(result["meta"]["complete"], true);
+    for request in server
+        .recorded()
+        .iter()
+        .filter(|r| r.line.starts_with("POST "))
+    {
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body[0]["args"]["classification"], "allincludinghidden");
+    }
 }

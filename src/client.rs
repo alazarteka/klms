@@ -1,4 +1,5 @@
 pub mod panopto;
+pub(crate) mod policy;
 pub mod stream;
 use std::{
     borrow::Cow,
@@ -327,11 +328,15 @@ impl KlmsClient {
         mut headers: Vec<(&'static str, String)>,
         context: &str,
     ) -> Result<Response, AppError> {
+        if method != Method::POST {
+            policy::read_url(&url)?;
+        }
         if !self.cookie.is_empty() {
             headers.push(("cookie", self.cookie.clone()));
         }
         let mut policy = KlmsPolicy {
             origin: self.base_url.origin(),
+            initial: url.clone(),
             headers,
         };
         let request = Follow {
@@ -341,8 +346,9 @@ impl KlmsClient {
             max_redirects: MAX_REDIRECTS,
             strict: false,
         };
-        http::follow(&self.http, request, &mut policy).map_err(|failure| {
-            AppError::network(format!("{context}: {}", describe(failure, "redirect")))
+        http::follow(&self.http, request, &mut policy).map_err(|failure| match failure {
+            Failure::Refused(error) => error,
+            failure => AppError::network(format!("{context}: {}", describe(failure, "redirect"))),
         })
     }
 
@@ -377,7 +383,7 @@ impl KlmsClient {
         self.ajax_request(
             sesskey,
             "core_course_get_enrolled_courses_by_timeline_classification",
-            serde_json::json!({"classification":"all", "limit":limit, "offset":offset, "sort":"fullname"}),
+            serde_json::json!({"classification":"allincludinghidden", "limit":limit, "offset":offset, "sort":"fullname"}),
         )
     }
 
@@ -616,6 +622,7 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
 
 struct KlmsPolicy {
     origin: Origin,
+    initial: Url,
     headers: Vec<(&'static str, String)>,
 }
 
@@ -662,7 +669,7 @@ impl http::Policy for KlmsPolicy {
         if has_userinfo(url) {
             return Err(AppError::network("URL userinfo refused"));
         }
-        Ok(())
+        policy::redirect(&self.initial, url)
     }
 }
 
@@ -744,12 +751,18 @@ mod tests {
         ]);
         let client = client(&server, None, 5);
         let etag = Some("W/\"opaque-value\"");
-        let unchanged = client.get_conditional("/file", etag, None, 8).unwrap();
+        let unchanged = client
+            .get_conditional("/pluginfile.php/file", etag, None, 8)
+            .unwrap();
         assert_eq!(unchanged.metadata.status, 304);
         assert!(unchanged.bytes.is_none());
-        let prefix = client.get_conditional("/file", etag, None, 8).unwrap_err();
+        let prefix = client
+            .get_conditional("/pluginfile.php/file", etag, None, 8)
+            .unwrap_err();
         assert_eq!(prefix.code, "UPSTREAM_ERROR");
-        let complete = client.get_conditional("/file", None, None, 8).unwrap();
+        let complete = client
+            .get_conditional("/pluginfile.php/file", None, None, 8)
+            .unwrap();
         assert_eq!(complete.bytes.as_deref(), Some(&b"new"[..]));
         assert!(
             seen(&server)[..2]
@@ -761,24 +774,24 @@ mod tests {
     #[test]
     fn follows_same_origin_redirects_with_the_cookie_and_reports_the_final_url() {
         let server = serve(vec![
-            redirect("/final?x=1"),
+            redirect("/pluginfile.php/final?forcedownload=1"),
             Response::bytes("text/plain", "ok"),
         ]);
         let response = client(&server, Some("MoodleSession=a"), 5)
-            .get_bytes("/start", 16)
+            .get_bytes("/pluginfile.php/start", 16)
             .unwrap();
         assert_eq!(response.bytes, b"ok");
-        assert_eq!(response.url.path(), "/final");
+        assert_eq!(response.url.path(), "/pluginfile.php/final");
         let seen = seen(&server);
         assert!(seen.iter().all(|r| r.contains("cookie: moodlesession=a")));
-        assert!(seen[1].starts_with("get /final?x=1 "));
+        assert!(seen[1].starts_with("get /pluginfile.php/final?forcedownload=1 "));
     }
 
     #[test]
     fn refuses_cross_origin_redirects_before_sending_the_cookie() {
         let server = serve(vec![redirect("http://127.0.0.2:1/steal")]);
         let error = client(&server, Some("MoodleSession=a"), 5)
-            .get_bytes("/start", 16)
+            .get_bytes("/pluginfile.php/start", 16)
             .err()
             .unwrap();
         assert_eq!(error.code, "NETWORK_ERROR");
@@ -791,11 +804,11 @@ mod tests {
         // Each hop answers well inside the 1s timeout; together they exceed it.
         let server = Server::new(|_| {
             thread::sleep(Duration::from_millis(450));
-            redirect("/again")
+            redirect("/pluginfile.php/again")
         });
         let started = Instant::now();
         let error = client(&server, None, 1)
-            .get_bytes("/slow", 16)
+            .get_bytes("/pluginfile.php/slow", 16)
             .err()
             .unwrap();
         assert_eq!(error.code, "NETWORK_ERROR");
@@ -804,8 +817,10 @@ mod tests {
 
     #[test]
     fn head_stops_after_the_cap_on_endless_redirects() {
-        let server = serve((0..6).map(|_| redirect("/again")).collect());
-        let error = client(&server, None, 5).head("/loop").unwrap_err();
+        let server = serve((0..6).map(|_| redirect("/pluginfile.php/again")).collect());
+        let error = client(&server, None, 5)
+            .head("/pluginfile.php/loop")
+            .unwrap_err();
         assert!(error.message.contains("too many redirects"));
         assert_eq!(server.requests().len(), 6);
     }

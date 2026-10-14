@@ -182,8 +182,10 @@ impl Corpus {
         for course in courses {
             match collect_course(client, base_url, &course, options) {
                 Ok((resources, mut detail_failures)) => {
+                    let complete =
+                        detail_failures.is_empty() && resources.iter().all(|r| r.complete);
                     failures.append(&mut detail_failures);
-                    collections.push((course, resources, true));
+                    collections.push((course, resources, complete));
                 }
                 Err(error) => {
                     failures.push(format!("{}: {}", course.reference, error.message));
@@ -269,12 +271,12 @@ impl Corpus {
             (0, Vec::new())
         };
         failures.append(&mut validation_failures);
-        let status = if failures.is_empty() {
+        let status = if failures.is_empty() && collections.iter().all(|c| c.2) {
             "complete"
         } else {
             "incomplete"
         };
-        let source_complete = failures.is_empty() && filter.is_none();
+        let source_complete = status == "complete" && filter.is_none();
         let changes = self.connection.query_row(
             "SELECT COUNT(*) FROM remote_changes WHERE sync_run_id=?1",
             [run_id],

@@ -91,7 +91,11 @@ pub fn enrolled_courses(
     Ok((rows, next))
 }
 
-pub fn course_detail(html: &str, base_url: &Url, mut course: Course) -> CourseDetail {
+pub fn course_detail(
+    html: &str,
+    base_url: &Url,
+    mut course: Course,
+) -> Result<CourseDetail, AppError> {
     let document = Html::parse_document(html);
     if let Some(title) = first_text(
         &document,
@@ -105,11 +109,24 @@ pub fn course_detail(html: &str, base_url: &Url, mut course: Course) -> CourseDe
             .or(course.term);
         course.title = title.split('(').next().unwrap_or(&title).trim().to_owned();
     }
-    CourseDetail {
+    if !has_any(
+        &document,
+        &[".course-content", "a.h1[href*='course/view.php']"],
+    ) {
+        return Err(AppError::shape(
+            "course page contained no recognizable course region",
+        ));
+    }
+    let activity_count = if has_any(&document, &[".course-content"]) {
+        activities(html, base_url, None)?.len()
+    } else {
+        0
+    };
+    Ok(CourseDetail {
         course,
         professors: professors(&document),
-        activity_count: activities_from_document(&document, base_url).len(),
-    }
+        activity_count,
+    })
 }
 
 pub fn activities(
@@ -119,7 +136,17 @@ pub fn activities(
 ) -> Result<Vec<Activity>, AppError> {
     let document = Html::parse_document(html);
     let mut rows = activities_from_document(&document, base_url);
-    if rows.is_empty() && !has_any(&document, &[".course-content"]) {
+    let region = document.select(&sel(".course-content")).next();
+    let empty = region.is_some_and(|root| root.inner_html().trim().is_empty());
+    let unknown_links = document
+        .select(&sel(".course-content a[href*='/mod/']"))
+        .any(|anchor| {
+            !anchor
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .any(|node| sel("li.activity, .activity-item[data-id]").matches(&node))
+        });
+    if (rows.is_empty() && !empty) || unknown_links {
         return Err(AppError::shape(
             "course page contained no recognizable activity region",
         ));
@@ -374,8 +401,23 @@ pub fn board_posts(
             url: safe_url::display(&url),
         });
     }
-    let regions = [".courseboard", "table.generaltable", "table.board-list"];
-    if posts.is_empty() && !has_any(&document, &regions) {
+    let regions = sel(".courseboard, table.generaltable, table.board-list");
+    let empty = document
+        .select(&regions)
+        .any(|root| root.inner_html().trim().is_empty());
+    let unknown_rows = document
+        .select(&sel(
+            "table.generaltable tr, table.board-list tr, .courseboard tr",
+        ))
+        .any(|row| {
+            row.select(&cells).next().is_some()
+                && !text(row).is_empty()
+                && row
+                    .select(&sel("a[href*='/mod/courseboard/article.php']"))
+                    .next()
+                    .is_none()
+        });
+    if (posts.is_empty() && !empty) || unknown_rows {
         return Err(AppError::shape(
             "board page contained no recognizable post region",
         ));
@@ -472,7 +514,7 @@ mod tests {
             term: None,
             url: format!("{BASE}/course/view.php?id=42"),
         };
-        let detail = course_detail(html, &base(), course);
+        let detail = course_detail(html, &base(), course).unwrap();
         assert_eq!(detail.course.title, "Programming Language");
         assert_eq!(detail.course.code.as_deref(), Some("CS.30200_2026_3"));
         assert_eq!(detail.professors, ["Synthetic Instructor"]);
