@@ -675,7 +675,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-video-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. On Linux, generated temporaries older than a day are removed only after their process exits. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-video-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. The next download removes generated temporaries older than 24 hours, restricted to the same owner on Unix. An interrupted download may leave ffmpeg running until it finishes or fails. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.

@@ -70,68 +70,65 @@ fn temporary_name(suffix: &str) -> String {
     format!("{TEMP_PREFIX}{}-{nonce:x}.{suffix}", std::process::id())
 }
 
-/// Only generated names belonging to a dead process can be swept. Platforms
-/// without a process-liveness check retain crash leftovers rather than risk active work.
-fn sweep_stale(parent: &Path, own: &std::fs::Metadata) {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if !Path::new("/proc/self").is_dir() {
-            return;
+/// Recognize generated scratch and part names, including exclusive-create retries.
+fn temporary_kind(name: &str) -> Option<&str> {
+    let (pid, rest) = name.strip_prefix(TEMP_PREFIX)?.split_once('-')?;
+    if pid.is_empty() || !pid.bytes().all(|c| c.is_ascii_digit()) || pid.parse::<u32>().is_err() {
+        return None;
+    }
+    let (nonce, suffix) = rest.split_once('.')?;
+    if nonce.is_empty() || !nonce.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match suffix {
+        "scratch" | "part" => Some(suffix),
+        _ if suffix
+            .strip_prefix("part.")
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_hexdigit())) =>
+        {
+            Some("part")
         }
-        let Ok(entries) = std::fs::read_dir(parent) else {
-            return;
+        _ => None,
+    }
+}
+
+/// The CLI caps download/remux work at 24 hours; older temporaries are stale.
+fn sweep_stale(parent: &Path, own: &std::fs::Metadata) {
+    #[cfg(not(unix))]
+    let _ = own;
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(kind) = name.to_str().and_then(temporary_kind) else {
+            continue;
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Some(rest) = name.strip_prefix(TEMP_PREFIX) else {
-                continue;
-            };
-            let Some((pid, rest)) = rest.split_once('-') else {
-                continue;
-            };
-            if pid.is_empty()
-                || !pid.bytes().all(|c| c.is_ascii_digit())
-                || pid.parse::<u32>().is_err()
-                || Path::new("/proc").join(pid).exists()
-            {
+        let path = entry.path();
+        let Ok(meta) = path.symlink_metadata() else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != own.uid() {
                 continue;
             }
-            let Some((nonce, suffix)) = rest.split_once('.') else {
-                continue;
-            };
-            if nonce.is_empty() || !nonce.bytes().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            let part = suffix == "part"
-                || suffix
-                    .strip_prefix("part.")
-                    .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_hexdigit()));
-            let path = entry.path();
-            let Ok(meta) = path.symlink_metadata() else {
-                continue;
-            };
-            if meta.uid() != own.uid()
-                || meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .is_none_or(|age| age <= STALE_AFTER)
-            {
-                continue;
-            }
-            if meta.file_type().is_file() && part {
-                let _ = std::fs::remove_file(&path);
-            } else if meta.file_type().is_dir() && suffix == "scratch" {
-                let _ = std::fs::remove_dir_all(&path);
-            }
+        }
+        if meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_none_or(|age| age <= STALE_AFTER)
+        {
+            continue;
+        }
+        if meta.file_type().is_file() && kind == "part" {
+            let _ = std::fs::remove_file(&path);
+        } else if meta.file_type().is_dir() && kind == "scratch" {
+            let _ = std::fs::remove_dir_all(&path);
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (parent, own);
 }
 
 impl Drop for Workspace {
