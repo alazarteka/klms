@@ -196,6 +196,32 @@ fn isolated_embedded_activity_launches_without_moodle_layout() {
 }
 
 #[test]
+fn embedded_activity_show_reads_metadata_from_the_isolated_fragment() {
+    let klms = Server::new(|request| match request.target.as_str() {
+        "/mod/panoptocourseembed/view.php?id=7" => Response::html("")
+            .status("302 Found")
+            .header("Location", "/course/view.php?id=42"),
+        "/course/view.php?id=42" => Response::html(
+            r#"<body id="page-course-view-topics" class="course-42"><main><li id="module-7" class="activity modtype_panoptocourseembed"><span class="instancename">Embedded lecture</span></li></main></body>"#,
+        ),
+        _ => panic!("unexpected activity request"),
+    });
+    let base = Url::parse(&klms.url()).unwrap();
+    let client = KlmsClient::new(base.as_str(), Some("MoodleSession=synthetic"), 5).unwrap();
+    let ctx = Ctx {
+        client: &client,
+        base: &base,
+        timeout: 5,
+    };
+    let (page, kind) = ctx.video_page("panoptocourseembed:7").unwrap();
+    let video = ctx
+        .activity_video(&page, kind, "panoptocourseembed:7")
+        .unwrap();
+    assert_eq!(video.reference, "panoptocourseembed:7");
+    assert_eq!(video.title, "Embedded lecture");
+}
+
+#[test]
 fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().to_path_buf();

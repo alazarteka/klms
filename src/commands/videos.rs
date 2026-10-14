@@ -81,7 +81,7 @@ impl Ctx<'_> {
                 if VideoTarget::of(target) == VideoTarget::Panopto {
                     let (launch_ref, uuid) = panopto_target(target);
                     let (page, kind) = self.video_page(&launch_ref)?;
-                    let model = self.activity_video(&page, &launch_ref)?;
+                    let model = self.activity_video(&page, kind, &launch_ref)?;
                     let launch_ref = model.reference.clone();
                     let mut session = match self.client.panopto_launch(&page, self.timeout, kind) {
                         Ok(session) => session,
@@ -142,8 +142,8 @@ impl Ctx<'_> {
                     }
                     return Ok(result);
                 }
-                let (page, _) = self.video_page(target)?;
-                let mut model = self.activity_video(&page, target)?;
+                let (page, kind) = self.video_page(target)?;
+                let mut model = self.activity_video(&page, kind, target)?;
                 match self.native_source(&page) {
                     Ok(_) => {
                         model.downloadable = Some(true);
@@ -263,6 +263,7 @@ impl Ctx<'_> {
     fn activity_video(
         &self,
         page: &crate::client::HtmlResponse,
+        page_kind: parse::video::PageKind,
         target: &str,
     ) -> Result<Video, AppError> {
         let requested = self
@@ -277,11 +278,15 @@ impl Ctx<'_> {
         let kind = reference
             .activity_kind()
             .ok_or_else(|| AppError::shape("video activity has no kind"))?;
-        let detail = parse::resource_detail(&page.text, self.base, &requested, kind)?;
+        let title = match page_kind {
+            parse::video::PageKind::EmbeddedActivity => parse::embedded_title(&page.text)
+                .ok_or_else(|| AppError::shape("embedded video activity has no name"))?,
+            _ => parse::resource_detail(&page.text, self.base, &requested, kind)?.title,
+        };
         Ok(Video {
             reference: reference.to_string(),
             kind: kind.into(),
-            title: detail.title,
+            title,
             video_type: if kind == "vod" {
                 "recording"
             } else {
@@ -297,8 +302,8 @@ impl Ctx<'_> {
     }
 
     fn native_video(&self, target: &str) -> Result<(Video, Url), AppError> {
-        let (page, _) = self.video_page(target)?;
-        let model = self.activity_video(&page, target)?;
+        let (page, kind) = self.video_page(target)?;
+        let model = self.activity_video(&page, kind, target)?;
         let source = self.native_source(&page)?;
         Ok((model, source))
     }
