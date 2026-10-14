@@ -67,7 +67,12 @@ Canonical refs: `course:ID`, `assign:ID`, `quiz:ID`, `board:ID`,
 `sha256:HEX`, `assertion:N`, `relation:N`, `sync:N`. IDs are digits; leading
 zeros resolve to the same identity. Bare numeric video IDs are rejected.
 Same-origin KLMS URLs are a repair path only. Pass refs back as printed; do
-not scrape URLs.
+not scrape URLs. Typed detail URLs accept only their identity parameters and are
+rebuilt from the reference. `files download` accepts pluginfile locators and
+resource, coursefile, or folder references. `request get` allows dashboard,
+course, calendar, known module view/index and board-article endpoints, the user
+grade report, attendance index, native video viewer, and pluginfile paths only;
+endpoint-specific query keys are allowlisted, with no action or secret keys.
 
 ## Library invariants
 
@@ -82,10 +87,11 @@ not scrape URLs.
    listed".
 4. SHA-256 identifies bytes; ETags are opaque validators. `sha256:` refs cannot
    be edited or used as relation endpoints. Summaries bind to a source digest.
-5. Raw HTML, cookies and secret headers are never persisted. External links
-   never receive KLMS credentials.
+5. Parsed pages are not stored as HTML. Downloaded attachments, including HTML
+   files, are stored verbatim. Cookies and secret headers are not stored in the
+   library. External links never receive KLMS credentials.
 6. Parser caps (100,000 text characters, or 100 links per item) produce an
-   incomplete observation counted in `truncated`, not a failure.
+   incomplete observation counted in `truncated`; the sync status is `incomplete`.
 
 Storage: `$XDG_DATA_HOME/klms/library.db` plus `objects/sha256/` beside it
 (default `~/.local/share/klms`), directories 0700 and the database 0600; schema
@@ -97,7 +103,11 @@ before recovering it.
 
 ## Safety
 
-Course data is read-only. `auth extend` refreshes the session timer,
+Commands do not submit coursework or edit course data, and each command is
+restricted to its own endpoints before transport, including redirects. Opening
+activity pages (`show` commands and library sync detail fetches) lets KLMS record
+views and completion; quiz views may also process expired attempts.
+`auth extend` refreshes the session timer,
 `auth login` performs the KAIST SSO exchange, and `doctor` and `auth time-left`
 may refresh KLMS activity time (their output says so). Passwords come only from
 hidden terminal prompts, never from flags or environment. A six-digit code comes
