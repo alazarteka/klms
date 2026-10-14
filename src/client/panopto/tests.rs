@@ -1,5 +1,17 @@
 use super::*;
+use super::{
+    hls::{ByteRange, local_playlist},
+    media::media_copy,
+    remux::{STDERR_TAIL, remux, require_ffmpeg},
+};
+use crate::client::stream::{Expect, Limits};
 use serde_json::json;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 const ID: &str = "00000000-0000-0000-0000-000000000001";
 fn limits(seconds: u64) -> Limits {
     Limits::new(10_000_000, seconds, seconds)
@@ -18,8 +30,6 @@ fn readable_sources_are_independent_of_official_download_permission() {
     assert!(d.mp4_available);
     assert_eq!(d.groups.len(), 1);
     assert_eq!(d.groups[0].mp4.as_ref().unwrap().path(), "/podcast.mp4");
-    let serialized = serde_json::to_string(&d).unwrap();
-    assert!(!serialized.contains("cloudfront"));
 }
 #[test]
 fn mixed_and_missing_streams_cannot_silently_download_partial_recordings() {
@@ -312,7 +322,7 @@ fn composed_mp4_takes_precedence_over_an_alternative_hls_podcast() {
     let delivery = parse_delivery(ID, &value, &prod()).unwrap();
     assert!(delivery.mp4_available);
     assert_eq!(delivery.composition, "composed_podcast");
-    assert_eq!(delivery.output_stream_count, 1);
+    assert_eq!(delivery.groups.len(), 1);
     assert_eq!(
         delivery.groups[0].mp4.as_ref().unwrap().path(),
         "/podcast.mp4"

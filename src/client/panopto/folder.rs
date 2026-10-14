@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Recordings, recording};
+use super::{Recordings, delivery::recording};
 use crate::error::AppError;
 
 #[derive(Serialize)]
