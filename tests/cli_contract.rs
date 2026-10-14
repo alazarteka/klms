@@ -697,6 +697,47 @@ fn spec_and_completions_describe_the_command_surface() {
 }
 
 #[test]
+fn spec_serializes_argument_requires_and_conflicts() {
+    let env = Env::new();
+    let spec = env.data("spec");
+    let argument = |path: [&str; 2], name: &str| {
+        spec["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == json!(path))
+            .unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|argument| argument["name"] == name)
+            .unwrap()
+    };
+    assert_eq!(
+        argument(["courses", "list"], "--year")["requires"],
+        json!(["--semester"])
+    );
+    assert_eq!(
+        argument(["courses", "list"], "--semester")["requires"],
+        json!(["--year"])
+    );
+    assert_eq!(
+        argument(["courses", "list"], "--all")["conflicts"],
+        json!(["--year", "--semester"])
+    );
+    assert!(
+        argument(["auth", "login"], "--code")["conflicts"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--user"))
+    );
+    assert_eq!(
+        argument(["auth", "login"], "--insecure-storage")["requires"],
+        json!(["--remember-password"])
+    );
+}
+
+#[test]
 fn native_video_download_is_static_private_complete_and_never_overwrites() {
     let mp4 = b"\x00\x00\x00\x18ftypisomsynthetic-media";
     let server = Server::new(move |request| match request.target.as_str() {
