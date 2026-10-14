@@ -18,7 +18,7 @@ struct Fixtures {
 
 /// A recording whose delivery offers a composed podcast MP4, or (without
 /// `podcast`) only an HLS camera stream that needs ffmpeg.
-fn fixtures(media: fn() -> Response, podcast: bool) -> Fixtures {
+fn fixtures(media: impl Fn() -> Response + Send + Sync + 'static, podcast: bool) -> Fixtures {
     let cdn = Server::new(move |request| match request.target.as_str() {
         "/podcast.mp4?sig=synthetic-signature" => media(),
         _ => panic!("unexpected CDN request: {}", request.target),
@@ -143,7 +143,7 @@ fn panopto_show_launches_and_reports_delivery_without_media_or_secrets() {
     let result = run(
         &f,
         &VideosCommand::Show {
-            target: "lti:7".into(),
+            target: format!("{}/mod/lti/view.php?id=7", f.klms.url()),
         },
     )
     .unwrap();
@@ -167,8 +167,21 @@ fn panopto_show_launches_and_reports_delivery_without_media_or_secrets() {
 
 #[test]
 fn panopto_download_copies_the_single_mp4_into_a_private_new_file() {
-    let f = fixtures(mp4, true);
     let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().to_path_buf();
+    let f = fixtures(
+        move || {
+            assert!(std::fs::read_dir(&parent).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".scratch")
+            }));
+            mp4()
+        },
+        true,
+    );
     let out = dir.path().join("lecture.mp4");
     let result = run(
         &f,
@@ -265,7 +278,7 @@ fn missing_ffmpeg_fails_before_any_media_is_fetched() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn download_sweeps_only_stale_temporaries_beside_the_output() {
     use std::time::{Duration, SystemTime};
@@ -278,12 +291,12 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
             .set_modified(old)
             .unwrap()
     };
-    let stale_part = dir.path().join(".klms-video-1.part");
-    let stale_retry = dir.path().join(".klms-video-1.part.1a2");
-    let stale_scratch = dir.path().join(".klms-video-2.scratch");
-    let fresh_part = dir.path().join(".klms-video-3.part");
+    let stale_part = dir.path().join(".klms-video-4294967294-ab.part");
+    let stale_retry = dir.path().join(".klms-video-4294967294-ab.part.1a2");
+    let stale_scratch = dir.path().join(".klms-video-4294967294-cd.scratch");
+    let fresh_part = dir.path().join(".klms-video-4294967294-ef.part");
     let unrelated = dir.path().join("notes.part");
-    let misnamed_dir = dir.path().join(".klms-video-4.part");
+    let misnamed_dir = dir.path().join(".klms-video-4294967294-12.part");
     for file in [&stale_part, &stale_retry, &fresh_part, &unrelated] {
         std::fs::write(file, b"partial").unwrap();
     }
@@ -303,10 +316,179 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
     assert_eq!(
         left,
         [
-            ".klms-video-3.part",
-            ".klms-video-4.part",
+            ".klms-video-4294967294-12.part",
+            ".klms-video-4294967294-ef.part",
             "lecture.mp4",
             "notes.part"
         ]
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspaces_are_unique_and_sweep_keeps_notes_and_active_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("video.mp4");
+    let legacy = dir
+        .path()
+        .join(format!(".klms-video-{}.scratch", std::process::id()));
+    std::fs::create_dir(&legacy).unwrap();
+    let notes = dir.path().join(".klms-video-project.part-notes");
+    std::fs::write(&notes, b"user notes").unwrap();
+    let old = std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(1);
+    std::fs::File::open(&notes)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let first = Workspace::create(&out).unwrap();
+    std::fs::File::open(&first.0)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let second = Workspace::create(&out).unwrap();
+    assert_ne!(first.0, second.0);
+    assert!(first.0.exists() && second.0.exists() && legacy.exists());
+    assert_eq!(std::fs::read(&notes).unwrap(), b"user notes");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&first.0).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let (first_path, second_path) = (first.0.clone(), second.0.clone());
+    drop(first);
+    drop(second);
+    assert!(!first_path.exists() && !second_path.exists());
+}
+
+#[test]
+fn collection_human_output_includes_recording_refs_titles_and_durations() {
+    let f = collection_fixture(false);
+    let result = run(
+        &f,
+        &VideosCommand::Show {
+            target: "lti:7".into(),
+        },
+    )
+    .unwrap();
+    assert!(
+        result
+            .human
+            .contains(&format!("panopto-recording:lti:7:{UUID}"))
+    );
+    assert!(result.human.contains("Lecture one"));
+    assert!(result.human.contains("12.5"));
+    assert!(result.human.contains("DURATION (SECONDS)"));
+    assert_eq!(result.data["complete"], true);
+}
+
+fn collection_fixture(fail_second_page: bool) -> Fixtures {
+    let cdn = Server::new(|_| panic!("metadata show must not fetch media"));
+    let page = std::sync::atomic::AtomicUsize::new(0);
+    let panopto = Server::new(move |r| {
+        if r.method == "GET" {
+            return Response::html("player");
+        }
+        if page.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            Response::bytes(
+                "application/json",
+                serde_json::json!({"d":{"Results":[
+                {"DeliveryID":UUID,"SessionName":"Lecture one","Duration":12.5}
+            ],"TotalNumber":1}})
+                .to_string(),
+            )
+        } else if fail_second_page {
+            Response::html("failed enumeration").status("500 Internal Server Error")
+        } else {
+            Response::bytes(
+                "application/json",
+                serde_json::json!({"d":{"Results":[],"TotalNumber":1}}).to_string(),
+            )
+        }
+    });
+    let html = format!(
+        r#"<main><h1>Lecture collection</h1><iframe src="{}/Panopto/Pages/Sessions/List.aspx?folderID={UUID}"></iframe></main>"#,
+        panopto.url()
+    );
+    let klms = Server::new(move |_| Response::html(html.clone()));
+    Fixtures { klms, panopto, cdn }
+}
+
+#[test]
+fn failed_folder_page_remains_an_error() {
+    let f = collection_fixture(true);
+    assert!(
+        run(
+            &f,
+            &VideosCommand::Show {
+                target: "lti:7".into()
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn show_keeps_activity_metadata_with_a_warning_when_launch_or_viewer_fails() {
+    for (target, native) in [("lti:7", false), ("vod:7", true)] {
+        let panopto = Server::new(|_| panic!("unsupported launch must not be contacted"));
+        let cdn = Server::new(|_| panic!("metadata must not fetch media"));
+        let klms = Server::new(move |request| {
+            if native && request.target == "/mod/vod/viewer/index.php?id=7" {
+                Response::html("<main>unsupported player</main>")
+            } else {
+                Response::html(
+                    "<main><h1>Fixture recording</h1><div id='intro'>Activity description</div></main>",
+                )
+            }
+        });
+        let f = Fixtures { klms, panopto, cdn };
+        let result = run(
+            &f,
+            &VideosCommand::Show {
+                target: target.into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.data["ref"], target);
+        assert_eq!(result.data["title"], "Fixture recording");
+        assert!(result.data["downloadable"].is_null());
+        assert!(result.human.contains("Fixture recording"));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("playback inspection failed"))
+        );
+        assert_eq!(f.klms.requests().len(), if native { 2 } else { 1 });
+    }
+}
+
+#[test]
+fn show_keeps_activity_metadata_when_delivery_inspection_fails() {
+    let cdn = Server::new(|_| panic!("metadata must not fetch media"));
+    let panopto = Server::new(|r| {
+        if r.method == "GET" {
+            Response::html("player")
+        } else {
+            Response::bytes("application/json", "{}")
+        }
+    });
+    let page = format!(
+        r#"<main><h1>Fixture recording</h1><iframe src="{}/Panopto/Pages/Embed.aspx?id={UUID}"></iframe></main>"#,
+        panopto.url()
+    );
+    let klms = Server::new(move |_| Response::html(page.clone()));
+    let f = Fixtures { klms, panopto, cdn };
+    let result = run(
+        &f,
+        &VideosCommand::Show {
+            target: "lti:7".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.data["ref"], "lti:7");
+    assert_eq!(result.data["title"], "Fixture recording");
+    assert!(result.data["downloadable"].is_null());
+    assert_eq!(result.warnings.len(), 1);
+    assert_eq!(f.klms.requests().len(), 1);
 }

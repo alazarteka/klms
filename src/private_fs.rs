@@ -30,28 +30,23 @@ pub struct Linked {
     pub temporary: PathBuf,
     /// `destination` was already there and was left untouched.
     pub existed: bool,
+    /// A non-atomic exclusive copy was used because hard linking failed.
+    pub copied: bool,
     /// Removing `temporary` failed; the content is published regardless.
     pub leftover: Option<io::Error>,
 }
 
 const TEMPORARY_ATTEMPTS: u32 = 8;
 
-/// Creates a temporary exclusively with mode 0600, lets `fill` write it,
-/// syncs it, hard-links it to `destination` without ever replacing that, and
-/// removes the temporary. Where hard links are unsupported (exFAT/FAT, some
-/// network and FUSE mounts) the temporary is copied into a destination created
-/// with O_EXCL instead: still no overwrite, but not atomic, so a crash can
-/// leave a partial destination. A temporary named `.klms-download-*.part` also
-/// sweeps stale ones of that pattern from its directory. The name is `temporary`; if something already has
-/// that name (say, a leftover of a crashed run with a recycled pid), up to
-/// seven other unique names are tried, and nothing this call did not create
-/// is ever removed. On every failure the temporary it created is removed.
-pub fn publish_new<T, E>(
+/// Publish atomically without replacing an existing destination. Hard-link
+/// failures are errors; partially visible objects are never accepted.
+pub fn publish_atomic<T, E>(
     temporary: &Path,
     destination: &Path,
     fill: impl FnOnce(&mut File) -> Result<T, E>,
 ) -> Result<(T, Linked), PublishError<E>> {
     publish_new_with(
+        Publication::Atomic,
         |from, to| fs::hard_link(from, to),
         temporary,
         destination,
@@ -59,7 +54,30 @@ pub fn publish_new<T, E>(
     )
 }
 
+/// Publish a user download, falling back to an exclusive copy when hard links
+/// fail. `Linked::copied` reports that the destination was not published atomically.
+pub fn publish_download<T, E>(
+    temporary: &Path,
+    destination: &Path,
+    fill: impl FnOnce(&mut File) -> Result<T, E>,
+) -> Result<(T, Linked), PublishError<E>> {
+    publish_new_with(
+        Publication::Download,
+        |from, to| fs::hard_link(from, to),
+        temporary,
+        destination,
+        fill,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Publication {
+    Atomic,
+    Download,
+}
+
 fn publish_new_with<T, E>(
+    mode: Publication,
     link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     temporary: &Path,
     destination: &Path,
@@ -80,21 +98,30 @@ fn publish_new_with<T, E>(
         return Err(PublishError::Sync(error));
     }
     drop(file);
+    let mut copied = false;
     let existed = match link(temporary, destination) {
         Ok(()) => false,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => true,
-        Err(_) => match copy_new(temporary, destination) {
-            Ok(existed) => existed,
+        Err(_) if matches!(mode, Publication::Download) => match copy_new(temporary, destination) {
+            Ok(existed) => {
+                copied = !existed;
+                existed
+            }
             Err(error) => {
                 let _ = fs::remove_file(temporary);
                 return Err(PublishError::Link(error));
             }
         },
+        Err(error) => {
+            let _ = fs::remove_file(temporary);
+            return Err(PublishError::Link(error));
+        }
     };
     let leftover = fs::remove_file(temporary).err();
     let linked = Linked {
         temporary: temporary.to_path_buf(),
         existed,
+        copied,
         leftover,
     };
     Ok((value, linked))
@@ -193,9 +220,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (temporary, out) = (directory.path().join("x.part"), directory.path().join("x"));
         let write = |bytes: &'static [u8]| move |file: &mut File| file.write_all(bytes);
-        let (_, linked) = publish_new(&temporary, &out, write(b"first")).unwrap();
+        let (_, linked) = publish_atomic(&temporary, &out, write(b"first")).unwrap();
         assert!(!linked.existed && linked.leftover.is_none());
-        let (_, linked) = publish_new(&temporary, &out, write(b"second")).unwrap();
+        let (_, linked) = publish_atomic(&temporary, &out, write(b"second")).unwrap();
         assert!(linked.existed);
         assert_eq!(fs::read(&out).unwrap(), b"first");
         assert!(!temporary.exists());
@@ -213,11 +240,11 @@ mod tests {
     fn a_failed_fill_is_cleaned_and_a_stale_temporary_is_kept_but_bypassed() {
         let directory = tempfile::tempdir().unwrap();
         let (temporary, out) = (directory.path().join("x.part"), directory.path().join("x"));
-        let failed = publish_new(&temporary, &out, |_| Err::<(), _>("no"));
+        let failed = publish_atomic(&temporary, &out, |_| Err::<(), _>("no"));
         assert!(matches!(failed, Err(PublishError::Fill("no"))));
         assert!(!temporary.exists() && !out.exists());
         fs::write(&temporary, b"stale").unwrap();
-        let (_, linked) = publish_new(&temporary, &out, |file| file.write_all(b"new")).unwrap();
+        let (_, linked) = publish_atomic(&temporary, &out, |file| file.write_all(b"new")).unwrap();
         assert_ne!(linked.temporary, temporary);
         assert!(!linked.temporary.exists() && !linked.existed);
         assert_eq!(fs::read(&temporary).unwrap(), b"stale");
@@ -229,12 +256,31 @@ mod tests {
     }
 
     #[test]
+    fn atomic_publication_rejects_unsupported_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let temporary = dir.path().join("x.part");
+        let out = dir.path().join("x");
+        let result = publish_new_with(Publication::Atomic, no_links, &temporary, &out, |file| {
+            file.write_all(b"object")
+        });
+        assert!(matches!(result, Err(PublishError::Link(e)) if e.kind() == ErrorKind::Unsupported));
+        assert!(!temporary.exists() && !out.exists());
+    }
+
+    #[test]
     fn without_hard_links_the_temporary_is_copied_without_overwriting() {
         let directory = tempfile::tempdir().unwrap();
         let (temporary, out) = (directory.path().join("x.part"), directory.path().join("x"));
         let write = |bytes: &'static [u8]| move |file: &mut File| file.write_all(bytes);
-        let (_, linked) = publish_new_with(no_links, &temporary, &out, write(b"first")).unwrap();
-        assert!(!linked.existed && linked.leftover.is_none());
+        let (_, linked) = publish_new_with(
+            Publication::Download,
+            no_links,
+            &temporary,
+            &out,
+            write(b"first"),
+        )
+        .unwrap();
+        assert!(!linked.existed && linked.copied && linked.leftover.is_none());
         assert_eq!(fs::read(&out).unwrap(), b"first");
         assert!(!temporary.exists());
         #[cfg(unix)]
@@ -245,7 +291,14 @@ mod tests {
                 0o600
             );
         }
-        let (_, linked) = publish_new_with(no_links, &temporary, &out, write(b"second")).unwrap();
+        let (_, linked) = publish_new_with(
+            Publication::Download,
+            no_links,
+            &temporary,
+            &out,
+            write(b"second"),
+        )
+        .unwrap();
         assert!(linked.existed);
         assert_eq!(fs::read(&out).unwrap(), b"first");
         assert!(!temporary.exists());
@@ -256,7 +309,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let temporary = directory.path().join("x.part");
         let out = directory.path().join("missing/x");
-        let result = publish_new_with(no_links, &temporary, &out, |file| file.write_all(b"data"));
+        let result = publish_new_with(Publication::Download, no_links, &temporary, &out, |file| {
+            file.write_all(b"data")
+        });
         let Err(PublishError::Link(error)) = result else {
             panic!("expected a link error");
         };
@@ -295,7 +350,7 @@ mod tests {
         fs::create_dir(&folder).unwrap();
 
         let (temporary, out) = (dir.join(".klms-download-999.part"), dir.join("out"));
-        publish_new(&temporary, &out, |file| file.write_all(b"new")).unwrap();
+        publish_atomic(&temporary, &out, |file| file.write_all(b"new")).unwrap();
         assert!(!stale.exists());
         for kept in [
             &fresh,
@@ -312,7 +367,7 @@ mod tests {
         // Other kinds of temporaries never trigger a sweep.
         fs::write(&stale, b"x").unwrap();
         age(&stale);
-        publish_new(&dir.join("y.part"), &dir.join("y"), |file| {
+        publish_atomic(&dir.join("y.part"), &dir.join("y"), |file| {
             file.write_all(b"y")
         })
         .unwrap();
