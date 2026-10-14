@@ -384,3 +384,267 @@ fn media_that_sniffs_as_html_is_refused_before_writing() {
     );
     assert!(out.is_empty());
 }
+
+#[cfg(unix)]
+fn fake_ffmpeg(dir: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = dir.join("ffmpeg");
+    std::fs::write(&exe, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    exe
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_version_has_a_short_deadline_and_is_reaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("pid");
+    let exe = fake_ffmpeg(
+        dir.path(),
+        &format!("echo $$ > '{}'\nexec sleep 30", pid.display()),
+    );
+    for limits in [
+        Limits {
+            deadline: Instant::now() + Duration::from_millis(100),
+            ..limits(10)
+        },
+        limits(10),
+    ] {
+        let start = Instant::now();
+        let error = require_ffmpeg(exe.as_os_str(), limits).unwrap_err();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(start.elapsed() < Duration::from_secs(3));
+        #[cfg(target_os = "linux")]
+        assert!(
+            !Path::new("/proc")
+                .join(std::fs::read_to_string(&pid).unwrap().trim())
+                .exists()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remux_timeout_is_network_error_and_reaps_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("pid");
+    let exe = fake_ffmpeg(
+        dir.path(),
+        &format!("echo $$ > '{}'\nexec sleep 30", pid.display()),
+    );
+    let limits = Limits {
+        deadline: Instant::now() + Duration::from_millis(100),
+        ..limits(10)
+    };
+    let error = remux(
+        exe.as_os_str(),
+        &[],
+        &[],
+        dir.path(),
+        &mut Vec::new(),
+        limits,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "NETWORK_ERROR");
+    #[cfg(target_os = "linux")]
+    assert!(
+        !Path::new("/proc")
+            .join(std::fs::read_to_string(pid).unwrap().trim())
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn remux_checks_deadline_after_final_write_and_removes_source_on_success() {
+    struct SlowWriter;
+    impl Write for SlowWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let exe = fake_ffmpeg(
+        dir.path(),
+        "for arg do out=$arg; done\nprintf 'synthetic-mp4' > \"$out\"",
+    );
+    let short = Limits {
+        deadline: Instant::now() + Duration::from_millis(100),
+        ..limits(10)
+    };
+    let error = remux(
+        exe.as_os_str(),
+        &[],
+        &[],
+        scratch.path(),
+        &mut SlowWriter,
+        short,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "NETWORK_ERROR");
+    std::fs::remove_file(scratch.path().join("remux.mp4")).unwrap();
+    let mut output = Vec::new();
+    remux(
+        exe.as_os_str(),
+        &[],
+        &[],
+        scratch.path(),
+        &mut output,
+        limits(10),
+    )
+    .unwrap();
+    assert_eq!(output, b"synthetic-mp4");
+    assert!(!scratch.path().join("remux.mp4").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn remux_byte_cap_is_limit_error_and_stderr_tail_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = fake_ffmpeg(
+        dir.path(),
+        "for arg do out=$arg; done\nprintf 'synthetic-mp4' > \"$out\"",
+    );
+    let error = remux(
+        exe.as_os_str(),
+        &[],
+        &[],
+        dir.path(),
+        &mut Vec::new(),
+        limits(10).with_max(3),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "LIMIT_EXCEEDED");
+    let exe = fake_ffmpeg(
+        dir.path(),
+        "i=0; while [ $i -lt 1000 ]; do printf 'diagnostic-line\\n' >&2; i=$((i+1)); done\nprintf 'LAST DIAGNOSTIC' >&2\nexit 1",
+    );
+    let error = remux(
+        exe.as_os_str(),
+        &[],
+        &[],
+        dir.path(),
+        &mut Vec::new(),
+        limits(10),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "CONTENT_UNAVAILABLE");
+    assert!(error.message.ends_with("LAST DIAGNOSTIC"));
+    assert!(error.message.len() <= STDERR_TAIL + 100);
+}
+
+#[test]
+fn panopto_media_stall_timeout_bounds_response_headers() {
+    use crate::fixture_server::{Response, Server};
+    let server = Server::new(|_| {
+        std::thread::sleep(Duration::from_secs(2));
+        Response::bytes("video/mp4", b"\0\0\0\x18ftypisommedia")
+    });
+    let config = Config::fixture("https://kaist.ap.panopto.com/", &server.url());
+    let source = Url::parse(&format!("{}/a.mp4", server.url())).unwrap();
+    let limits = Limits {
+        stall: Duration::from_millis(100),
+        ..limits(5)
+    };
+    let start = Instant::now();
+    let mut output = Vec::new();
+    let error = media_copy(&config, &source, &mut output, limits, Expect::Mp4, None)
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "NETWORK_ERROR");
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(output.is_empty());
+}
+
+#[test]
+fn corrupt_middle_hls_segment_fails_instead_of_publishing_a_gap() {
+    if Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return;
+    }
+    let remote = tempfile::tempdir().unwrap();
+    let playlist = remote.path().join("source.m3u8");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x64:r=10",
+            "-t",
+            "3",
+            "-c:v",
+            "mpeg2video",
+            "-g",
+            "10",
+            "-f",
+            "hls",
+            "-hls_time",
+            "1",
+            "-hls_list_size",
+            "0",
+        ])
+        .arg(&playlist)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let raw = std::fs::read_to_string(&playlist).unwrap();
+    let segments = raw
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    assert_eq!(segments.len(), 3);
+    std::fs::write(remote.path().join(segments[1]), b"corrupt middle segment").unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let mut fetch = |u: &Url, w: &mut dyn Write, limits: Limits, _: Option<ByteRange>| {
+        let data = std::fs::read(remote.path().join(u.path().trim_start_matches('/'))).unwrap();
+        assert!(data.len() <= limits.max_bytes);
+        w.write_all(&data).unwrap();
+        Ok(Download {
+            bytes: data.len(),
+            content_type: "application/octet-stream",
+        })
+    };
+    let input = local_playlist(
+        &Url::parse(&cdn("source.m3u8")).unwrap(),
+        scratch.path(),
+        &mut 0,
+        &mut 1_000_000,
+        limits(5),
+        0,
+        &mut fetch,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    let error = remux(
+        "ffmpeg".as_ref(),
+        &[input],
+        &[0.0],
+        scratch.path(),
+        &mut output,
+        limits(5),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "CONTENT_UNAVAILABLE");
+    assert!(error.message.contains("ffmpeg could not remux"));
+    assert!(error.message.len() > "ffmpeg could not remux downloaded video fragments: ".len());
+    assert!(output.is_empty());
+}

@@ -148,9 +148,11 @@ recording or a collection) or `lti` (an external tool that may be Panopto), and
 KLMS and, for Panopto, perform its LTI launch and read Panopto delivery
 metadata; Moodle logs that as an activity view (and may mark view completion),
 and Panopto may create an account on first launch. `videos show` on a collection
-lists its recordings; a failed or incomplete folder enumeration sets `complete`
-false and produces a warning. LTI recognition uses launch protocol markup, never
-its title. `downloadable` and `official_download_available` are null when
+lists recording refs, titles and durations. Failed folder enumeration is an
+error; only a successfully returned but incomplete enumeration sets `complete`
+false and produces a warning. If launch or playback-source inspection fails,
+`videos show` still returns readable activity metadata with a warning. LTI
+recognition uses launch protocol markup, never its title. `downloadable` and `official_download_available` are null when
 delivery sources have not been inspected, including on collections. The
 official DownloadUrl permission is separate from readable playback MP4/HLS
 availability.
@@ -165,13 +167,20 @@ downloaded as a single video; choose a recording ref.
 It defaults to a 4 GiB media cap, a 14400-second (4 h) overall download/remux
 budget and a 60-second stall timeout: `--max-bytes` permits up to 16 GiB,
 `--max-seconds` up to 86400 and `--stall-seconds` 1-600. A transfer that
-receives no bytes for the stall timeout, or outlives `--max-seconds`, fails
-with NETWORK_ERROR; there is no resume. Scratch space is a private (0700)
-`.klms-video-<pid>.scratch` directory beside `--out`, next to the
-`.klms-video-<pid>.part` publish file; both are removed when the command ends,
-and a later download removes ones older than 24 hours that the same user owns
-(regular files and directories only, never through symlinks). A remux peaks at
-about twice the media size on that filesystem; free space is not checked in
+waits for response headers or the next bytes beyond the stall timeout, or
+outlives `--max-seconds` (including the final remux copy), fails with
+NETWORK_ERROR; byte caps fail with LIMIT_EXCEEDED. There is no resume.
+Remuxing uses a private (0700), exclusively created
+`.klms-video-<pid>-<nonce>.scratch` directory beside `--out`; direct MP4 copies
+need no scratch directory. Publication uses a private
+`.klms-video-<pid>-<nonce>.part` file. Both are removed on normal or error
+returns. On Linux a later download removes generated temporaries older than
+24 hours owned by the same user only when their process no longer exists;
+other platforms retain crash leftovers. Sweeps skip symlinks and unrelated
+names.
+User downloads may fall back to a non-atomic exclusive copy when hard links
+fail, with a warning; object-store publication requires an atomic hard link.
+A remux peaks at about twice the media size on that filesystem; free space is not checked in
 advance. Native VOD uses only static same-origin `/vod1/` MP4 sources, which
 receive the KLMS session cookie and nothing else. Panopto exchanges use
 separate host-scoped transient credentials; Panopto media (CDN) requests
@@ -179,8 +188,9 @@ receive neither KLMS nor Panopto credentials. Temporary signed media URLs are
 never returned in JSON; Panopto `source_url` is the KLMS launch locator. HLS,
 multi-track and offset recordings are retrieved under bounded transport
 policies and remuxed locally with ffmpeg, whose presence is checked before any
-media is fetched; ffmpeg receives only local paths. No player scripts or
-playback/progress telemetry run.
+media is fetched under a two-second check deadline; ffmpeg receives only local
+paths. Remux errors include at most 4 KiB of stderr, and failed downloads kill
+and reap ffmpeg. No player scripts or playback/progress telemetry run.
 Multiple native Panopto streams are preserved as separate video/audio tracks
 with their start offsets; a readable composed podcast takes precedence.
 `stream_count` and `output_composition` expose this choice on inspected recordings.
