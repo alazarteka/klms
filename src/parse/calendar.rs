@@ -5,7 +5,13 @@ use scraper::{ElementRef, Html};
 
 use super::detail::preview_from_document;
 use super::shared::{NEXT_PAGE_SELECTORS, has_any, href_url, query_id, sel, text, visible_text};
-use crate::{date, error::AppError, models::CalendarEvent, reference::ResourceRef, safe_url};
+use crate::{
+    date,
+    error::AppError,
+    models::CalendarEvent,
+    reference::{ResourceRef, module_kind},
+    safe_url,
+};
 
 pub struct CalendarPage {
     pub events: Vec<CalendarEvent>,
@@ -31,7 +37,7 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
         let kind = attr("data-event-component")
             .and_then(|value| value.strip_prefix("mod_"))
             .map(str::to_owned)
-            .or_else(|| url.module_kind().map(str::to_owned))
+            .or_else(|| module_kind(&url).map(str::to_owned))
             .unwrap_or_else(|| "event".into());
         let reference = (kind != "event")
             .then(|| ResourceRef::from_activity(&kind, None, Some(&url)))

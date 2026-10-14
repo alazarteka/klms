@@ -4,7 +4,7 @@
 mod protocol_tests;
 use crate::{
     error::AppError,
-    url::{Origin, Url},
+    url::{Origin, Url, query_value},
 };
 use scraper::{ElementRef, Html, Selector};
 
@@ -97,7 +97,7 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
         u.origin() == base.origin()
             && (u.path() == "/mod/panoptocourseembed/view_content.php"
                 || u.path() == "/mod/lti/launch.php"
-                    && u.query_value("id") == base.query_value("id"))
+                    && query_value(u, "id") == query_value(base, "id"))
             || on_panopto(u, panopto)
                 && matches!(
                     u.path(),
@@ -125,7 +125,7 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
                     if let Ok(u) = base.join(literal) {
                         if u.origin() == base.origin()
                             && u.path() == "/mod/lti/launch.php"
-                            && u.query_value("id") == base.query_value("id")
+                            && query_value(&u, "id") == query_value(base, "id")
                         {
                             return Some(u);
                         }
@@ -158,13 +158,11 @@ pub fn non_panopto_lti_form(html: &str, base: &Url, panopto: &Origin) -> bool {
 }
 /// Panopto list fragments encode state values as JSON strings; query values may be plain UUIDs.
 pub fn folder_id(url: &Url) -> Option<String> {
-    let direct = url
-        .query_value("folderID")
-        .or_else(|| url.query_value("folderId"));
+    let direct = query_value(url, "folderID").or_else(|| query_value(url, "folderId"));
     let fragment = || {
         url.fragment()
             .and_then(|fragment| url.join(&format!("?{fragment}")).ok())
-            .and_then(|u| u.query_value("folderID"))
+            .and_then(|u| query_value(&u, "folderID"))
     };
     let value = direct.or_else(fragment)?;
     let decoded = serde_json::from_str::<String>(&value).unwrap_or(value);

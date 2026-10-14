@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::*;
-use crate::{cli::VideosCommand, client::stream::Limits, models::Video};
+use crate::{cli::VideosCommand, client::stream::Limits, models::Video, reference::module_kind};
 
 /// Which transport a video reference uses: native KLMS VOD or Panopto.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,10 +256,10 @@ impl Ctx<'_> {
             .base
             .join(&path)
             .map_err(|_| AppError::usage("invalid video URL"))?;
-        if requested.module_kind() == Some("panoptocourseembed")
+        if module_kind(&requested) == Some("panoptocourseembed")
             && page.url.path() == "/course/view.php"
         {
-            let module = requested.query_value("id").ok_or_else(|| {
+            let module = query_value(&requested, "id").ok_or_else(|| {
                 AppError::usage("embedded video reference requires a numeric module id")
             })?;
             page.text = parse::embedded_activity(&page.text, &module)?;
@@ -307,9 +307,7 @@ impl Ctx<'_> {
                 "video is not a native VOD recording",
             ));
         }
-        let id = page
-            .url
-            .query_value("id")
+        let id = query_value(&page.url, "id")
             .ok_or_else(|| AppError::shape("VOD page has no numeric id"))?;
         let detail = parse::resource_detail(&page.text, self.base, &page.url, "vod")?;
         let viewer = self

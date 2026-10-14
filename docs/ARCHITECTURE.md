@@ -39,8 +39,8 @@ output    -> models, error
   is persisted. `folder` holds typed folder requests and completeness handling.
 - `http`: the one blocking HTTP transport. It never follows redirects itself;
   each caller supplies its origin policy to `follow`.
-- `url`: a small `http`/`https` URL type with WHATWG-style normalization for a
-  single-origin client.
+- `url`: the standard `url` crate's URL type, plus shared loopback, userinfo,
+  query and form helpers. Moodle module paths belong in `reference`.
 - `auth`: orchestration (`login`, `logout`, `forget`, `load`) and the status
   models it exposes, with submodules:
   - `flow`: the KAIST SSO state machine and prompts.

@@ -13,7 +13,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{date::epoch_now, error::AppError, url::Url};
+use crate::{
+    date::epoch_now,
+    error::AppError,
+    url::{Url, is_http_loopback},
+};
 
 use super::{
     AuthSession, AuthStatus, LoginMethod, SecondFactor,
@@ -249,7 +253,7 @@ pub fn origin(url: &Url) -> String {
 /// Loopback test servers may move between ports; real origins must match.
 fn origin_matches(stored: &str, current: &Url) -> bool {
     stored == origin(current)
-        || Url::parse(stored).is_ok_and(|url| url.is_http_loopback() && current.is_http_loopback())
+        || Url::parse(stored).is_ok_and(|url| is_http_loopback(&url) && is_http_loopback(current))
 }
 
 // ---- remembered login ----

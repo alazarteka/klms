@@ -2,11 +2,11 @@
 //! every caller supplies its own origin policy to [`follow`].
 use std::{
     io,
-    net::IpAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::url::Url;
+use crate::url::{Url, is_loopback};
 use ureq::{
     Agent, BodyReader, Proxy,
     config::Config,
@@ -25,6 +25,7 @@ pub const USER_AGENT: &str = concat!("klms/", env!("CARGO_PKG_VERSION"));
 /// [`proxy_for`]); trust roots come from the platform store.
 pub fn agent(timeout: Duration, connect_timeout: Option<Duration>) -> Agent {
     let tls = TlsConfig::builder()
+        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .root_certs(RootCerts::PlatformVerifier)
         .build();
     let config: Config = Agent::config_builder()
@@ -108,7 +109,7 @@ fn proxy_for(url: &Url, env: impl Fn(&str) -> Option<String>) -> Option<String> 
         inner.unwrap_or(host).to_ascii_lowercase()
     };
     let host = unbracket(url.host_str()?);
-    if host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+    if is_loopback(url) {
         return None;
     }
     let first = |names: &[&str]| {
@@ -437,8 +438,13 @@ mod tests {
         }
         for loopback in [
             "http://127.0.0.1:9/",
+            "http://127.1:9/",
+            "http://0177.0.0.1:9/",
+            "http://0x7f000001:9/",
+            "http://2130706433:9/",
             "http://localhost:9/",
             "http://[::1]:9/",
+            "http://[0:0:0:0:0:0:0:1]:9/",
         ] {
             assert!(!proxied(loopback, "example.com"), "{loopback}");
         }

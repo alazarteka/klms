@@ -104,13 +104,10 @@ fn embedded_iframe_and_static_launch_wrapper_resolve_narrow_endpoints() {
     let embedded = r#"<iframe src="/mod/panoptocourseembed/view_content.php?course=42&amp;contenturl=synthetic"></iframe>"#;
     let target = embedded_launch(embedded, &klms(), &pano()).unwrap();
     assert_eq!(target.path(), "/mod/panoptocourseembed/view_content.php");
-    assert_eq!(target.query_value("course").as_deref(), Some("42"));
+    assert_eq!(query_value(&target, "course").as_deref(), Some("42"));
     let wrapper = r#"<script>require(['mod_lti/iframe'], function(m) { m.init('/mod/lti/launch.php?id=42'); });</script>"#;
     assert_eq!(
-        embedded_launch(wrapper, &klms(), &pano())
-            .unwrap()
-            .query_value("id")
-            .as_deref(),
+        query_value(&embedded_launch(wrapper, &klms(), &pano()).unwrap(), "id").as_deref(),
         Some("42")
     );
     for html in [
@@ -144,7 +141,7 @@ fn embedded_launch_ignores_description_links_and_prefers_the_activity_frame() {
     ];
     for page in pages {
         let target = embedded_launch(&page, &klms(), &pano()).unwrap();
-        assert_eq!(target.query_value("id").as_deref(), Some(OWN), "{page}");
+        assert_eq!(query_value(&target, "id").as_deref(), Some(OWN), "{page}");
     }
     let only_description = format!(
         r#"<div id="region-main"><div id="intro"><a href="{}">Other</a></div></div>"#,
