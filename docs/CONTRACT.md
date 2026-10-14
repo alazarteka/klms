@@ -1,13 +1,13 @@
 # Contract
 
 The machine contract for `--json` and the local library. `klms --help` carries
-the workflow and the full list of row fields; this file holds what the help
+the workflow and selected row fields; this file holds what the help
 text does not. The contract is experimental during 0.x: check `schema_version`
 and `klms --version`.
 
 ## JSON envelope
 
-`--json` goes before the command and emits one document.
+The global `--json` flag emits one document; conventionally put it before the command.
 
 - Success, stdout: `{schema_version, ok:true, command, data, warnings, meta}`.
 - Failure, stderr: `{schema_version, ok:false, error:{code, message, hint, retryable, details?}}`.
@@ -15,8 +15,11 @@ and `klms --version`.
 Check both the exit status and `ok`. `--json --help` and `--json --version`
 succeed with `command` set to `help` or `version`. Collections set
 `meta.returned`, `meta.limit` and `meta.complete`; `next_cursor` is always
-null. Library search and changes add `source_complete` (true, false, or null
-when there is no evidence) and `fresh_through` (the finish time of the latest
+null. For remote lists, `complete:false` means upstream incompleteness or local
+`--limit` truncation; raising the limit fixes only the latter. `source_complete`
+reports upstream coverage. For local lists, `complete` describes local query
+truncation alone. Library search and changes add `source_complete` (true, false,
+or null when there is no evidence) and `fresh_through` (the finish time of the latest
 complete global sync). A scoped sync never claims global coverage.
 `complete` is about the rows that passed the filters: a `today`/`upcoming`
 `--kind` that matches no row in the date range adds a warning naming that kind
@@ -37,10 +40,6 @@ selector values 10/11/20/21 are a different encoding. Media paths are not term
 evidence. Printed historical `course:ID` refs work with all course resources.
 Library sync retains its dashboard default and never crawls history implicitly.
 
-Change: `term` is now derived only from a trailing `_YYYY_N` shortname suffix
-with N in 1-4. A code such as `training_2024_20` previously yielded a term and
-now yields `null`.
-
 ## Exit codes
 
 The exit code is the `exit_code` of the `AppError` that carries the error
@@ -56,15 +55,17 @@ CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or i
 expired; run `auth login` again). Branch on `error.code`, not the exit status.
 A NETWORK_ERROR during `auth login --code` keeps the pending login, so the same
 code can be retried. `auth forget` purges every account in klms's dedicated
-keyring service namespace across available backends, independently of login.json,
-and removes login.json, the plaintext credentials file and the pending login.
-It warns if the identity is unreadable or any deletion cannot be confirmed;
-retrying forget after unlocking/restoring a backend works even without login.json.
+keyring service namespace across available backends, independently of login.json.
+It removes the plaintext credentials file and pending login, but keeps login.json
+until its named password backend confirms a purge. Retry after restoring or
+unlocking that backend. Unreadable identity metadata or unconfirmed deletions
+produce warnings; nothing to purge produces no cleanup warning, even without
+keyring helpers.
 `password_removed` is true only if a password was removed and password cleanup
 was complete; `password_backends` reports each attempted backend separately
 (true: removed, false: absent, null: failed or undetermined).
 `password_cleanup_complete` is false when a backend is unreachable or cleanup
-fails. Missing keyring helpers with no remembered backend also produce a warning.
+fails.
 `auth logout` removes the session and pending login, keeping remembered credentials.
 Both commands remove crash-leftover `<owned filename>.<pid>.tmp` files for the
 files they own, and report cleanup failures. Login cleanup failures are warnings
@@ -108,10 +109,9 @@ endpoint-specific query keys are allowlisted, with no action or secret keys.
 
 Storage: `$XDG_DATA_HOME/klms/library.db` plus `objects/sha256/` beside it
 (default `~/.local/share/klms`), directories 0700 and the database 0600; schema
-`user_version = 2` (version 2 only marks the dropped `sync_runs.failures` and
-`representations.observed_*` columns; a 1-to-2 migration changes no data and
-older libraries keep those unused columns, so an older binary refuses a newer
-library with `MIGRATION_REQUIRED`; a newer schema than supported does too). Back both up together, and keep a corrupt library intact
+`user_version = 2`. Migration from version 1 preserves data. Older binaries
+refuse version 2 libraries with `MIGRATION_REQUIRED`; any binary refuses a schema
+newer than it supports. Back both up together, and keep a corrupt library intact
 before recovering it.
 
 ## Safety
@@ -122,18 +122,18 @@ activity pages (`show` commands and library sync detail fetches) lets KLMS recor
 views and completion; quiz views may also process expired attempts.
 `auth extend` refreshes the session timer,
 `auth login` performs the KAIST SSO exchange, and `doctor` and `auth time-left`
-may refresh KLMS activity time (their output says so). Passwords come only from
-hidden terminal prompts, never from flags or environment. A six-digit code comes
-from a hidden prompt or the two-step `--code` flow. The session file
+may refresh KLMS activity time (their output says so). New passwords come only
+from hidden terminal prompts, never flags or environment; remembered passwords
+may be reused. A six-digit code comes from a hidden prompt or the two-step
+`--code` flow. The session file
 (`$XDG_STATE_HOME/klms/session.json`, 0600) holds only KLMS-host cookies and
 trusted-device IDs. Remembered login lives in `$XDG_CONFIG_HOME/klms`. The KLMS
-base URL must be HTTPS, with plain HTTP allowed only for loopback. `update`
-contacts only GitHub, verifies the archive SHA-256 and the candidate version,
-and keeps the old binary on failure. A legacy installed skill (the `klms skill`
-command and SKILL.md are deprecated; `klms --help` is the manual) is never
-removed: `update` lists its paths in `warnings` so the user can delete them.
+base URL must be HTTPS, with plain HTTP allowed only for loopback. Updates
+contact only GitHub, verify the candidate version and keep the old binary on
+failure. The process environment is trusted,
+including `PATH` (keyring helpers and ffmpeg) and `SSL_CERT_FILE` (TLS roots).
 
-Proxies are chosen per request as curl does: `https_proxy`/`HTTPS_PROXY` for
+Proxies are chosen per request: `https_proxy`/`HTTPS_PROXY` for
 HTTPS and `http_proxy`/`HTTP_PROXY` for HTTP, then `all_proxy`/`ALL_PROXY`
 (lowercase wins). `no_proxy`/`NO_PROXY` takes `*` or comma-separated hosts,
 each also covering its subdomains (`kaist.ac.kr` covers `klms.kaist.ac.kr`; a
@@ -148,16 +148,14 @@ links are omitted. Hosts use standard URL normalization, including IDN encoding.
 
 ## Videos (JSON schema 5)
 
-Schema 5 replaces the former activity-shaped video rows; the local SQLite schema
-is version 2. Video grammar is independent of assignment/quiz grammar. `videos list --course`
+JSON schema 5 uses video rows distinct from assignment/quiz rows. `videos list --course`
 is metadata-only: it reads the course page and never opens an activity, so it
 makes no `mod/*/view.php`, LTI launch or Panopto request. Its rows have
 `video_type` `recording` (native VOD), `panopto` (a Panopto activity: one
 recording or a collection) or `lti` (an external tool that may be Panopto), and
 `downloadable` null. `videos show` and `videos download` open the activity in
-KLMS and, for Panopto, perform its LTI launch and read Panopto delivery
-metadata; Moodle logs that as an activity view (and may mark view completion),
-and Panopto may create an account on first launch. `videos show` on a collection
+KLMS and, for Panopto, perform its LTI launch and read delivery metadata;
+Panopto may create an account on first launch. `videos show` on a collection
 lists recording refs, titles and durations. Failed folder enumeration is an
 error; only a successfully returned but incomplete enumeration sets `complete`
 false and produces a warning. If launch or playback-source inspection fails,
@@ -185,7 +183,7 @@ Remuxing uses a private (0700), exclusively created
 need no scratch directory. Publication uses a private
 `.klms-video-<pid>-<nonce>.part` file. Both are removed on normal or error
 returns. An interrupted download (Ctrl-C or kill) may leave ffmpeg running
-until it finishes or fails; the next download sweeps generated leftovers older
+until it finishes or fails; the next remuxing download sweeps generated leftovers older
 than 24 hours, restricted to the same owner on Unix. Sweeps skip symlinks and
 unrelated names.
 User downloads may fall back to a non-atomic exclusive copy when hard links

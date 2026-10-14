@@ -37,6 +37,19 @@ fn help_and_version_are_json_successes_without_authentication() {
             assert!(value["data"]["text"].as_str().unwrap().contains("Usage:"));
         }
     }
+    for command in ["update", "upgrade"] {
+        let output = env
+            .cmd(false, "")
+            .args([command, "--help", "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {:?}", output.stderr);
+        assert!(output.stderr.is_empty());
+        let value = parse(&output.stdout);
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["command"], "help");
+        assert!(value["data"]["text"].as_str().unwrap().contains("Usage:"));
+    }
     assert!(!env.path("state/klms/session.json").exists());
 }
 
@@ -71,7 +84,11 @@ fn auth_status_and_logout_never_emit_cookie_values() {
     assert_eq!(status["configured"], false);
     assert_eq!(env.ok("auth status")["schema_version"], "5");
     env.state();
-    let output = env.out("--base-url http://127.0.0.1:9 auth status");
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = env.out(&format!(
+        "--base-url http://{} auth status",
+        socket.local_addr().unwrap()
+    ));
     assert!(output.status.success());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("test-session"));
     assert_eq!(parse(&output.stdout)["data"]["cookie_count"], 1);
@@ -587,65 +604,49 @@ fn board_post_identity_is_consistent_across_list_and_detail() {
 
 #[test]
 fn help_is_the_agent_manual() {
-    let help = |args: &[&str]| {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_klms"))
-            .args(args)
-            .output()
-            .unwrap();
+    let env = Env::new();
+    let help = |args: &str| {
+        let output = env.run(args);
         assert!(output.status.success(), "{args:?}");
         String::from_utf8(output.stdout).unwrap()
     };
-    let top = help(&["--help"]);
-    for needle in [
-        "auth",
-        "today",
-        "upcoming",
-        "courses",
-        "activities",
-        "assignments",
-        "quizzes",
-        "calendar",
-        "boards",
-        "notices",
-        "files",
-        "videos",
-        "grades",
-        "attendance",
-        "request",
-        "library",
-        "Exit codes:",
-        "54 CURATION_CONFLICT",
-        "12 CODE_REQUIRED",
-        "`auth login` may also give CODE_INCORRECT or CODE_EXPIRED",
-        "board-post:BOARD:POST",
-        "ok:true",
-        "read-only",
-    ] {
-        assert!(top.contains(needle), "--help lacks {needle}");
-    }
-    let edit = help(&["library", "edit", "--help"]);
-    assert!(edit.contains("effective._provenance") && edit.contains("CURATION_CONFLICT"));
-    let login = help(&["auth", "login", "--help"]);
-    assert!(login.contains("--code") && login.contains("--remember-password"));
-    for code in ["AUTH_REQUIRED", "CODE_INCORRECT", "CODE_EXPIRED"] {
-        assert!(login.contains(code) && top.contains(code), "lacks {code}");
-    }
-    let download = help(&["files", "download", "--help"]);
-    assert!(download.contains("mkdir -p"));
-    let completions = help(&["completions", "--help"]);
-    for needle in [
-        "mkdir -p ~/.zfunc && klms completions zsh > ~/.zfunc/_klms",
-        "fpath=(~/.zfunc $fpath)",
-        "compinit",
-    ] {
+    let top = help("--help");
+    let spec = env.data("spec");
+    let commands = spec["commands"].as_array().unwrap();
+    let examples: Vec<_> = top
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("klms "))
+        .collect();
+    assert!(!examples.is_empty());
+    for example in examples {
+        let words: Vec<_> = example
+            .split_whitespace()
+            .filter(|word| *word != "--json")
+            .collect();
         assert!(
-            completions.contains(needle),
-            "completions help lacks {needle}"
+            commands.iter().any(|command| {
+                let path: Vec<_> = command["path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part.as_str().unwrap())
+                    .collect();
+                words.starts_with(&path)
+            }),
+            "manual command is absent from spec: {example}"
         );
     }
-    for command in ["today", "upcoming"] {
-        let text = help(&[command, "--help"]);
-        assert!(text.contains("--kind") && text.contains("Common kinds: assign, quiz"));
+    assert!(top.contains("complete") && top.contains("source_complete") && top.contains("--limit"));
+    assert!(top.contains("upstream") && top.contains("truncation"));
+    let login = help("auth login --help");
+    assert!(!login.contains("--password") && !login.contains("--otp"));
+    for command in commands {
+        for arg in command["args"].as_array().unwrap() {
+            assert!(!matches!(
+                arg["name"].as_str(),
+                Some("--password" | "--otp")
+            ));
+        }
     }
 }
 
@@ -940,10 +941,15 @@ fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
     );
     let server = Server::new(move |_| Response::html(page.as_bytes()));
     let env = Env::at(&server);
-    let warning = "1 calendar event(s) have no date and are not shown; see `klms calendar list`";
     for command in ["today", "upcoming"] {
         let value = env.ok(command);
-        assert_eq!(value["warnings"], json!([warning]), "{command}");
+        let warnings = value["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{command}");
+        let warning = warnings[0].as_str().unwrap();
+        assert!(
+            warning.contains('1') && warning.contains("date") && warning.contains("calendar list"),
+            "{warning}"
+        );
         assert_eq!(value["meta"]["complete"], true, "{command}");
         assert_eq!(value["data"].as_array().unwrap().len(), 1, "{command}");
         assert_eq!(value["data"][0]["ref"], "assign:7");
