@@ -20,7 +20,7 @@ pub(super) fn raw_get(
         .unwrap_or_default();
     let html = kind.contains("text/html");
     if !html && !kind.contains("json") {
-        return Err(AppError::usage(
+        return Err(AppError::content_unavailable(
             "request get previews HTML and JSON only; use `files download` for other content",
         ));
     }
