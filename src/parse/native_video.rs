@@ -1,7 +1,7 @@
 //! Static native Flowplayer sources. This never executes page scripts.
 use scraper::Html;
 
-use super::shared::sel;
+use super::shared::{resolve_http_url, sel};
 use crate::{error::AppError, url::Url};
 
 #[derive(Debug, PartialEq)]
@@ -151,9 +151,8 @@ pub fn native_sources(html: &str, page: &Url) -> Result<Vec<Url>, AppError> {
                         let src = property("src").ok_or_else(|| {
                             AppError::shape("native source is not a static string")
                         })?;
-                        let url = page
-                            .join(src)
-                            .map_err(|_| AppError::shape("invalid native video source"))?;
+                        let url = resolve_http_url(page, src)
+                            .ok_or_else(|| AppError::shape("invalid native video source"))?;
                         if url.origin() != page.origin()
                             || !url.path().starts_with("/vod1/")
                             || !url.path().ends_with(".mp4")
