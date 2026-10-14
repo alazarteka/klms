@@ -7,6 +7,9 @@ mod course_pages;
 mod date;
 mod error;
 #[cfg(test)]
+#[path = "../tests/fixture/executable.rs"]
+mod fixture_executable;
+#[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/fixture/server.rs"]
 mod fixture_server;
