@@ -214,6 +214,7 @@ impl Ctx<'_> {
 
     fn video_page(&self, target: &str) -> Result<crate::client::HtmlResponse, AppError> {
         let path = module_path(target, &["vod", "lti", "panopto", "panoptocourseembed"])?;
+        self.client.validate_operand(&path)?;
         let mut page = self.client.get(&path)?;
         let requested = self
             .base

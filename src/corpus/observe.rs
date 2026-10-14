@@ -353,7 +353,7 @@ impl Run<'_> {
 
 pub(super) fn representation_kind(url: &Url) -> &'static str {
     let path = url.path();
-    if path.contains("pluginfile.php")
+    if crate::client::policy::pluginfile(url)
         || path.contains("/mod/resource/") && !path.ends_with("/view.php")
     {
         "file"

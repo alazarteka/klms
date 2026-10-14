@@ -110,7 +110,6 @@ fn file_locators_allow_resource_redirects_to_pluginfile() {
     let env = Env::at(&server);
     for (i, locator) in [
         "file:7",
-        "activity:folder:7",
         "activity:coursefile:7",
         "/mod/coursefile/view.php?id=7",
         "/pluginfile.php/1/notes.html",
@@ -142,4 +141,272 @@ fn a_redirect_to_the_login_page_is_an_expired_session() {
     assert_eq!(error["code"], "AUTH_REQUIRED");
     assert_ne!(code, 0);
     assert_eq!(server.recorded().len(), 1);
+}
+
+#[test]
+fn stock_read_parameters_and_pluginfile_query_form_reach_transport() {
+    let server = Server::new(|_| Response::html("<main>Fixture content</main>"));
+    let env = Env::at(&server);
+    for path in [
+        "/mod/resource/view.php?id=7&redirect=1&forceview=1",
+        "/mod/quiz/view.php?id=7&forceview=1",
+        "/course/view.php?id=42&section=1&sectionid=4",
+        "/calendar/view.php?view=upcoming&time=1&course=42&lookahead=30&category=2&cal_d=1&cal_m=2&cal_y=2030",
+        "/pluginfile.php?file=%2F123%2Fmod_resource%2Fcontent%2F1%2Fnotes.pdf",
+    ] {
+        env.ok(&format!("request get '{path}'"));
+        let before = server.recorded().len();
+        for key in ["sesskey", "action", "delete", "redirect"] {
+            // redirect is a read key only on module view endpoints.
+            if key == "redirect" && path.starts_with("/mod/") {
+                continue;
+            }
+            let (_, error) = env.fail(&format!("request get '{path}&{key}=1'"));
+            assert_eq!(error["code"], "USAGE");
+        }
+        assert_eq!(server.recorded().len(), before);
+    }
+    // Typed detail operands still accept identity parameters only.
+    let before = server.recorded().len();
+    assert_eq!(
+        env.fail("quizzes show /mod/quiz/view.php?id=7&forceview=1")
+            .1["code"],
+        "USAGE"
+    );
+    assert_eq!(server.recorded().len(), before);
+}
+
+#[test]
+fn operation_redirects_accept_only_documented_read_transitions() {
+    for (initial, destination) in [
+        (
+            "/mod/assign/view.php?id=007",
+            "/mod/assign/view.php?id=7&forceview=1",
+        ),
+        (
+            "/mod/resource/view.php?id=7",
+            "/mod/resource/view.php?id=7&redirect=1",
+        ),
+        (
+            "/mod/resource/view.php?id=7",
+            "/pluginfile.php?file=%2F123%2Fnotes.pdf",
+        ),
+        (
+            "/mod/coursefile/view.php?id=7",
+            "/pluginfile.php/123/notes.pdf",
+        ),
+        (
+            "/mod/folder/view.php?id=7",
+            "/course/view.php?id=42&section=1",
+        ),
+        ("/mod/url/view.php?id=7", "/mod/page/view.php?id=9"),
+        (
+            "/mod/url/view.php?id=7",
+            "/calendar/view.php?view=upcoming&lookahead=30",
+        ),
+    ] {
+        let server = Server::new(move |request| {
+            if request.target == initial {
+                Response::html("")
+                    .status("302 Found")
+                    .header("Location", destination)
+            } else {
+                assert_eq!(request.target, destination);
+                Response::html("<main>Read destination</main>")
+            }
+        });
+        Env::at(&server).ok(&format!("request get '{initial}'"));
+        assert_eq!(server.recorded().len(), 2);
+    }
+}
+
+#[test]
+fn identity_changing_redirects_are_refused_before_second_request_or_publication() {
+    for (command, initial, destination) in [
+        (
+            "assignments show assign:7",
+            "/mod/assign/view.php?id=7",
+            "/mod/assign/view.php?id=8",
+        ),
+        (
+            "files download file:7",
+            "/mod/resource/view.php?id=7",
+            "/mod/resource/view.php?id=8",
+        ),
+        (
+            "files download file:7",
+            "/mod/resource/view.php?id=7",
+            "/mod/coursefile/view.php?id=7",
+        ),
+    ] {
+        let server = Server::new(move |request| {
+            assert_eq!(
+                request.target, initial,
+                "must refuse before requesting the other identity"
+            );
+            Response::html("")
+                .status("302 Found")
+                .header("Location", destination)
+        });
+        let env = Env::at(&server);
+        let out = env.path("wrong-file");
+        let args = if command.starts_with("files") {
+            format!("{command} --out {}", out.display())
+        } else {
+            command.into()
+        };
+        assert_eq!(env.fail(&args).1["code"], "UPSTREAM_SHAPE_CHANGED");
+        assert_eq!(server.recorded().len(), 1);
+        assert!(!out.exists());
+    }
+}
+
+#[test]
+fn query_pluginfile_downloads_and_corpus_classification_agree() {
+    const FILE: &str = "/pluginfile.php?file=%2F123%2Fmod_resource%2Fcontent%2F1%2Fnotes.txt";
+    let server = fixture::lib_server(|request, _| match request.target.as_str() {
+        "/mod/resource/view.php?id=7" => Some(Response::html(
+            fixture::DETAIL.replace("/pluginfile.php/1/lecture.txt", FILE),
+        )),
+        "/mod/coursefile/view.php?id=7" => Some(
+            Response::html("")
+                .status("302 Found")
+                .header("Location", FILE),
+        ),
+        FILE => Some(Response::bytes("text/plain", "query file bytes")),
+        _ => None,
+    });
+    let env = Env::at(&server);
+    for (i, source) in [FILE, "activity:coursefile:7"].iter().enumerate() {
+        let out = env.path(&format!("query-file-{i}"));
+        env.ok(&format!(
+            "files download '{source}' --out {}",
+            out.display()
+        ));
+        assert_eq!(std::fs::read_to_string(out).unwrap(), "query file bytes");
+    }
+    assert_eq!(
+        env.sync("--files --download changed")["data"]["status"],
+        "complete"
+    );
+    let shown = env.data("library show file:7");
+    let representation = &shown["representations"][0];
+    assert_eq!(representation["kind"], "file");
+    assert!(
+        server
+            .recorded()
+            .iter()
+            .any(|r| r.line == format!("HEAD {FILE} HTTP/1.1"))
+    );
+    assert!(
+        server
+            .recorded()
+            .iter()
+            .any(|r| r.line == format!("GET {FILE} HTTP/1.1"))
+    );
+}
+
+#[test]
+fn policy_refusals_from_server_links_and_redirects_are_upstream_errors() {
+    for destination in [
+        "/mod/assign/view.php?id=7&sesskey=secret",
+        "/mod/folder/download_folder.php?id=7",
+        "/mod/url/view.php?id=7&action=delete",
+    ] {
+        let server = Server::new(move |_| {
+            Response::html("")
+                .status("302 Found")
+                .header("Location", destination)
+        });
+        assert_eq!(
+            Env::at(&server)
+                .fail("request get /mod/url/view.php?id=7")
+                .1["code"],
+            "UPSTREAM_SHAPE_CHANGED"
+        );
+        assert_eq!(server.recorded().len(), 1);
+    }
+    let server = fixture::lib_server(|request, _| {
+        (request.target == "/course/view.php?id=42")
+            .then(|| Response::html(fixture::manifest().replace("id=7'", "id=7&action=delete'")))
+    });
+    let env = Env::at(&server);
+    let result = env.sync("");
+    assert_eq!(result["data"]["status"], "incomplete");
+    assert!(!server.recorded().iter().any(|r| r.line.contains("action=")));
+}
+
+#[test]
+fn folder_zip_and_folder_download_operands_are_not_supported() {
+    let server = Server::new(|_| panic!("folder downloads must be rejected locally"));
+    let env = Env::at(&server);
+    for source in ["activity:folder:7", "/mod/folder/download_folder.php?id=7"] {
+        assert_eq!(
+            env.fail(&format!(
+                "files download {source} --out {}",
+                env.path("folder.zip").display()
+            ))
+            .1["code"],
+            "USAGE"
+        );
+    }
+    assert_eq!(
+        env.fail("request get /mod/folder/download_folder.php?id=7")
+            .1["code"],
+        "USAGE"
+    );
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn sync_accepts_server_resource_read_parameters() {
+    let server = fixture::lib_server(|request, _| match request.target.as_str() {
+        "/course/view.php?id=42" => Some(Response::html(
+            fixture::manifest().replace("view.php?id=7", "view.php?id=7&redirect=1&forceview=1"),
+        )),
+        "/mod/resource/view.php?id=7&redirect=1&forceview=1" => {
+            Some(Response::html(fixture::DETAIL))
+        }
+        _ => None,
+    });
+    let env = Env::at(&server);
+    assert_eq!(env.sync("")["data"]["status"], "complete");
+    assert_eq!(env.data("library show file:7")["remote_state"], "present");
+    assert!(
+        server
+            .requests()
+            .iter()
+            .any(|line| line == "GET /mod/resource/view.php?id=7&redirect=1&forceview=1 HTTP/1.1")
+    );
+}
+
+#[test]
+fn typed_foreign_origins_and_userinfo_remain_usage_errors() {
+    let server = Server::new(|_| panic!("invalid typed URL must not be requested"));
+    let env = Env::at(&server);
+    for (command, endpoint) in [
+        ("assignments show", "/mod/assign/view.php?id=7"),
+        ("boards posts", "/mod/courseboard/view.php?id=7"),
+        ("boards show", "/mod/courseboard/article.php?id=7&bwid=8"),
+        ("videos show", "/mod/vod/view.php?id=7"),
+        ("request get", "/course/view.php?id=7"),
+        ("files download", "/pluginfile.php/1/file"),
+    ] {
+        for origin in [
+            "https://foreign.invalid".to_owned(),
+            server.url().replace("http://", "http://user@"),
+        ] {
+            let extra = if command.starts_with("files") {
+                format!(" --out {}", env.path("file").display())
+            } else {
+                String::new()
+            };
+            assert_eq!(
+                env.fail(&format!("{command} '{origin}{endpoint}'{extra}"))
+                    .1["code"],
+                "USAGE"
+            );
+        }
+    }
+    assert!(server.recorded().is_empty());
 }

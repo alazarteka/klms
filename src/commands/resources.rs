@@ -67,7 +67,9 @@ impl Ctx<'_> {
                     self.activity_list(course, None, list.limit, "boards.list", keep)
                 }
                 BoardsCommand::Posts { board, list } => {
-                    let response = client.get(&module_path(board, &["courseboard"])?)?;
+                    let path = module_path(board, &["courseboard"])?;
+                    client.validate_operand(&path)?;
+                    let response = client.get(&path)?;
                     let board_id = query_value(&response.url, "id");
                     let posts = parse::board_posts(&response.text, &response.url, board_id)?;
                     let complete = !parse::has_next_page(&response.text);
@@ -177,6 +179,7 @@ impl Ctx<'_> {
             ModuleCommand::Show { target } => target,
         };
         let path = module_path(target, kinds)?;
+        self.client.validate_operand(&path)?;
         let response = self.client.get(&path)?;
         let shape = AppError::shape;
         let reference = ResourceRef::from_url(&response.url)
@@ -249,6 +252,7 @@ impl Ctx<'_> {
         command: &'static str,
     ) -> Result<CommandResult, AppError> {
         let target = module_path(post, &["courseboard-post"])?;
+        self.client.validate_operand(&target)?;
         let response = self.client.get(&target)?;
         let numeric = |key| query_value(&response.url, key).is_some_and(|id| valid_id(&id));
         if response.url.path() != "/mod/courseboard/article.php"
