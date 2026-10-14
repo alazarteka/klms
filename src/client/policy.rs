@@ -5,6 +5,10 @@ use crate::{
     url::{Url, query_value},
 };
 
+/// Query keys Moodle's read-only pluginfile.php understands; anything else
+/// (e.g. a sesskey) is refused.
+const PLUGINFILE: &[&str] = &["forcedownload", "preview", "offline", "embed", "time"];
+
 const MODULES: &[&str] = &[
     "assign",
     "quiz",
@@ -55,7 +59,7 @@ pub(crate) fn detail_ref(url: &Url) -> Option<ResourceRef> {
 }
 
 fn is_file(url: &Url) -> bool {
-    (url.path().starts_with("/pluginfile.php/") && query_only(url, &["forcedownload"]))
+    (url.path().starts_with("/pluginfile.php/") && query_only(url, PLUGINFILE))
         || detail_ref(url).is_some_and(|r| r.matches_module(&["resource", "coursefile", "folder"]))
 }
 
@@ -69,7 +73,7 @@ pub(crate) fn read_url(url: &Url) -> Result<(), AppError> {
         | "/local/lmsattendance/index.php"
         | "/mod/vod/viewer/index.php" => &["id"],
         "/mod/courseboard/article.php" => &["id", "bwid"],
-        path if path.starts_with("/pluginfile.php/") => &["forcedownload"],
+        path if path.starts_with("/pluginfile.php/") => PLUGINFILE,
         path if path
             .strip_prefix("/mod/")
             .and_then(|rest| rest.split_once('/'))
@@ -101,6 +105,12 @@ pub(super) fn redirect(initial: &Url, next: &Url) -> Result<(), AppError> {
     // AJAX cannot redirect its method/body to a different operation.
     if initial.path() == "/lib/ajax/service.php" {
         return Err(AppError::network("AJAX redirect refused"));
+    }
+    // KLMS answers an expired session by redirecting to its login page.
+    if next.path().to_ascii_lowercase().contains("/login/") {
+        return Err(AppError::auth_required(
+            "the saved KLMS session is missing or expired",
+        ));
     }
     read_url(next)?;
     if initial.path() == next.path()
