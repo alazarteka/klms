@@ -95,6 +95,7 @@ impl KlmsClient {
         &self,
         page: &HtmlResponse,
         timeout: u64,
+        kind: crate::parse::video::PageKind,
     ) -> Result<panopto::Session, AppError> {
         panopto::launch(
             &self.base_url,
@@ -103,6 +104,7 @@ impl KlmsClient {
             &page.text,
             &page.url,
             &self.panopto,
+            kind,
         )
     }
     pub fn new(

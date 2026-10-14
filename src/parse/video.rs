@@ -13,6 +13,13 @@ pub struct LaunchForm {
     pub action: Url,
     pub fields: Vec<(String, String)>,
 }
+/// Chosen by the caller from the page it fetched, never inferred from markup.
+#[derive(Clone, Copy)]
+pub enum PageKind {
+    Activity,
+    EmbeddedActivity,
+    Handoff,
+}
 fn on_panopto(url: &Url, panopto: &Origin) -> bool {
     url.origin() == *panopto && !crate::url::has_userinfo(url)
 }
@@ -20,9 +27,10 @@ pub fn launch_form(
     html: &str,
     base: &Url,
     panopto: &Origin,
+    kind: PageKind,
 ) -> Result<Option<LaunchForm>, AppError> {
     let doc = Html::parse_document(html);
-    let region = activity_region(&doc);
+    let region = activity_region(&doc, kind)?;
     let mut candidate = None;
     for f in region
         .select(&Selector::parse("form[action]").unwrap())
@@ -90,11 +98,14 @@ pub fn launch_form(
     }
     Ok(candidate)
 }
-fn activity_region(doc: &Html) -> ElementRef<'_> {
+fn activity_region(doc: &Html, kind: PageKind) -> Result<ElementRef<'_>, AppError> {
+    if matches!(kind, PageKind::EmbeddedActivity | PageKind::Handoff) {
+        return Ok(doc.root_element());
+    }
     ["#region-main", "[role=main]", "main"]
         .into_iter()
         .find_map(|css| doc.select(&Selector::parse(css).ok()?).next())
-        .unwrap_or_else(|| doc.root_element())
+        .ok_or_else(|| AppError::shape("Panopto activity page omitted its main region"))
 }
 /// Whether `element` sits inside the activity description, which teachers
 /// write and which may link unrelated recordings.
@@ -105,9 +116,14 @@ fn in_description(element: ElementRef<'_>) -> bool {
 }
 /// The activity's own launch target: the main region's launch iframe, else
 /// its first allowed link. Description blocks are skipped.
-pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> {
+pub fn embedded_launch(
+    html: &str,
+    base: &Url,
+    panopto: &Origin,
+    kind: PageKind,
+) -> Result<Option<Url>, AppError> {
     let doc = Html::parse_document(html);
-    let region = activity_region(&doc);
+    let region = activity_region(&doc, kind)?;
     let allowed = |u: &Url| {
         u.origin() == base.origin()
             && (u.path() == "/mod/panoptocourseembed/view_content.php"
@@ -120,14 +136,14 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
                 )
     };
     for (css, attr) in [("iframe[src]", "src"), ("a[href]", "href")] {
-        let selector = Selector::parse(css).ok()?;
+        let selector = Selector::parse(css).unwrap();
         if let Some(u) = region
             .select(&selector)
             .filter(|f| !in_description(*f))
             .filter_map(|f| resolve_http_url(base, f.value().attr(attr)?))
             .find(allowed)
         {
-            return Some(u);
+            return Ok(Some(u));
         }
     }
     // Moodle's static iframe setup stores its launch URL in a quoted JS literal.
@@ -142,14 +158,14 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
                             && u.path() == "/mod/lti/launch.php"
                             && query_value(&u, "id") == query_value(base, "id")
                         {
-                            return Some(u);
+                            return Ok(Some(u));
                         }
                     }
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 pub fn non_panopto_lti_form(html: &str, base: &Url, panopto: &Origin) -> bool {
     let doc = Html::parse_document(html);
@@ -198,18 +214,32 @@ mod tests {
             .unwrap()
             .origin();
         assert!(
-            launch_form("<h1>Panopto Lecture</h1>", &u, &pano)
-                .unwrap()
-                .is_none()
+            launch_form(
+                "<main><h1>Panopto Lecture</h1></main>",
+                &u,
+                &pano,
+                PageKind::Activity
+            )
+            .unwrap()
+            .is_none()
         );
-        assert!(embedded_launch("<h1>Panopto Lecture</h1>", &u, &pano).is_none());
+        assert!(
+            embedded_launch(
+                "<main><h1>Panopto Lecture</h1></main>",
+                &u,
+                &pano,
+                PageKind::Activity
+            )
+            .unwrap()
+            .is_none()
+        );
         assert!(launch_form(
             r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/lti/adv/platforms/test/login"><input name="iss" value="x"><input name="login_hint" value="x"><input name="target_link_uri" value="x"></form>"#,
-            &u, &pano
+            &u, &pano, PageKind::Handoff
         ).unwrap().is_some());
         assert!(launch_form(
             r#"<form method="post" action="https://evil.test/Panopto/LTI/LTI.aspx"><input name="id_token" value="secret"><input name="state" value="secret"></form>"#,
-            &u, &pano
+            &u, &pano, PageKind::Handoff
         ).unwrap().is_none());
     }
 }
