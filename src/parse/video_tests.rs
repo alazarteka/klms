@@ -184,3 +184,33 @@ fn folder_ids_follow_authoritative_url_state_and_decode_json_fragments() {
         assert!(folder_id(&Url::parse(raw).unwrap()).is_none());
     }
 }
+
+#[test]
+fn launch_form_ignores_description_and_outside_activity_and_rejects_ambiguity() {
+    let wrong = r#"<form method="post" action="/mod/lti/auth.php"><input name="repost" value="WRONG"></form>"#;
+    let right = r#"<form method="post" action="https://kaist.ap.panopto.com/Panopto/LTI/LTI.aspx"><input name="id_token" value="RIGHT"><input name="state" value="ok"></form>"#;
+    let html = format!("{wrong}<main><div id='intro'>{wrong}</div>{right}</main>");
+    let form = launch_form(&html, &klms(), &pano()).unwrap().unwrap();
+    assert!(form.fields.iter().any(|(_, v)| v == "RIGHT"));
+    assert!(!form.fields.iter().any(|(_, v)| v == "WRONG"));
+    assert!(launch_form(&format!("<main>{right}{right}</main>"), &klms(), &pano()).is_err());
+    assert!(
+        launch_form(
+            &format!("<main><div id='intro'>{wrong}</div></main>"),
+            &klms(),
+            &pano()
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn native_config_delimiter_inside_a_string_is_not_a_boundary() {
+    let page = Url::parse("https://klms.kaist.ac.kr/mod/vod/viewer/index.php?id=7").unwrap();
+    let html = r#"<script>flowplayer('#p', {clip: {title: "example }); continues", sources: [{type:"video/mp4",src:"/vod1/a.mp4"}]}});</script>"#;
+    assert_eq!(
+        crate::parse::native_sources(html, &page).unwrap()[0].path(),
+        "/vod1/a.mp4"
+    );
+}
