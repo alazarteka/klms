@@ -21,7 +21,7 @@ use crate::{
     },
     output::{self, CommandResult, body, cell, detail, listing, row, table},
     parse,
-    private_fs::{PublishError, publish_new},
+    private_fs::{PublishError, publish_download},
     reference::{ResourceRef, valid_id},
     safe_url,
     url::Url,
@@ -909,7 +909,7 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
         )));
     }
     let temp = parent.join(format!(".klms-download-{}.part", std::process::id()));
-    let (response, linked) = publish_new(&temp, out, |file| {
+    let (response, linked) = publish_download(&temp, out, |file| {
         client.download_to(source, MAX_DOWNLOAD_BYTES, file)
     })
     .map_err(|error| match error {
@@ -947,6 +947,11 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
     let human = format!("Downloaded {} bytes to {}", model.bytes, model.path);
     let mut result = output::result("files.download", &model, human)?;
     result.warnings.extend(cleanup_warning);
+    if linked.copied {
+        result
+            .warnings
+            .push("download published by non-atomic copy because hard linking failed".into());
+    }
     Ok(result)
 }
 

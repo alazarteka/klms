@@ -666,7 +666,7 @@ pub enum VideosCommand {
     },
     /// Inspect one recording or collection without running its player.
     #[command(
-        after_help = "Side effect: opens the activity in KLMS and, for Panopto, performs its LTI launch and reads Panopto delivery metadata. Moodle logs this as an activity view (and may mark view completion); Panopto may create your account on first launch. No playback/progress endpoints are called."
+        after_help = "Returns activity metadata with a warning if playback inspection fails. Collections list recording refs, titles and durations; folder request failures remain errors. Side effect: opens the activity in KLMS and, for Panopto, performs its LTI launch and reads Panopto delivery metadata. Moodle logs this as an activity view (and may mark view completion); Panopto may create your account on first launch. No playback/progress endpoints are called."
     )]
     Show {
         /// Typed video reference printed by videos list (bare numbers are ambiguous).
@@ -675,7 +675,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. Scratch space (a private .klms-video-<pid>.scratch directory) and the temporary .part file live beside --out; stale ones older than a day are removed by the next download. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-video-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. On Linux, generated temporaries older than a day are removed only after their process exits. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.
@@ -690,7 +690,7 @@ pub enum VideosCommand {
         /// Overall download/remux time budget in seconds (default 4 h, at most 24 h; a 4 GiB recording needs about 70 minutes at 1 MB/s).
         #[arg(long, default_value_t = 14_400, value_parser = clap::value_parser!(u64).range(1..=86_400))]
         max_seconds: u64,
-        /// Fail with NETWORK_ERROR when no media bytes arrive for this many seconds (1-600).
+        /// Fail with NETWORK_ERROR when response headers or the next media bytes take longer than this many seconds (1-600).
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=600))]
         stall_seconds: u64,
     },
