@@ -135,7 +135,8 @@ pub fn launch(
             )
         {
             policy.bearer = query_value(&current, "access_token");
-            let recording = query_value(&current, "id").filter(|id| video::uuid(id));
+            let recording =
+                query_value(&current, "id").filter(|id| crate::reference::valid_uuid(id));
             let folder = video::folder_id(&current);
             policy.delivery_only = true;
             policy.cookie.clear();
@@ -218,7 +219,7 @@ pub(crate) fn allow_exchange(
                 "/Panopto/Pages/Viewer/DeliveryInfo.aspx"
                     | "/Panopto/Services/Data.svc/GetSessions"
             ));
-    if (!delivery_only && klms || pano) && u.username().is_empty() && u.password().is_none() {
+    if (!delivery_only && klms || pano) && !crate::url::has_userinfo(u) {
         Ok(())
     } else {
         Err(AppError::content_unavailable(

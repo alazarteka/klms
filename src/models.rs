@@ -318,3 +318,22 @@ pub struct Video {
     pub stream_count: Option<usize>,
     pub output_composition: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Semester {
+    Spring,
+    Summer,
+    Fall,
+    Winter,
+}
+
+impl Semester {
+    pub(crate) fn course_suffix(self) -> &'static str {
+        match self {
+            Self::Spring => "1",
+            Self::Summer => "2",
+            Self::Fall => "3",
+            Self::Winter => "4",
+        }
+    }
+}

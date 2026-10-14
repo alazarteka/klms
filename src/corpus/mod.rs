@@ -235,6 +235,26 @@ fn sqlite_error(path: &Path, error: rusqlite::Error) -> AppError {
     converted
 }
 
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        use rusqlite::ErrorCode::*;
+        let code = match &error {
+            rusqlite::Error::SqliteFailure(code, _) => Some(code.code),
+            _ => None,
+        };
+        match code {
+            Some(DatabaseBusy | DatabaseLocked) => {
+                Self::corpus_busy("local library is locked by another process")
+            }
+            Some(DatabaseCorrupt | NotADatabase) => {
+                Self::corpus_corrupt("local library database is corrupt")
+            }
+            Some(SchemaChanged) => Self::migration_required("local library schema is incompatible"),
+            _ => Self::library_io(format!("SQLite failure: {error}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

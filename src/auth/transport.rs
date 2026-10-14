@@ -172,7 +172,7 @@ fn ensure_allowed(klms: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
             "KAIST SSO attempted a redirect to an untrusted origin",
         ));
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if crate::url::has_userinfo(url) {
         return Err(AppError::auth_protocol("SSO URL contained userinfo"));
     }
     Ok(())
