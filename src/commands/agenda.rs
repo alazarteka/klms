@@ -16,17 +16,23 @@ impl Ctx<'_> {
         let page =
             parse::calendar_page(&client.get(CALENDAR_PATH)?.text, base, &date::seoul_today())?;
         let header = "WHEN\tREF\tCOURSE\tTITLE";
-        let events = page.events;
-        listing(
+        let mut result = listing(
             "calendar.list",
-            events,
+            page.events,
             list.limit,
             page.complete,
             |rows, avail| match rows.is_empty() {
                 true => "No upcoming calendar events found.".into(),
                 false => table(rows, avail, "Calendar", header, event_row),
             },
-        )
+        )?;
+        if page.skipped > 0 {
+            result.warnings.push(format!(
+                "{} calendar event(s) skipped: no unambiguous header/footer action link",
+                page.skipped
+            ));
+        }
+        Ok(result)
     }
     pub(super) fn agenda(
         &self,

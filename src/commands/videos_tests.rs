@@ -197,28 +197,35 @@ fn isolated_embedded_activity_launches_without_moodle_layout() {
 
 #[test]
 fn embedded_activity_show_reads_metadata_from_the_isolated_fragment() {
-    let klms = Server::new(|request| match request.target.as_str() {
-        "/mod/panoptocourseembed/view.php?id=7" => Response::html("")
-            .status("302 Found")
-            .header("Location", "/course/view.php?id=42"),
-        "/course/view.php?id=42" => Response::html(
-            r#"<body id="page-course-view-topics" class="course-42"><main><li id="module-7" class="activity modtype_panoptocourseembed"><span class="instancename">Embedded lecture</span></li></main></body>"#,
-        ),
-        _ => panic!("unexpected activity request"),
-    });
-    let base = Url::parse(&klms.url()).unwrap();
-    let client = KlmsClient::new(base.as_str(), Some("MoodleSession=synthetic"), 5).unwrap();
-    let ctx = Ctx {
-        client: &client,
-        base: &base,
-        timeout: 5,
-    };
-    let (page, kind) = ctx.video_page("panoptocourseembed:7").unwrap();
-    let video = ctx
-        .activity_video(&page, kind, "panoptocourseembed:7")
-        .unwrap();
-    assert_eq!(video.reference, "panoptocourseembed:7");
-    assert_eq!(video.title, "Embedded lecture");
+    for name in [
+        "<span class='instancename'>Embedded lecture</span>",
+        "<span class='activityname'>Embedded lecture</span>",
+        "<span class='activity-title'>Embedded lecture</span>",
+        "<a href='/mod/panoptocourseembed/view.php?id=7'>Embedded lecture</a>",
+    ] {
+        let klms = Server::new(move |request| match request.target.as_str() {
+            "/mod/panoptocourseembed/view.php?id=7" => Response::html("")
+                .status("302 Found")
+                .header("Location", "/course/view.php?id=42"),
+            "/course/view.php?id=42" => Response::html(format!(
+                "<main><div class='activity-item' data-id='7'>{name}</div><li id='module-8'><span class='instancename'>Other module</span></li></main>"
+            )),
+            _ => panic!("unexpected activity request"),
+        });
+        let base = Url::parse(&klms.url()).unwrap();
+        let client = KlmsClient::new(base.as_str(), Some("MoodleSession=synthetic"), 5).unwrap();
+        let ctx = Ctx {
+            client: &client,
+            base: &base,
+            timeout: 5,
+        };
+        let (page, kind) = ctx.video_page("panoptocourseembed:7").unwrap();
+        let video = ctx
+            .activity_video(&page, kind, "panoptocourseembed:7")
+            .unwrap();
+        assert_eq!(video.reference, "panoptocourseembed:7");
+        assert_eq!(video.title, "Embedded lecture");
+    }
 }
 
 #[test]

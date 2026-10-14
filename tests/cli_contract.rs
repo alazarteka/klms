@@ -986,7 +986,7 @@ fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
         .replace("내일", "오늘");
     let page = dated.replace(
         "</main>",
-        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div></main>",
+        "<div class='event'><div class='card-footer'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div></div></main>",
     );
     let server = Server::new(move |_| Response::html(page.as_bytes()));
     let env = Env::at(&server);
@@ -1011,7 +1011,7 @@ fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
     // A time that is present but unreadable still fails the agenda rather than hiding the event.
     let page = dated.replace(
         "</main>",
-        "<div class='event'><a href='/mod/quiz/view.php?id=9'>Quiz</a><time>sometime</time></div></main>",
+        "<div class='event'><div class='card-footer'><a href='/mod/quiz/view.php?id=9'>Quiz</a></div><time>sometime</time></div></main>",
     );
     let server = Server::new(move |_| Response::html(page.as_bytes()));
     let (code, error) = Env::at(&server).fail("today");
