@@ -111,7 +111,7 @@ exit 0
 "#,
         args_file = args_file.display()
     );
-    fs::write(root.join(&package).join("klms"), candidate).unwrap();
+    crate::fixture_executable::write_executable(&root.join(&package).join("klms"), &candidate);
     let output = Command::new("tar")
         .args(["-czf", "-", "-C"])
         .arg(root)

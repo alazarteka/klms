@@ -172,7 +172,7 @@ fn logout_keeps_the_remembered_login_and_forget_removes_it() {
 }
 
 #[test]
-fn forget_recovers_from_a_backend_it_cannot_open() {
+fn forget_keeps_metadata_for_a_backend_it_cannot_open() {
     // (recorded backend, the reason the backend error gives)
     for (backend, reason) in [
         (
@@ -200,23 +200,29 @@ fn forget_recovers_from_a_backend_it_cannot_open() {
             forget.stderr
         );
         let value = json(&forget.stdout);
-        assert_eq!(value["data"]["login_removed"], true, "{backend}");
+        assert_eq!(value["data"]["login_removed"], false, "{backend}");
         assert_eq!(value["data"]["password_removed"], false, "{backend}");
+        assert_eq!(value["data"]["password_cleanup_complete"], false);
+        assert_eq!(value["data"]["password_backends"][backend], Value::Null);
         assert_eq!(value["data"]["password_backend"], backend);
         assert_eq!(value["data"]["pending_removed"], true, "{backend}");
         assert_eq!(
             value["warnings"],
             serde_json::json!([format!(
-                "could not remove the stored password of student from the {backend} backend ({reason}); it may remain there"
+                "could not purge {backend} passwords: {reason}; passwords may remain there; retry `klms auth forget` when the backend is available"
             )])
         );
         for path in [
-            home.config().join("login.json"),
             home.config().join("credentials.json"),
             home.state().join("pending-login.json"),
         ] {
             assert!(!path.exists(), "{backend}: {}", path.display());
         }
+        assert!(home.config().join("login.json").is_file());
+        let again = json(&home.run(&["--json", "auth", "forget"]).stdout);
+        assert_eq!(again["data"]["login_removed"], false);
+        assert_eq!(again["data"]["password_cleanup_complete"], false);
+        assert_eq!(again["warnings"], value["warnings"]);
     }
 }
 
