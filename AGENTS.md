@@ -19,7 +19,13 @@ Run `make check` (fmt, `cargo test --locked --all-targets`, clippy with
 `-D warnings`) before finishing. Use the pinned toolchain, exact `=` dependency
 pins in `Cargo.toml`, the committed `Cargo.lock`, and `--locked`; pin GitHub
 Actions to full commit SHAs. Behavior changes need tests. No ignored tests,
-lint suppressions, or placeholder success paths.
+lint suppressions, or placeholder success paths. The shared test fixture is the
+only exception: `allow(dead_code)` in `src/main.rs` under `cfg(test)` and
+`tests/fixture` is allowed because each test target uses a different subset.
+
+Before compiling a changed dependency graph, run `scripts/supply-chain.sh deny`
+and `scripts/supply-chain.sh vet`. Record exemption and trust decisions in
+`supply-chain/BASELINE.md`; never silently extend the cargo-vet baseline.
 
 ## Data
 

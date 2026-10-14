@@ -35,6 +35,10 @@ jobs:
       - name: Install musl linker
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Check dependency policy
+        run: scripts/supply-chain.sh deny
+      - name: Check dependency audits
+        run: scripts/supply-chain.sh vet
       - name: Build locked release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
       - name: Test the release target
