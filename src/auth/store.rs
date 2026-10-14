@@ -36,10 +36,8 @@ pub struct Dirs {
 }
 
 fn xdg(var: &str, fallback: &str) -> Result<PathBuf, AppError> {
-    env::var_os(var)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
+    let home = env::var_os("HOME").map(PathBuf::from);
+    crate::private_fs::xdg_home(var, home.as_deref(), fallback)
         .map(|root| root.join("klms"))
         .ok_or_else(|| AppError::config(format!("HOME or {var} is required for KLMS login")))
 }

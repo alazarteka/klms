@@ -5,7 +5,7 @@ use super::stream::{self, Expect, Limits};
 use crate::{
     error::AppError,
     http::{self, Follow, Method, Payload},
-    url::{Url, form_urlencode},
+    url::Url,
 };
 pub use exchange::launch;
 use exchange::{Policy, request, text};
@@ -148,10 +148,7 @@ impl Session {
             ("isEditing", "false"),
             ("isKollectiveAgentInstalled", "false"),
         ];
-        let p = Payload {
-            content_type: "application/x-www-form-urlencoded",
-            bytes: form_urlencode(pairs).into_bytes(),
-        };
+        let p = Payload::form(pairs);
         let endpoint = self
             .policy
             .config

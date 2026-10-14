@@ -8,9 +8,9 @@ use crate::{
     error::AppError,
     http::{self, Follow, Method, Payload, Response},
     parse::video,
-    url::{Url, form_urlencode, query_value},
+    url::{Url, query_value},
 };
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
 pub(crate) struct Policy {
     pub klms: Url,
@@ -94,11 +94,8 @@ pub(crate) fn request(
     }
     Ok(r)
 }
-pub(crate) fn text(mut r: Response) -> Result<String, AppError> {
-    let mut b = Vec::new();
-    r.by_ref()
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut b)
+pub(crate) fn text(r: Response) -> Result<String, AppError> {
+    let b = http::read_prefix(r, 8 * 1024 * 1024)
         .map_err(|_| AppError::network("Panopto response interrupted"))?;
     if b.len() > 8 * 1024 * 1024 {
         return Err(AppError::limit("Panopto response too large"));
@@ -143,11 +140,7 @@ pub fn launch(
             return Ok(Session::new(agent, policy, recording, folder));
         }
         let response = if let Some(form) = video::launch_form(&page, &current, &pano)? {
-            let payload = Payload {
-                content_type: "application/x-www-form-urlencoded",
-                bytes: form_urlencode(form.fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-                    .into_bytes(),
-            };
+            let payload = Payload::form(form.fields.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             request(
                 &agent,
                 &mut policy,

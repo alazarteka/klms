@@ -715,7 +715,7 @@ fn upsert_representation(
     url: &Url,
     filename: &str,
 ) -> Result<i64, AppError> {
-    let digest = object_store::digest(format!("{}\n{filename}", url.as_str()).as_bytes());
+    let digest = crate::digest::sha256_hex(format!("{}\n{filename}", url.as_str()).as_bytes());
     let existing = x.existing(
         (
             "representations",
@@ -850,7 +850,7 @@ fn activity_container(value: &str) -> bool {
 
 fn digest_json(value: &impl Serialize) -> Result<String, AppError> {
     let bytes = serde_json::to_vec(value).map_err(|error| AppError::internal(error.to_string()))?;
-    Ok(object_store::digest(&bytes))
+    Ok(crate::digest::sha256_hex(&bytes))
 }
 
 #[cfg(test)]

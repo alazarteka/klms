@@ -9,13 +9,13 @@ use std::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::digest::sha256_hex;
 use crate::private_fs::ScratchDir;
 use crate::{
     client::{Client, release_bytes as fetch},
     error::AppError,
     output,
 };
-use sha2::{Digest, Sha256};
 
 const REPO: &str = "alazarteka/klms";
 const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
@@ -200,15 +200,11 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
 /// Earlier releases installed an Agent Skill copy of the help text. klms no
 /// longer removes it; it only reports what is still there, so the user decides.
 fn legacy_skill_paths() -> Vec<PathBuf> {
-    let nonempty = |name| {
-        env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let Some(home) = nonempty("HOME") else {
+    let Some(home) = crate::private_fs::env_path("HOME") else {
         return Vec::new();
     };
-    let data_home = nonempty("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+    let data_home = crate::private_fs::xdg_home("XDG_DATA_HOME", Some(&home), ".local/share")
+        .expect("home is set");
     legacy_skill_paths_at(&home, &data_home)
 }
 
@@ -271,13 +267,6 @@ fn platform() -> Result<&'static str, AppError> {
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
         _ => Err(AppError::config("no prebuilt release for this platform")),
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn verify_checksum(bytes: &[u8], checksum: &[u8], name: &str) -> Result<(), AppError> {

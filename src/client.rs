@@ -501,13 +501,8 @@ fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Res
 
 /// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
 fn read_prefix(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
-    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
-    response
-        .by_ref()
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-    Ok(body)
+    http::read_prefix(response, max_bytes as u64)
+        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))
 }
 
 /// The whole body, or a limit error when it is declared or turns out larger.
@@ -603,10 +598,7 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
         )));
     }
     let expected = response.content_length();
-    let mut bytes = Vec::new();
-    response
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
+    let bytes = http::read_prefix(response, limit)
         .map_err(|e| AppError::network(format!("release response read failed: {e}")))?;
     if bytes.len() as u64 > limit {
         return Err(AppError::limit("release response exceeds size limit"));

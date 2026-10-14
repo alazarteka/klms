@@ -16,17 +16,9 @@ fn io(context: &str) -> impl Fn(std::io::Error) -> AppError + '_ {
     move |error| AppError::library_io(format!("cannot {context}: {error}"))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-pub fn digest(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
-
 /// Store `bytes` under their SHA-256, deduplicating; returns the digest.
 pub fn store(root: &Path, bytes: &[u8]) -> Result<String, AppError> {
-    let sha256 = digest(bytes);
+    let sha256 = crate::digest::sha256_hex(bytes);
     let directory = root.join(&sha256[..2]);
     private_dir(&directory)?;
     let destination = directory.join(&sha256[2..]);
@@ -100,7 +92,7 @@ pub fn export(root: &Path, sha256: &str, destination: &Path) -> Result<u64, AppE
             return Err(io("write export")(error));
         }
     }
-    if hex(&hasher.finalize()) != sha256 {
+    if crate::digest::hex(&hasher.finalize()) != sha256 {
         let _ = fs::remove_file(destination);
         return Err(AppError::corpus_corrupt("stored content digest mismatch"));
     }
