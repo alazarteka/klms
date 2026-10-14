@@ -2,6 +2,7 @@
 #[cfg(test)]
 #[path = "video_tests.rs"]
 mod protocol_tests;
+use super::shared::resolve_http_url;
 use crate::{
     error::AppError,
     url::{Origin, Url, query_value},
@@ -28,7 +29,11 @@ pub fn launch_form(
         .select(&Selector::parse("form[action]").unwrap())
         .filter(|f| !in_description(*f))
     {
-        let Some(action) = f.value().attr("action").and_then(|a| base.join(a).ok()) else {
+        let Some(action) = f
+            .value()
+            .attr("action")
+            .and_then(|a| resolve_http_url(base, a))
+        else {
             continue;
         };
         let repost = action.origin() == base.origin()
@@ -120,7 +125,7 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
         if let Some(u) = region
             .select(&selector)
             .filter(|f| !in_description(*f))
-            .filter_map(|f| base.join(f.value().attr(attr)?).ok())
+            .filter_map(|f| resolve_http_url(base, f.value().attr(attr)?))
             .find(allowed)
         {
             return Some(u);
@@ -133,7 +138,7 @@ pub fn embedded_launch(html: &str, base: &Url, panopto: &Origin) -> Option<Url> 
         for quote in ['\"', '\''] {
             for literal in script.split(quote).skip(1).step_by(2) {
                 if literal.len() < 2048 && !literal.contains(['\\', '\n', '\r']) {
-                    if let Ok(u) = base.join(literal) {
+                    if let Some(u) = resolve_http_url(base, literal) {
                         if u.origin() == base.origin()
                             && u.path() == "/mod/lti/launch.php"
                             && query_value(&u, "id") == query_value(base, "id")
@@ -151,7 +156,11 @@ pub fn non_panopto_lti_form(html: &str, base: &Url, panopto: &Origin) -> bool {
     let doc = Html::parse_document(html);
     doc.select(&Selector::parse("form[action]").unwrap())
         .any(|form| {
-            let Some(u) = form.value().attr("action").and_then(|v| base.join(v).ok()) else {
+            let Some(u) = form
+                .value()
+                .attr("action")
+                .and_then(|v| resolve_http_url(base, v))
+            else {
                 return false;
             };
             if u.origin() == base.origin() || on_panopto(&u, panopto) {
@@ -172,7 +181,7 @@ pub fn folder_id(url: &Url) -> Option<String> {
     let direct = query_value(url, "folderID").or_else(|| query_value(url, "folderId"));
     let fragment = || {
         url.fragment()
-            .and_then(|fragment| url.join(&format!("?{fragment}")).ok())
+            .and_then(|fragment| resolve_http_url(url, &format!("?{fragment}")))
             .and_then(|u| query_value(&u, "folderID"))
     };
     let value = direct.or_else(fragment)?;

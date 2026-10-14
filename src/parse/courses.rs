@@ -4,8 +4,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    all, first_text, has_any, href_url, link_items, query_id, sel, selected_value, text,
-    week_number,
+    all, first_text, has_any, href_url, link_items, query_id, resolve_http_url, sel,
+    selected_value, text, week_number,
 };
 use crate::{
     date,
@@ -78,8 +78,7 @@ pub fn enrolled_courses(
             .map(str::to_owned);
         rows.push(Course {
             reference: format!("course:{id}"),
-            url: base
-                .join(&format!("/course/view.php?id={id}"))
+            url: resolve_http_url(base, &format!("/course/view.php?id={id}"))
                 .expect("built-in course path")
                 .into(),
             id,
@@ -231,7 +230,9 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
                     .select(&downloads)
                     .find_map(|node| node.value().attr("onclick").and_then(download_url))
             });
-        let url = href.as_deref().and_then(|value| base_url.join(value).ok());
+        let url = href
+            .as_deref()
+            .and_then(|value| resolve_http_url(base_url, value));
         let title = module
             .select(&names)
             .next()
