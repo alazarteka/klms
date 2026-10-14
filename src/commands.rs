@@ -203,7 +203,7 @@ impl Ctx<'_> {
                 CoursesCommand::Show { course } => {
                     let resolved = self.resolve_course(course)?;
                     let response = client.get(&format!("/course/view.php?id={}", resolved.id))?;
-                    let model = parse::course_detail(&response.text, base, resolved);
+                    let model = parse::course_detail(&response.text, base, resolved)?;
                     let professors = match model.professors.is_empty() {
                         true => "unknown".into(),
                         false => model.professors.join(", "),

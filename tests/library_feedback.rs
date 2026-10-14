@@ -446,7 +446,7 @@ fn parent_notice_byte_errors_offer_text_and_only_present_file_candidates() {
 fn ambiguous_content_lists_candidates_and_downloaded_byte_paths_remain_usable() {
     let server = lib_server(|r, _| match r.target.as_str() {
         "/mod/resource/view.php?id=7" => html(
-            "<main><a href='/pluginfile.php/one'>one.txt</a><a href='/pluginfile.php/two'>two.txt</a></main>",
+            "<main><h1>Attachments</h1><a href='/pluginfile.php/one'>one.txt</a><a href='/pluginfile.php/two'>two.txt</a></main>",
         ),
         "/pluginfile.php/two" => Some(Response::bytes("text/plain", "second fixture")),
         _ => None,
@@ -940,7 +940,7 @@ fn truncated_detail_links_never_mark_representations_not_observed() {
     env.sync("");
     // Parser caps mark the observation incomplete without failing the run.
     let truncated = env.sync("");
-    assert_eq!(truncated["data"]["status"], "complete");
+    assert_eq!(truncated["data"]["status"], "incomplete");
     assert_eq!(truncated["data"]["truncated"], 1);
     let lecture = env.data("library show representation:1");
     assert_eq!(lecture["source"]["filename"], "lecture.txt");
