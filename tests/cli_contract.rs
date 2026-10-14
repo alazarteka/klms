@@ -360,7 +360,7 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
     let env = Env::at(&server);
     let out = env.path("notes.pdf");
     let source = format!(
-        "{}/pluginfile.php/7/notes.pdf?token=downloadsecret",
+        "{}/pluginfile.php/7/notes.pdf?forcedownload=1",
         server.url()
     );
     let args = format!("files download '{source}' --out {}", out.display());
@@ -387,7 +387,7 @@ fn download_redacts_source_secrets_and_refuses_replacement() {
     assert_eq!(leftovers, 0, "no temporary file is left behind");
     assert_eq!(
         server.requests(),
-        ["GET /pluginfile.php/7/notes.pdf?token=downloadsecret HTTP/1.1"]
+        ["GET /pluginfile.php/7/notes.pdf?forcedownload=1 HTTP/1.1"]
     );
 }
 
@@ -484,11 +484,11 @@ fn auth_extend_and_time_left_use_allowlisted_ajax_without_persisting_the_sesskey
 }
 
 #[test]
-fn typed_show_rejects_a_mismatched_final_resource() {
+fn typed_show_rejects_a_mismatched_operand_before_transport() {
     let server = html_server("<main>Dashboard</main>");
     let (_, error) = Env::at(&server).fail("assignments show /my/");
-    assert_eq!(server.requests(), ["GET /my/ HTTP/1.1"]);
-    assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED");
+    assert!(server.requests().is_empty());
+    assert_eq!(error["code"], "USAGE");
 }
 
 #[test]
@@ -544,12 +544,12 @@ fn typed_detail_redirects_cannot_silently_change_identity() {
         assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED", "{group}: {error}");
         assert!(error["message"].as_str().unwrap().contains("identity"));
     }
-    // Zero padding and extra parameters keep the same identity.
+    // Zero padding keeps the same identity. Unexpected parameters are refused.
     let server = Server::new(|request| {
         if request.target == "/mod/assign/view.php?id=007" {
             Response::html("")
                 .status("302 Found")
-                .header("Location", "/mod/assign/view.php?id=7&redirect=1")
+                .header("Location", "/mod/assign/view.php?id=7")
         } else {
             Response::html("<main><h1>Requested assignment</h1></main>")
         }
