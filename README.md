@@ -2,8 +2,8 @@
 
 `klms` is a terminal client for KAIST's Learning Management System (KLMS):
 what is due, course notices, grades and attendance, and course file downloads,
-plus an optional private local library. It is read-only toward course data.
-It never submits work, starts quizzes, posts, or checks you into class.
+plus an optional private local library. Activity reads may record views or
+completion; see [side effects and safety](docs/CONTRACT.md#safety).
 
 `klms --help` is the manual: workflow, JSON contract, exit codes and ref
 formats. `klms <command> --help` covers each command.
@@ -51,11 +51,9 @@ rather than being silently omitted.
 
 `klms update --check` reports the latest stable release; `klms update` installs
 it after verifying its SHA-256. Nothing checks for updates unless you ask.
-Earlier releases installed an Agent Skill copy of the help text. The `klms
-skill` command and its SKILL.md are deprecated and `klms --help` is the manual.
-Updating never deletes the old copy; if it is still present, `klms update`
-lists its paths in a warning (the `warnings` array with `--json`) so you can
-delete them yourself.
+The former `klms skill` command and bundled SKILL.md were removed. Updating
+preserves any installed legacy copy and warns with its paths so you can delete
+it yourself.
 
 ## Development
 
