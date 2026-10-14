@@ -406,7 +406,7 @@ impl Ctx<'_> {
     }
 
     fn native_source(&self, page: &crate::client::HtmlResponse) -> Result<Url, AppError> {
-        if page.url.module_kind() != Some("vod") {
+        if module_kind(&page.url) != Some("vod") {
             return Err(AppError::content_unavailable(
                 "video is not a native VOD recording",
             ));

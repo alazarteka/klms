@@ -75,13 +75,20 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
     let explicit_empty = preview_from_document(&document)
         .to_ascii_lowercase()
         .contains("there are no upcoming events");
-    if rows.is_empty()
-        && !explicit_empty
-        && !has_any(
-            &document,
-            &[".calendarwrapper", "[data-region=event-list-content]"],
-        )
-    {
+    let empty_region = document
+        .select(&sel(".calendarwrapper, [data-region=event-list-content]"))
+        .any(|root| root.inner_html().trim().is_empty());
+    let unknown_links = document
+        .select(&sel(
+            ".calendarwrapper a[href*='/mod/'], [data-region=event-list-content] a[href*='/mod/']",
+        ))
+        .any(|anchor| {
+            !anchor
+                .ancestors()
+                .filter_map(ElementRef::wrap)
+                .any(|node| sel(".event, [data-region=event-list-item]").matches(&node))
+        });
+    if (rows.is_empty() && skipped == 0 && !explicit_empty && !empty_region) || unknown_links {
         return Err(AppError::shape(
             "calendar page contained no recognizable event region",
         ));

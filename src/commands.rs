@@ -203,7 +203,7 @@ impl Ctx<'_> {
                 CoursesCommand::Show { course } => {
                     let resolved = self.resolve_course(course)?;
                     let response = client.get(&format!("/course/view.php?id={}", resolved.id))?;
-                    let model = parse::course_detail(&response.text, base, resolved);
+                    let model = parse::course_detail(&response.text, base, resolved)?;
                     let professors = match model.professors.is_empty() {
                         true => "unknown".into(),
                         false => model.professors.join(", "),
@@ -751,15 +751,7 @@ impl Ctx<'_> {
         post: &str,
         command: &'static str,
     ) -> Result<CommandResult, AppError> {
-        let target = if post.starts_with("board-post:") {
-            ResourceRef::parse(post)?.path()
-        } else if post.chars().all(|c| c.is_ascii_digit()) {
-            return Err(AppError::usage(
-                "board post show requires a board-post:BOARD:POST reference or article URL",
-            ));
-        } else {
-            post.into()
-        };
+        let target = module_path(post, &["courseboard-post"])?;
         let response = self.client.get(&target)?;
         let numeric = |key| query_value(&response.url, key).is_some_and(|id| valid_id(&id));
         if response.url.path() != "/mod/courseboard/article.php"
@@ -830,29 +822,48 @@ fn event_row(r: &CalendarEvent) -> String {
 
 fn module_path(target: &str, kinds: &[&str]) -> Result<String, AppError> {
     let url_like = target.starts_with("https://") || target.starts_with("http://");
-    if target.contains(':') && !url_like {
-        let reference = ResourceRef::parse(target)?;
-        if !reference.matches_module(kinds) {
-            return Err(AppError::usage(format!(
-                "resource reference {target:?} does not identify one of: {}",
-                kinds.join(", ")
-            )));
+    let matches = |reference: &ResourceRef| {
+        reference.matches_module(kinds)
+            || (kinds == ["courseboard-post"] && matches!(reference, ResourceRef::BoardPost { .. }))
+    };
+    if target.starts_with('/') || url_like {
+        let base = Url::parse("https://klms.invalid/").expect("fixed URL");
+        let url = base
+            .join(target)
+            .map_err(|_| AppError::usage("invalid detail URL"))?;
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::usage("detail URL must not contain userinfo"));
         }
-        Ok(reference.path())
-    } else if valid_id(target) {
-        match kinds {
-            [kind] => Ok(format!("/mod/{kind}/view.php?id={target}")),
-            _ => Err(AppError::usage(format!(
-                "numeric id {target} is ambiguous; use the typed reference returned by the list command"
-            ))),
-        }
-    } else if target.starts_with('/') || url_like {
-        Ok(target.into())
-    } else {
-        Err(AppError::usage(
-            "expected a canonical resource reference, numeric module id, or same-origin KLMS URL",
-        ))
+        let reference = crate::client::policy::detail_ref(&url)
+            .filter(matches)
+            .ok_or_else(|| AppError::usage("expected this resource kind's detail endpoint with only its identity parameters"))?;
+        // Preserve an absolute operand's origin for the client's same-origin check.
+        return if url_like || target.starts_with("//") {
+            Ok(url.join(&reference.path()).expect("canonical path").into())
+        } else {
+            Ok(reference.path())
+        };
     }
+    let reference = if valid_id(target) {
+        match kinds {
+            [kind] if *kind != "courseboard-post" => {
+                return module_path(&format!("/mod/{kind}/view.php?id={target}"), kinds);
+            }
+            _ => {
+                return Err(AppError::usage(
+                    "numeric id is ambiguous; use a typed reference",
+                ));
+            }
+        }
+    } else {
+        ResourceRef::parse(target)?
+    };
+    if !matches(&reference) {
+        return Err(AppError::usage(
+            "resource reference does not identify this command's resource kind",
+        ));
+    }
+    Ok(reference.path())
 }
 
 fn is_exact(course: &Course, query: &str) -> bool {
@@ -892,6 +903,14 @@ fn report_result(
 }
 
 fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResult, AppError> {
+    let base = Url::parse("https://klms.invalid/").expect("fixed URL");
+    let url = base.join(source).ok();
+    let source = if let Some(url) = url.filter(|url| url.path().starts_with("/pluginfile.php/")) {
+        crate::client::policy::read_url(&url)?;
+        source.to_owned()
+    } else {
+        module_path(source, &["resource", "folder", "coursefile"])?
+    };
     if out.exists() {
         return Err(AppError::config(format!(
             "destination already exists: {}",
@@ -908,7 +927,7 @@ fn download(client: &KlmsClient, source: &str, out: &Path) -> Result<CommandResu
     }
     let temp = parent.join(format!(".klms-download-{}.part", std::process::id()));
     let (response, linked) = publish_download(&temp, out, |file| {
-        client.download_to(source, MAX_DOWNLOAD_BYTES, file)
+        client.download_to(&source, MAX_DOWNLOAD_BYTES, file)
     })
     .map_err(|error| match error {
         PublishError::Fill(error) => error,
@@ -992,35 +1011,7 @@ fn validate_read_target(value: &str) -> Result<(), AppError> {
     let base = Url::parse("https://klms.invalid/").expect("valid fixed URL");
     let url =
         (base.join(value)).map_err(|e| AppError::usage(format!("invalid request target: {e}")))?;
-    let path = url.path();
-    let module =
-        path.starts_with("/mod/") && (path.ends_with("/view.php") || path.ends_with("/index.php"));
-    let exact = [
-        "/my/",
-        "/course/view.php",
-        "/calendar/view.php",
-        "/local/lmsattendance/index.php",
-    ];
-    if !(module
-        || exact.contains(&path)
-        || path.starts_with("/grade/report/")
-        || path.starts_with("/pluginfile.php/"))
-    {
-        return Err(AppError::usage(
-            "request get accepts known content-read paths only; use a typed command when available",
-        ));
-    }
-    let refused = |key: &str| {
-        safe_url::sensitive_key(key)
-            || ["action", "delete", "confirm", "logout"]
-                .contains(&key.to_ascii_lowercase().as_str())
-    };
-    if url.query_pairs().any(|(key, _)| refused(&key)) {
-        return Err(AppError::usage(
-            "request get refuses action and secret query parameters",
-        ));
-    }
-    Ok(())
+    crate::client::policy::read_url(&url)
 }
 
 fn redact_secrets(value: &str) -> String {
