@@ -139,7 +139,7 @@ impl KlmsClient {
         })
     }
 
-    fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
+    pub(crate) fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let mut response = self.send_get(path)?;
         let bytes = read_capped(&mut response, max_bytes)?;
         check_logged_out(&response, &bytes)?;

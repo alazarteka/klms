@@ -4,8 +4,7 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    NEXT_PAGE_SELECTORS, collection_shape, has_any, href_url, module_view, query_id, sel, text,
-    visible_text,
+    NEXT_PAGE_SELECTORS, has_any, href_url, module_view, query_id, sel, text, visible_text,
 };
 use crate::{
     date,
@@ -18,6 +17,7 @@ use crate::{
 pub struct CalendarPage {
     pub events: Vec<CalendarEvent>,
     pub complete: bool,
+    pub skipped: usize,
     pub unparsed_times: usize,
     pub undated_events: usize,
     pub missing_course_ids: usize,
@@ -29,12 +29,20 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
     let course_links = sel("a[href*='course/view.php']");
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
-    let mut parsed_events = HashSet::new();
+    if !has_any(
+        &document,
+        &[".calendarwrapper", "[data-region=event-list-content]"],
+    ) {
+        return Err(AppError::shape("calendar region is missing"));
+    }
+    let mut skipped = 0;
     for event in document.select(&sel(".calendarwrapper .event, .calendarwrapper [data-region=event-list-item], [data-region=event-list-content] .event, [data-region=event-list-content] [data-region=event-list-item]")) {
-        let Some((anchor, url)) = event_link(event, base_url)? else {
+        // Recognizable event records without a usable action link are incomplete.
+        let Some((anchor, url)) = event_link(event, base_url) else {
+            skipped += usize::from(event.value().attr("data-event-id").is_some()
+                || event.value().attr("data-region") == Some("event-list-item"));
             continue;
         };
-        parsed_events.insert(event.id());
         let attr = |name: &str| event.value().attr(name);
         let kind = attr("data-event-component")
             .and_then(|value| value.strip_prefix("mod_"))
@@ -74,19 +82,6 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
             url: safe_url::display(&url),
         });
     }
-    collection_shape(
-        &document,
-        ".calendarwrapper, [data-region=event-list-content]",
-        base_url,
-        |url| module_view(url) || url.path() == "/calendar/event.php",
-        |anchor, url| {
-            anchor
-                .ancestors()
-                .any(|node| parsed_events.contains(&node.id()))
-                && event_identity(url.clone())
-                    .is_some_and(|url| rows.iter().any(|row| row.url == safe_url::display(&url)))
-        },
-    )?;
     // A time that is present but unreadable suggests changed markup; an event
     // with no time at all (e.g. a quiz without a close date) is simply undated.
     let count = |keep: &dyn Fn(&CalendarEvent) -> bool| rows.iter().filter(|e| keep(e)).count();
@@ -96,56 +91,35 @@ pub fn calendar_page(html: &str, base_url: &Url, today: &str) -> Result<Calendar
     let has_next = has_any(&document, NEXT_PAGE_SELECTORS);
     Ok(CalendarPage {
         events: rows,
-        complete: !has_next,
+        complete: !has_next && skipped == 0,
+        skipped,
         unparsed_times,
         undated_events,
         missing_course_ids,
     })
 }
 
-fn event_link<'a>(
-    event: ElementRef<'a>,
-    base_url: &Url,
-) -> Result<Option<(ElementRef<'a>, Url)>, AppError> {
-    let mut candidates: Vec<_> = event.select(&sel(".card-footer a[href]")).collect();
-    if candidates.is_empty() {
-        candidates = event.select(&sel("a[href]")).collect();
-    }
-    let mut selected: Option<(ElementRef<'a>, Url)> = None;
-    for anchor in candidates {
-        let Some(url) = href_url(anchor, base_url) else {
-            continue;
-        };
-        let path = url.path();
+fn event_link<'a>(event: ElementRef<'a>, base_url: &Url) -> Option<(ElementRef<'a>, Url)> {
+    // Description HTML may cross-link unrelated modules; only actions identify this event.
+    let actions = sel(
+        ".card-header a[href], .card-footer a[href], h3.name a[href], [data-region=event-name] a[href]",
+    );
+    let mut links = event.select(&actions).filter_map(|anchor| {
+        let mut url = href_url(anchor, base_url)?;
         if url.origin() != base_url.origin()
-            || !(module_view(&url) || path == "/calendar/event.php")
+            || !(module_view(&url) || url.path() == "/calendar/event.php")
         {
-            continue;
+            return None;
         }
-        // A footer action identifies the module, but is never a read target.
-        // Retain only its numeric identity, dropping action/token parameters.
-        let Some(url) = event_identity(url) else {
-            continue;
-        };
-        if selected
-            .as_ref()
-            .is_some_and(|(_, previous)| previous != &url)
-        {
-            return Err(AppError::shape(
-                "calendar event has ambiguous resource links",
-            ));
-        }
-        selected = Some((anchor, url));
-    }
-    Ok(selected)
-}
-
-fn event_identity(mut url: Url) -> Option<Url> {
-    let id = query_id(&url, &["id"])?;
-    url.set_query(None);
-    url.set_fragment(None);
-    url.query_pairs_mut().append_pair("id", &id);
-    Some(url)
+        // Actions identify the module, but are never read targets: discard their parameters.
+        let id = query_id(&url, &["id"])?;
+        url.set_query(None);
+        url.set_fragment(None);
+        url.query_pairs_mut().append_pair("id", &id);
+        Some((anchor, url))
+    });
+    let selected = links.next()?;
+    links.all(|(_, url)| url == selected.1).then_some(selected)
 }
 
 fn event_time(
@@ -226,6 +200,7 @@ mod tests {
             let event = &page.events[0];
             assert_eq!(event.title, "Reading response is due");
             assert_eq!(event.reference.as_deref(), Some("assign:7"));
+            assert_eq!(event.course_id.as_deref(), Some("42"));
             assert_eq!(event.url, format!("{BASE}/mod/assign/view.php?id=7"));
             assert_eq!(
                 event.starts_at.as_deref(),
@@ -254,66 +229,47 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_resources_and_empty_pages_fail_visibly() {
-        let base = Url::parse(BASE).unwrap();
-        let ambiguous = "<main class='calendarwrapper'><div class='event'><a href='/mod/assign/view.php?id=7'>Work</a><a href='/mod/assign/view.php?id=8'>Other work</a></div></main>";
-        assert!(calendar_page(ambiguous, &base, "2030-12-31").is_err());
-        assert!(
-            calendar_page("<html><body>maintenance</body></html>", &base, "2030-12-31").is_err()
+    fn ambiguous_actions_are_skipped_and_missing_regions_fail() {
+        let ambiguous = page(
+            "<div class='event' data-event-id='1'><div class='card-footer'><a href='/mod/assign/view.php?id=7'>Work</a><a href='/mod/assign/view.php?id=8'>Other</a></div></div>",
         );
+        assert!(!ambiguous.complete);
+        assert_eq!(ambiguous.skipped, 1);
         assert!(
-            calendar_page("<main class='calendarwrapper'></main>", &base, "2030-12-31").is_ok()
+            calendar_page(
+                "<main>Maintenance</main>",
+                &Url::parse(BASE).unwrap(),
+                "2030-12-31"
+            )
+            .is_err()
         );
+        assert!(page("").complete);
     }
 
     #[test]
     fn counts_unreadable_and_undated_events_and_accepts_empty_chrome() {
-        let work = "<a href='/mod/assign/view.php?id=7'>Work</a>";
-        let invalid = page(&format!(
-            "<div class='event'>{work}<time datetime='invalid'></time></div>"
-        ));
-        assert_eq!((invalid.unparsed_times, invalid.undated_events), (1, 0));
+        for (time, unparsed, undated) in [
+            ("<time datetime='invalid'></time>", 1, 0),
+            ("<time>sometime</time>", 1, 0),
+            ("", 0, 1),
+        ] {
+            let parsed = page(&format!(
+                "<div class='event'><div class='card-footer'><a href='/mod/quiz/view.php?id=9'>Quiz</a></div>{time}</div>"
+            ));
+            assert_eq!(
+                (parsed.unparsed_times, parsed.undated_events),
+                (unparsed, undated)
+            );
+            assert_eq!(parsed.missing_course_ids, 1);
+        }
         assert!(page("<div class='event'>No detail link</div>").complete);
-        let unparsed = page(&format!(
-            "<div class='event'>{work}<time>sometime</time></div>"
-        ));
-        assert_eq!(
-            (unparsed.unparsed_times, unparsed.missing_course_ids),
-            (1, 1)
-        );
-        let quiz =
-            page("<div class='event'><a href='/mod/quiz/view.php?id=9'>Attempt quiz now</a></div>");
-        assert_eq!((quiz.unparsed_times, quiz.undated_events), (0, 1));
-    }
-
-    #[test]
-    fn parses_typed_event_with_course_and_time() {
-        let html = r#"<main id='region-main' class='calendarwrapper'><div class='event'>
-          <a href='/mod/assign/view.php?id=7'>Written work is due</a>
-          <a href='/course/view.php?id=42'>Compilers</a>
-          <time datetime='2026-09-01T23:59:00+09:00'>Tuesday, 1 September 2026, 11:59 PM</time>
-          </div></main>"#;
-        let rows = calendar_page(
-            html,
-            &Url::parse(BASE).unwrap(),
-            &crate::date::seoul_today(),
-        )
-        .unwrap()
-        .events;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].reference.as_deref(), Some("assign:7"));
-        assert_eq!(rows[0].course_id.as_deref(), Some("42"));
-        assert_eq!(
-            rows[0].starts_at.as_deref(),
-            Some("2026-09-01T23:59:00+09:00")
-        );
     }
 
     #[test]
     fn preserves_distinct_events_that_share_a_module_url() {
         let page = page(
-            "<div class='event'><a href='/mod/quiz/view.php?id=8'>Quiz opens</a><time datetime='2026-09-01T09:00:00+09:00'>open</time></div>\
-             <div class='event'><a href='/mod/quiz/view.php?id=8'>Quiz closes</a><time datetime='2026-09-02T18:00:00+09:00'>close</time></div>",
+            "<div class='event'><div class='card-footer'><a href='/mod/quiz/view.php?id=8'>Quiz opens</a></div><time datetime='2026-09-01T09:00:00+09:00'>open</time></div>\
+             <div class='event'><div class='card-footer'><a href='/mod/quiz/view.php?id=8'>Quiz closes</a></div><time datetime='2026-09-02T18:00:00+09:00'>close</time></div>",
         );
         assert_eq!(page.events.len(), 2);
         assert!(page.complete);

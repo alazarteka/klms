@@ -39,13 +39,21 @@ pub fn resource_detail(
     url: &Url,
     kind: &str,
 ) -> Result<ResourceDetail, AppError> {
-    let document = Html::parse_document(html);
+    let inline = kind == "folder" && base_url.path() == "/course/view.php";
+    let fragment = inline
+        .then(|| {
+            super::embedded_activity(html, query_id(url, &["id"]).as_deref().unwrap_or_default())
+        })
+        .transpose()?;
+    let document = Html::parse_document(fragment.as_deref().unwrap_or(html));
     let board_post = kind == "courseboard-post";
     let (title, text_value, mut links) = if board_post {
         notice_content(&document, base_url)?
     } else {
-        page_identity(&document, kind, query_id(url, &["id"]).as_deref())?;
-        if !has_any(&document, &["#region-main", "[role=main]", "main"]) {
+        if !inline {
+            page_identity(&document, kind, query_id(url, &["id"]).as_deref())?;
+        }
+        if !inline && !has_any(&document, &["#region-main", "[role=main]", "main"]) {
             return Err(AppError::shape(
                 "detail page contained no recognizable resource region",
             ));
@@ -54,6 +62,7 @@ pub fn resource_detail(
             &document,
             ".page-header-headings h1, #page-header h1, h1, title",
         )
+        .or_else(|| fragment.as_deref().and_then(super::embedded_title))
         .unwrap_or_else(|| format!("{kind} detail"));
         let content = content_root(&document);
         let links = content

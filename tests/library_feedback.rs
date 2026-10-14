@@ -221,7 +221,7 @@ fn previously_observed_file_without_bytes_directs_to_parent_not_download_retry()
     let gone = Counter::default();
     let flag = gone.clone();
     let server = lib_server(move |r, _| {
-        (r.target == "/mod/resource/view.php?id=7" && flag.get() == 1).then(|| {
+        (r.target == "/mod/resource/view.php?id=7&forceview=1" && flag.get() == 1).then(|| {
             Response::html(
                 "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture</h1><p>The current observation has no file links.</p></main>",
             )
@@ -361,7 +361,7 @@ fn empty_and_truncated_local_collections_keep_feedback_in_the_correct_stream() {
 #[test]
 fn partial_sync_succeeds_with_incomplete_summary_and_failure_warnings() {
     let server = lib_server(|r, _| {
-        (r.target == "/mod/resource/view.php?id=7")
+        (r.target == "/mod/resource/view.php?id=7&forceview=1")
             .then(|| Response::html("temporarily unavailable").status("503 Service Unavailable"))
     });
     let env = Env::at(&server);
@@ -471,7 +471,7 @@ fn parent_notice_byte_errors_offer_text_and_only_present_file_candidates() {
 #[test]
 fn ambiguous_content_lists_candidates_and_downloaded_byte_paths_remain_usable() {
     let server = lib_server(|r, _| match r.target.as_str() {
-        "/mod/resource/view.php?id=7" => html(
+        "/mod/resource/view.php?id=7&forceview=1" => html(
             "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Attachments</h1><a href='/pluginfile.php/one'>one.txt</a><a href='/pluginfile.php/two'>two.txt</a></main>",
         ),
         "/pluginfile.php/two" => Some(Response::bytes("text/plain", "second fixture")),
@@ -916,11 +916,11 @@ fn course_and_resource_remote_states_follow_the_source() {
     // Forbidden details record access lost then restored; a complete manifest without a
     // resource marks it not observed; failed details keep the stored state.
     let server = lib_server(|r, run| match (r.target.as_str(), run) {
-        ("/mod/resource/view.php?id=7", 1) => {
+        ("/mod/resource/view.php?id=7&forceview=1", 1) => {
             Some(Response::html("forbidden").status("403 Forbidden"))
         }
         ("/course/view.php?id=42", 3) => html(course(&[])),
-        ("/mod/resource/view.php?id=7", 4) => {
+        ("/mod/resource/view.php?id=7&forceview=1", 4) => {
             Some(Response::html("failed").status("500 Internal Server Error"))
         }
         _ => None,
@@ -959,7 +959,7 @@ fn truncated_detail_links_never_mark_representations_not_observed() {
         })
         .collect();
     let server = lib_server(move |r, run| {
-        (r.target == "/mod/resource/view.php?id=7" && run == 1)
+        (r.target == "/mod/resource/view.php?id=7&forceview=1" && run == 1)
             .then(|| Response::html(format!("<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture One</h1>{many}</main>")))
     });
     let env = Env::at(&server);
@@ -985,7 +985,7 @@ fn truncated_detail_links_never_mark_representations_not_observed() {
 fn reverted_source_keeps_every_observation_in_history() {
     let server = lib_server(|r, run| match r.target.as_str() {
         "/my/" if run == 1 => html("<a href='/course/view.php?id=42'>Renamed Compilers</a>"),
-        "/mod/resource/view.php?id=7" if run == 1 => html(
+        "/mod/resource/view.php?id=7&forceview=1" if run == 1 => html(
             "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture One</h1><p>revised body</p></main>",
         ),
         _ => None,
@@ -1072,7 +1072,7 @@ fn curation_edits_conflict_retract_search_and_relations() {
 #[test]
 fn summary_goes_stale_after_source_change() {
     let server = lib_server(|r, run| {
-        (r.target == "/mod/resource/view.php?id=7")
+        (r.target == "/mod/resource/view.php?id=7&forceview=1")
             .then(|| Response::html(format!("<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture</h1><p>body {run}</p></main>")))
     });
     let env = Env::at(&server);
@@ -1270,7 +1270,7 @@ fn detail_response_keys_types_and_curation_remain_stable() {
 #[test]
 fn download_frontier_follows_representation_order_and_sync_reads_all_weeks() {
     let server = lib_server(|r, _| match r.target.as_str() {
-        "/mod/resource/view.php?id=7" => html(
+        "/mod/resource/view.php?id=7&forceview=1" => html(
             "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture</h1><a href='/pluginfile.php/z'>z.txt</a>\
              <a href='/pluginfile.php/a'>a.txt</a><a href='/pluginfile.php/m'>m.txt</a></main>",
         ),
@@ -1315,9 +1315,11 @@ fn download_frontier_follows_representation_order_and_sync_reads_all_weeks() {
             ("resource", 3, "Week 1 slides"),
             ("resource", 7, "Week 5 slides"),
         ])),
-        "/mod/resource/view.php?id=3" | "/mod/resource/view.php?id=7" => html(
-            "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Slides</h1><p>no files</p></main>",
-        ),
+        "/mod/resource/view.php?id=3&forceview=1" | "/mod/resource/view.php?id=7&forceview=1" => {
+            html(
+                "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Slides</h1><p>no files</p></main>",
+            )
+        }
         _ => None,
     });
     let env = Env::at(&server);

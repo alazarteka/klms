@@ -350,24 +350,48 @@ fn collect_course(
                 )
         });
         if let Some(url) = detail_url {
-            let detail = client.get(url).and_then(|response| {
-                parse::resource_detail(&response.text, base_url, &response.url, &activity.kind)
-            });
-            match detail {
-                Ok(detail) => {
-                    row.complete = !detail.text_truncated && !detail.links_truncated;
-                    row.representations_complete = !detail.links_truncated;
-                    row.text = Some(detail.text.clone());
-                    row.links = detail.links.clone();
-                    row.source = json!({"activity": activity, "detail": detail});
-                }
-                Err(error) => {
-                    row.observe = false;
-                    row.complete = false;
-                    row.source["detail"]["state"] = json!("incomplete");
-                    row.access_lost = error.code == "PERMISSION_DENIED";
-                    failures.push(format!("{reference}: {}", error.message));
-                }
+            let detail = Url::parse(url)
+                .map_err(|_| AppError::shape("invalid activity URL"))
+                .and_then(|mut url| {
+                    crate::client::policy::read_url(&url)?;
+                    if activity.kind == "resource" {
+                        let pairs: Vec<_> = url
+                            .query_pairs()
+                            .filter(|(key, _)| key != "forceview")
+                            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                            .collect();
+                        url.query_pairs_mut()
+                            .clear()
+                            .extend_pairs(pairs)
+                            .append_pair("forceview", "1");
+                    }
+                    let response = client.get_bytes(url.as_str(), MAX_DOWNLOAD)?;
+                    if crate::client::policy::pluginfile(&response.url) {
+                        row.links.push(LinkItem {
+                            title: activity.title.clone(),
+                            url: response.url.to_string(),
+                        });
+                        row.source["detail"] =
+                            json!({"state": "representation", "url": response.url.as_str()});
+                        row.representations_complete = true;
+                    } else {
+                        let text = String::from_utf8_lossy(&response.bytes);
+                        let detail =
+                            parse::resource_detail(&text, &response.url, &url, &activity.kind)?;
+                        row.complete = !detail.text_truncated && !detail.links_truncated;
+                        row.representations_complete = !detail.links_truncated;
+                        row.source["detail"] = json!(detail);
+                        row.text = Some(detail.text);
+                        row.links = detail.links;
+                    }
+                    Ok::<_, AppError>(())
+                });
+            if let Err(error) = detail {
+                row.observe = false;
+                row.complete = false;
+                row.source["detail"]["state"] = json!("incomplete");
+                row.access_lost = error.code == "PERMISSION_DENIED";
+                failures.push(format!("{reference}: {}", error.message));
             }
         }
         if let (true, "courseboard", Some(url)) =
