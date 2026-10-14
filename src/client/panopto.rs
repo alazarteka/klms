@@ -5,7 +5,6 @@ use super::stream::{self, Expect, Limits};
 use crate::{
     error::AppError,
     http::{self, Follow, Method, Payload},
-    parse::video,
     url::{Url, form_urlencode},
 };
 pub use exchange::launch;
@@ -68,7 +67,7 @@ impl Config {
     }
 }
 fn same_origin(u: &Url, origin: &Url) -> bool {
-    u.origin() == origin.origin() && u.username().is_empty() && u.password().is_none()
+    u.origin() == origin.origin() && !crate::url::has_userinfo(u)
 }
 
 pub struct Session {
@@ -136,7 +135,7 @@ impl Session {
                     "this Panopto activity is a collection; choose a recording reference",
                 )
             })?;
-        if !video::uuid(&id) {
+        if !crate::reference::valid_uuid(&id) {
             return Err(AppError::usage("invalid Panopto recording UUID"));
         }
         let pairs = [
@@ -179,7 +178,7 @@ impl Session {
             .folder
             .clone()
             .ok_or_else(|| AppError::shape("Panopto collection omitted folder identifier"))?;
-        if !video::uuid(&folder) {
+        if !crate::reference::valid_uuid(&folder) {
             return Err(AppError::shape("Panopto folder identifier was invalid"));
         }
         folder::collect(|page| {

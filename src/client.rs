@@ -561,10 +561,7 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
 }
 
 fn looks_logged_out(url: &Url, html: &str) -> bool {
-    let lower = html.to_ascii_lowercase();
-    url.path().to_ascii_lowercase().contains("/login/")
-        || lower.contains("name=\"username\"") && lower.contains("name=\"password\"")
-        || lower.contains("id=\"loginbtn\"")
+    url.path().to_ascii_lowercase().contains("/login/") || crate::parse::login_markup(html)
 }
 
 /// Separate unauthenticated transport for explicit release checks/downloads.

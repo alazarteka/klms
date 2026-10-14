@@ -1,3 +1,4 @@
+use crate::models::Semester;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -566,25 +567,6 @@ pub struct AuthLoginArgs {
         conflicts_with_all = ["user", "method", "second_factor", "remember_password", "insecure_storage"]
     )]
     pub code: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Semester {
-    Spring,
-    Summer,
-    Fall,
-    Winter,
-}
-
-impl Semester {
-    pub fn course_suffix(self) -> &'static str {
-        match self {
-            Self::Spring => "1",
-            Self::Summer => "2",
-            Self::Fall => "3",
-            Self::Winter => "4",
-        }
-    }
 }
 
 #[derive(Debug, Args)]

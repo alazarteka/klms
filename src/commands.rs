@@ -60,11 +60,7 @@ pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
                     insecure_storage: login.insecure_storage,
                     code: login.code.clone(),
                 };
-                let sso = match base.host_str() == Some("klms.kaist.ac.kr") {
-                    true => Url::parse("https://sso.kaist.ac.kr/").expect("valid SSO URL"),
-                    false => base.clone(),
-                };
-                return auth::login(&base, &sso, cli.timeout, &options, cli.json);
+                return auth::login(&base, cli.timeout, &options, cli.json);
             }
             AuthCommand::Logout => return auth::logout(),
             AuthCommand::Forget => return auth::forget(),
@@ -831,7 +827,7 @@ fn module_path(target: &str, kinds: &[&str]) -> Result<String, AppError> {
         let url = base
             .join(target)
             .map_err(|_| AppError::usage("invalid detail URL"))?;
-        if !url.username().is_empty() || url.password().is_some() {
+        if crate::url::has_userinfo(&url) {
             return Err(AppError::usage("detail URL must not contain userinfo"));
         }
         let reference = crate::client::policy::detail_ref(&url)
