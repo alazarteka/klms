@@ -9,7 +9,7 @@ use ureq::Agent;
 use crate::{
     error::AppError,
     http::{self, Failure, Follow, Method, Payload, Response},
-    url::Url,
+    url::{Url, is_http_loopback},
 };
 
 use super::cookies::Jar;
@@ -30,7 +30,7 @@ impl SsoTransport {
             && klms.host_str() == Some("klms.kaist.ac.kr")
             && sso.scheme() == "https"
             && sso.host_str() == Some("sso.kaist.ac.kr");
-        let loopback = klms.is_http_loopback() && sso.is_http_loopback();
+        let loopback = is_http_loopback(&klms) && is_http_loopback(&sso);
         if !production && !loopback {
             return Err(AppError::config(
                 "native login permits only KAIST production origins or loopback test origins",

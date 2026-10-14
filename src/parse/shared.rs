@@ -118,19 +118,19 @@ pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
         .and_then(|href| base_url.join(href).ok())
 }
 
-/// An absolute link in a scheme other than http(s) (`mailto:`, `tel:`, ...),
-/// kept as written without its fragment so it is shown but never fetched.
-/// Script and inline-data URLs are not links a reader can follow.
+/// Foreign hierarchical links are redacted; only mailto/tel opaque links are
+/// kept as written without a fragment. These links are shown, never fetched.
 fn foreign_link(href: &str) -> Option<String> {
     let href = href.trim();
-    let (scheme, _) = href.split_once(':')?;
-    let mut chars = scheme.chars();
-    let valid = chars.next()?.is_ascii_alphabetic()
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    let scheme = scheme.to_ascii_lowercase();
-    let foreign = !matches!(scheme.as_str(), "http" | "https" | "javascript" | "data");
-    let link = href.split('#').next()?;
-    (valid && foreign).then(|| link.to_owned())
+    let url = Url::parse(href).ok()?;
+    if matches!(url.scheme(), "http" | "https" | "javascript" | "data") {
+        return None;
+    }
+    if !url.cannot_be_a_base() {
+        return Some(safe_url::display(&url));
+    }
+    matches!(url.scheme(), "mailto" | "tel")
+        .then(|| href.split('#').next().unwrap_or(href).to_owned())
 }
 
 /// Titled, de-duplicated links from `anchors`, stopping at `limit`.
@@ -147,8 +147,8 @@ pub(super) fn link_items<'a>(
             continue;
         };
         let url = match base_url.join(href) {
-            Ok(url) => safe_url::display(&url),
-            Err(_) => match foreign_link(href) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") => safe_url::display(&url),
+            _ => match foreign_link(href) {
                 Some(link) => link,
                 None => continue,
             },
@@ -261,6 +261,24 @@ pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_links_redact_hierarchical_secrets_and_drop_unknown_opaque_schemes() {
+        let base = Url::parse("https://klms.kaist.ac.kr/").unwrap();
+        let html = Html::parse_document(
+            "<a href='ftp://student:synthetic-password@example.test/path?token=synthetic-token#secret'>FTP</a>\
+             <a href='mailto:ta@example.test?subject=HW#top'>Mail</a>\
+             <a href='tel:+82-42-000-0000'>Phone</a>\
+             <a href='javascript:alert(1)'>Script</a>\
+             <a href='data:text/plain,secret'>Data</a>\
+             <a href='unknown:secret?token=synthetic-token'>Opaque</a>",
+        );
+        let links = link_items(html.select(&sel("a")), &base, 20);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "ftp://example.test/path?token=%5BREDACTED%5D");
+        assert_eq!(links[1].url, "mailto:ta@example.test?subject=HW");
+        assert_eq!(links[2].url, "tel:+82-42-000-0000");
+    }
 
     #[test]
     fn overlapping_headers_keep_values_and_links_in_the_same_column() {

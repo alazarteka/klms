@@ -8,7 +8,7 @@ use crate::{
     error::AppError,
     http::{self, Follow, Method, Payload, Response},
     parse::video,
-    url::{Url, form_urlencode},
+    url::{Url, form_urlencode, query_value},
 };
 use std::{io::Read, time::Duration};
 
@@ -134,8 +134,8 @@ pub fn launch(
                     | "/Panopto/Pages/EmbeddedList.aspx"
             )
         {
-            policy.bearer = current.query_value("access_token");
-            let recording = current.query_value("id").filter(|id| video::uuid(id));
+            policy.bearer = query_value(&current, "access_token");
+            let recording = query_value(&current, "id").filter(|id| video::uuid(id));
             let folder = video::folder_id(&current);
             policy.delivery_only = true;
             policy.cookie.clear();
