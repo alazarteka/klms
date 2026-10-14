@@ -5,6 +5,7 @@ mod commands;
 mod corpus;
 mod course_pages;
 mod date;
+mod digest;
 mod error;
 #[cfg(test)]
 #[path = "../tests/fixture/executable.rs"]
