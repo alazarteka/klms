@@ -57,7 +57,7 @@ impl Secrets {
         }
     }
 
-    fn secret_tool(&self) -> Option<PathBuf> {
+    pub(super) fn secret_tool(&self) -> Option<PathBuf> {
         std::env::split_paths(&self.search_path)
             .map(|dir| dir.join("secret-tool"))
             .find(|path| {
@@ -235,7 +235,52 @@ fn write_credentials(path: &Path, file: &CredentialFile) -> Result<(), AppError>
     }
 }
 
+fn clear_secret_service(program: &Path, account: Option<&str>) -> Result<bool, AppError> {
+    let mut args = vec!["clear", "service", SERVICE];
+    if let Some(account) = account {
+        args.extend(["account", account]);
+    }
+    let finished = run_helper(program, &args, None)?;
+    let removed = match (finished.code, finished.stderr.is_empty()) {
+        (Some(0), true) => true,
+        (Some(1), true) => false,
+        _ => return Err(finished.failure("Secret Service delete")),
+    };
+    // clear skips locked items. search --all includes them, without unlocking;
+    // never expose its output (which may include secrets).
+    args[0] = "search";
+    args.insert(1, "--all");
+    let remaining = run_helper(program, &args, None)?;
+    if remaining.code != Some(0) || !remaining.stderr.is_empty() || !remaining.stdout.is_empty() {
+        return Err(AppError::config(
+            "could not confirm Secret Service deletion; klms entries may remain (unlock the keyring and retry `klms auth forget`)",
+        ));
+    }
+    Ok(removed)
+}
+
 impl Backend {
+    /// Delete every account in klms's dedicated service namespace.
+    /// `true` means at least one item was removed; errors leave the result unknown.
+    pub fn clear_all(&self) -> Result<bool, AppError> {
+        match self {
+            Self::Keychain(program) => {
+                let mut removed = false;
+                loop {
+                    let finished =
+                        run_helper(program, &["delete-generic-password", "-s", SERVICE], None)?;
+                    match finished.code {
+                        Some(0) => removed = true,
+                        Some(44) => return Ok(removed),
+                        _ => return Err(finished.failure("macOS keychain delete")),
+                    }
+                }
+            }
+            Self::SecretService(program) => clear_secret_service(program, None),
+            Self::File(path) => remove_file(path, "credentials file"),
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Keychain(_) => KEYCHAIN,
@@ -287,9 +332,18 @@ impl Backend {
                 let stored = stored.as_ref().ok().and_then(Option::as_deref);
                 if finished.code != Some(0) || stored.map(String::as_str) != Some(secret) {
                     // Whatever did land there is not the password we meant.
-                    let _ = self.clear(account);
-                    return Err(AppError::config("the macOS keychain did not accept the password")
-                        .with_hint("Unlock the login keychain and retry, or omit `--remember-password`."));
+                    let mut error = AppError::config(
+                        "the macOS keychain did not accept the password",
+                    )
+                    .with_hint(
+                        "Unlock the login keychain and retry, or omit `--remember-password`.",
+                    );
+                    if let Err(cleanup) = self.clear(account) {
+                        error
+                            .message
+                            .push_str(&format!("; rollback failed: {}", cleanup.message));
+                    }
+                    return Err(error);
                 }
                 Ok(())
             }
@@ -359,14 +413,7 @@ impl Backend {
                     _ => Err(finished.failure("macOS keychain delete")),
                 }
             }
-            Self::SecretService(program) => {
-                let args = ["clear", "service", SERVICE, "account", account];
-                let finished = run_helper(program, &args, None)?;
-                match (finished.code, finished.stderr.is_empty()) {
-                    (Some(0), _) | (Some(1), true) => Ok(()),
-                    _ => Err(finished.failure("Secret Service delete")),
-                }
-            }
+            Self::SecretService(program) => clear_secret_service(program, Some(account)).map(drop),
             Self::File(path) => {
                 let mut file = read_credentials(path)?;
                 if file.passwords.remove(account).is_some() {
