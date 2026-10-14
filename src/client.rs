@@ -137,7 +137,7 @@ impl KlmsClient {
         })
     }
 
-    pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
+    fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let mut response = self.send_get(path)?;
         let bytes = read_capped(&mut response, max_bytes)?;
         check_logged_out(&response, &bytes)?;
@@ -499,7 +499,6 @@ fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Res
     }
 }
 
-/// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
 fn read_prefix(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
     http::read_prefix(response, max_bytes as u64)
         .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))

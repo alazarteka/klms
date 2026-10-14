@@ -325,6 +325,11 @@ fn download_sweeps_only_stale_temporaries_beside_the_output() {
     }
     std::os::unix::fs::symlink(&unrelated, &symlink).unwrap();
     age(&stale_scratch);
+    // The maximum 24-hour download deadline must remain within the retention window.
+    std::fs::File::open(&fresh_part)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(24 * 60 * 60))
+        .unwrap();
     run(&f, &download(&dir.path().join("lecture.mp4"))).unwrap();
     let mut left = std::fs::read_dir(dir.path())
         .unwrap()

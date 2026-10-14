@@ -114,241 +114,241 @@ impl Run<'_> {
         }
         Ok(())
     }
-}
 
-pub(super) fn upsert_course(x: &Run, course: &Course) -> Result<i64, AppError> {
-    let digest = digest_json(course)?;
-    let existing = x.existing(
-        ("courses", "course_observations", "course_id"),
-        "t.ref=?1",
-        [&course.reference],
-    )?;
-    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
-    let changed = previous != Some(digest.as_str());
-    let (id, event) = match &existing {
-        Some(e) => {
-            x.c.execute(
-                "UPDATE courses SET remote_state='listed',last_seen=?1,not_listed_since=NULL
+    pub(super) fn upsert_course(&self, course: &Course) -> Result<i64, AppError> {
+        let digest = digest_json(course)?;
+        let existing = self.existing(
+            ("courses", "course_observations", "course_id"),
+            "t.ref=?1",
+            [&course.reference],
+        )?;
+        let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+        let changed = previous != Some(digest.as_str());
+        let (id, event) = match &existing {
+            Some(e) => {
+                self.c.execute(
+                    "UPDATE courses SET remote_state='listed',last_seen=?1,not_listed_since=NULL
                   WHERE id=?2",
-                params![x.at, e.id],
-            )?;
-            let event = if e.state != "listed" {
-                Some("course_reappeared")
-            } else {
-                changed.then_some("course_source_changed")
-            };
-            (e.id, event)
-        }
-        None => {
-            let id = x.insert_id(
-                "INSERT INTO courses(ref,first_seen,last_seen) VALUES(?1,?2,?2)",
-                params![course.reference, x.at],
-            )?;
-            (id, Some("course_appeared"))
-        }
-    };
-    if changed {
-        x.c.execute(
-            "INSERT INTO course_observations(
+                    params![self.at, e.id],
+                )?;
+                let event = if e.state != "listed" {
+                    Some("course_reappeared")
+                } else {
+                    changed.then_some("course_source_changed")
+                };
+                (e.id, event)
+            }
+            None => {
+                let id = self.insert_id(
+                    "INSERT INTO courses(ref,first_seen,last_seen) VALUES(?1,?2,?2)",
+                    params![course.reference, self.at],
+                )?;
+                (id, Some("course_appeared"))
+            }
+        };
+        if changed {
+            self.c.execute(
+                "INSERT INTO course_observations(
                course_id,sync_run_id,observed_at,digest,title,code,term,url
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                id,
-                x.id,
-                x.at,
-                digest,
-                course.title,
-                course.code,
-                course.term,
-                course.url
-            ],
-        )?;
-    }
-    if let Some(kind) = event {
-        let details = json!({"title": course.title});
-        x.change(
-            kind,
-            &course.reference,
-            previous,
-            Some(&digest),
-            Some(details),
-        )?;
-    }
-    Ok(id)
-}
-
-pub(super) fn upsert_resource(
-    x: &Run,
-    course_id: i64,
-    resource: &PendingResource,
-) -> Result<i64, AppError> {
-    let existing = x.existing(
-        ("resources", "resource_observations", "resource_id"),
-        "t.ref=?1",
-        [&resource.reference],
-    )?;
-    let desired = if resource.access_lost {
-        Some("access_lost")
-    } else {
-        resource.observe.then_some("present")
-    };
-    let id = match &existing {
-        Some(e) => {
-            if let Some(state) = desired {
-                x.c.execute(
-                    "UPDATE resources SET last_seen=?1,remote_state=?2,not_observed_since=NULL
-                      WHERE id=?3",
-                    params![x.at, state, e.id],
-                )?;
-            }
-            e.id
+                params![
+                    id,
+                    self.id,
+                    self.at,
+                    digest,
+                    course.title,
+                    course.code,
+                    course.term,
+                    course.url
+                ],
+            )?;
         }
-        None => x.insert_id(
-            "INSERT INTO resources(ref,course_id,kind,remote_state,first_seen,last_seen)
+        if let Some(kind) = event {
+            let details = json!({"title": course.title});
+            self.change(
+                kind,
+                &course.reference,
+                previous,
+                Some(&digest),
+                Some(details),
+            )?;
+        }
+        Ok(id)
+    }
+
+    pub(super) fn upsert_resource(
+        &self,
+        course_id: i64,
+        resource: &PendingResource,
+    ) -> Result<i64, AppError> {
+        let existing = self.existing(
+            ("resources", "resource_observations", "resource_id"),
+            "t.ref=?1",
+            [&resource.reference],
+        )?;
+        let desired = if resource.access_lost {
+            Some("access_lost")
+        } else {
+            resource.observe.then_some("present")
+        };
+        let id = match &existing {
+            Some(e) => {
+                if let Some(state) = desired {
+                    self.c.execute(
+                        "UPDATE resources SET last_seen=?1,remote_state=?2,not_observed_since=NULL
+                      WHERE id=?3",
+                        params![self.at, state, e.id],
+                    )?;
+                }
+                e.id
+            }
+            None => self.insert_id(
+                "INSERT INTO resources(ref,course_id,kind,remote_state,first_seen,last_seen)
              VALUES(?1,?2,?3,?4,?5,?5)",
-            params![
-                resource.reference,
-                course_id,
-                resource.kind,
-                desired.unwrap_or("present"),
-                x.at
-            ],
-        )?,
-    };
-    let digest = digest_json(&resource.source)?;
-    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
-    if (resource.observe || previous.is_none()) && previous != Some(digest.as_str()) {
-        x.c.execute(
-            "INSERT INTO resource_observations(
+                params![
+                    resource.reference,
+                    course_id,
+                    resource.kind,
+                    desired.unwrap_or("present"),
+                    self.at
+                ],
+            )?,
+        };
+        let digest = digest_json(&resource.source)?;
+        let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+        if (resource.observe || previous.is_none()) && previous != Some(digest.as_str()) {
+            self.c.execute(
+                "INSERT INTO resource_observations(
                resource_id,sync_run_id,observed_at,digest,complete,title,url,
                week,section,text,source_json
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![
-                id,
-                x.id,
-                x.at,
-                digest,
-                resource.complete,
-                resource.title,
-                resource.url,
-                resource.week,
-                resource.section,
-                resource.text,
-                resource.source.to_string()
-            ],
-        )?;
-        let kind = match previous {
-            Some(_) => "source_changed",
-            None => "resource_appeared",
-        };
-        let details = json!({"kind": resource.kind});
-        x.change(
-            kind,
-            &resource.reference,
-            previous,
-            Some(&digest),
-            Some(details),
-        )?;
-    }
-    if let (Some(e), Some(after)) = (&existing, desired) {
-        if e.state != after {
-            let kind = match (e.state.as_str(), after) {
-                (_, "access_lost") => "access_lost",
-                ("access_lost", "present") => "access_restored",
-                _ => "resource_restored",
+                params![
+                    id,
+                    self.id,
+                    self.at,
+                    digest,
+                    resource.complete,
+                    resource.title,
+                    resource.url,
+                    resource.week,
+                    resource.section,
+                    resource.text,
+                    resource.source.to_string()
+                ],
+            )?;
+            let kind = match previous {
+                Some(_) => "source_changed",
+                None => "resource_appeared",
             };
-            x.change(kind, &resource.reference, None, None, None)?;
+            let details = json!({"kind": resource.kind});
+            self.change(
+                kind,
+                &resource.reference,
+                previous,
+                Some(&digest),
+                Some(details),
+            )?;
         }
+        if let (Some(e), Some(after)) = (&existing, desired) {
+            if e.state != after {
+                let kind = match (e.state.as_str(), after) {
+                    (_, "access_lost") => "access_lost",
+                    ("access_lost", "present") => "access_restored",
+                    _ => "resource_restored",
+                };
+                self.change(kind, &resource.reference, None, None, None)?;
+            }
+        }
+        Ok(id)
     }
-    Ok(id)
-}
 
-pub(super) fn upsert_representation(
-    x: &Run,
-    resource_id: i64,
-    url: &Url,
-    filename: &str,
-) -> Result<i64, AppError> {
-    let digest = crate::digest::sha256_hex(format!("{}\n{filename}", url.as_str()).as_bytes());
-    let existing = x.existing(
-        (
-            "representations",
-            "representation_observations",
-            "representation_id",
-        ),
-        "t.resource_id=?1 AND t.url=?2",
-        params![resource_id, url.as_str()],
-    )?;
-    let (id, restored) = match &existing {
-        Some(e) => {
-            x.c.execute(
-                "UPDATE representations SET remote_state='present',last_seen=?1,
+    pub(super) fn upsert_representation(
+        &self,
+        resource_id: i64,
+        url: &Url,
+        filename: &str,
+    ) -> Result<i64, AppError> {
+        let digest = crate::digest::sha256_hex(format!("{}\n{filename}", url.as_str()).as_bytes());
+        let existing = self.existing(
+            (
+                "representations",
+                "representation_observations",
+                "representation_id",
+            ),
+            "t.resource_id=?1 AND t.url=?2",
+            params![resource_id, url.as_str()],
+        )?;
+        let (id, restored) = match &existing {
+            Some(e) => {
+                self.c.execute(
+                    "UPDATE representations SET remote_state='present',last_seen=?1,
                         not_observed_since=NULL WHERE id=?2",
-                params![x.at, e.id],
-            )?;
-            (e.id, e.state != "present")
-        }
-        None => {
-            let id = x.insert_id(
-                "INSERT INTO representations(resource_id,url,kind,first_seen,last_seen)
+                    params![self.at, e.id],
+                )?;
+                (e.id, e.state != "present")
+            }
+            None => {
+                let id = self.insert_id(
+                    "INSERT INTO representations(resource_id,url,kind,first_seen,last_seen)
                  VALUES(?1,?2,?3,?4,?4)",
-                params![resource_id, url.as_str(), representation_kind(url), x.at],
-            )?;
-            (id, false)
-        }
-    };
-    let subject = format!("representation:{id}");
-    let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
-    if previous != Some(digest.as_str()) {
-        x.c.execute(
-            "INSERT INTO representation_observations(
+                    params![resource_id, url.as_str(), representation_kind(url), self.at],
+                )?;
+                (id, false)
+            }
+        };
+        let subject = format!("representation:{id}");
+        let previous = existing.as_ref().and_then(|e| e.digest.as_deref());
+        if previous != Some(digest.as_str()) {
+            self.c.execute(
+                "INSERT INTO representation_observations(
                representation_id,sync_run_id,observed_at,digest,filename
              ) VALUES(?1,?2,?3,?4,?5)",
-            params![id, x.id, x.at, digest, filename],
-        )?;
-        let kind = match previous {
-            Some(_) => "representation_source_changed",
-            None => "representation_appeared",
-        };
-        x.change(kind, &subject, previous, Some(&digest), None)?;
+                params![id, self.id, self.at, digest, filename],
+            )?;
+            let kind = match previous {
+                Some(_) => "representation_source_changed",
+                None => "representation_appeared",
+            };
+            self.change(kind, &subject, previous, Some(&digest), None)?;
+        }
+        if restored {
+            self.change("representation_restored", &subject, None, None, None)?;
+        }
+        refresh_subject(self.c, &subject)?;
+        Ok(id)
     }
-    if restored {
-        x.change("representation_restored", &subject, None, None, None)?;
-    }
-    refresh_subject(x.c, &subject)?;
-    Ok(id)
-}
 
-pub(super) fn mark_missing_representations(
-    x: &Run,
-    resource_id: i64,
-    seen: &HashSet<String>,
-) -> Result<(), AppError> {
-    x.mark_missing(
-        "SELECT id,url,'representation:'||id FROM representations
+    pub(super) fn mark_missing_representations(
+        &self,
+        resource_id: i64,
+        seen: &HashSet<String>,
+    ) -> Result<(), AppError> {
+        self.mark_missing(
+            "SELECT id,url,'representation:'||id FROM representations
           WHERE resource_id=?1 AND remote_state='present'",
-        [resource_id],
-        (
-            "UPDATE representations SET remote_state='not_observed',not_observed_since=?1
+            [resource_id],
+            (
+                "UPDATE representations SET remote_state='not_observed',not_observed_since=?1
               WHERE id=?2",
-            "representation_not_observed",
-            Some(json!({"collection": "resource_detail"})),
-        ),
-        |url| seen.contains(url),
-    )?;
-    // Drop search entries for notice links that are not_observed. This covers
-    // links just marked missing above (mark_missing does not call
-    // refresh_subject) and any stale entries left by earlier versions. Keep
-    // all history and file entries.
-    x.c.execute(
-        "DELETE FROM search_documents WHERE subject_ref IN (
+                "representation_not_observed",
+                Some(json!({"collection": "resource_detail"})),
+            ),
+            |url| seen.contains(url),
+        )?;
+        // Drop search entries for notice links that are not_observed. This covers
+        // links just marked missing above (mark_missing does not call
+        // refresh_subject) and any stale entries left by earlier versions. Keep
+        // all history and file entries.
+        self.c.execute(
+            "DELETE FROM search_documents WHERE subject_ref IN (
             SELECT 'representation:'||p.id FROM representations p
               JOIN resources r ON r.id=p.resource_id
              WHERE p.resource_id=?1 AND r.kind='notice' AND p.kind='link'
                AND p.remote_state='not_observed')",
-        [resource_id],
-    )?;
-    Ok(())
+            [resource_id],
+        )?;
+        Ok(())
+    }
 }
 
 pub(super) fn representation_kind(url: &Url) -> &'static str {

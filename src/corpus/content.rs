@@ -5,7 +5,7 @@ use super::{
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde_json::json;
-use std::{io::Read, path::Path};
+use std::path::Path;
 
 type ContentRow = (String, i64, Option<String>, String);
 
@@ -86,9 +86,7 @@ impl Corpus {
         let file = std::fs::File::open(&record.path).map_err(|e| {
             AppError::content_unavailable(format!("cannot read stored content: {e}"))
         })?;
-        let mut bytes = Vec::new();
-        file.take((max as u64).saturating_add(1))
-            .read_to_end(&mut bytes)
+        let mut bytes = crate::http::read_prefix(file, max as u64)
             .map_err(|e| AppError::library_io(format!("cannot read stored content: {e}")))?;
         let truncated = bytes.len() > max;
         bytes.truncate(max);

@@ -4,7 +4,7 @@ use crate::{
     error::AppError,
     models::DownloadResult,
     output::{self, CommandResult},
-    private_fs::{self, PublishError, ScratchDir, out_parent, temporary_name},
+    private_fs::{self, PublishError, out_parent, temporary_name},
     safe_url,
     url::Url,
 };
@@ -31,42 +31,24 @@ pub(super) fn download(
 }
 
 pub(super) fn validate_out(out: &Path, video: bool) -> Result<(), AppError> {
-    if if video {
-        out.symlink_metadata().is_ok()
-    } else {
-        out.exists()
-    } {
+    let parent = out_parent(out);
+    let (occupied, parent_exists) = match video {
+        true => (out.symlink_metadata().is_ok(), parent.is_dir()),
+        false => (out.exists(), parent.exists()),
+    };
+    if occupied {
         return Err(AppError::config(format!(
             "destination already exists: {}",
             out.display()
         )));
     }
-    let parent = out_parent(out);
-    if if video {
-        !parent.is_dir()
-    } else {
-        !parent.exists()
-    } {
+    if !parent_exists {
         return Err(AppError::config(format!(
             "destination directory does not exist: {}",
             parent.display()
         )));
     }
     Ok(())
-}
-
-pub(super) fn workspace(out: &Path) -> Result<ScratchDir, AppError> {
-    let parent = out_parent(out);
-    let workspace = ScratchDir::create(parent).map_err(|(path, e)| {
-        AppError::config(format!(
-            "could not create video workspace {}: {e}",
-            path.display()
-        ))
-    })?;
-    if let Ok(own) = workspace.0.symlink_metadata() {
-        private_fs::sweep_stale(parent, &own);
-    }
-    Ok(workspace)
 }
 
 pub(super) fn publish(
@@ -97,12 +79,9 @@ pub(super) fn publish(
             format!("destination already exists: {}", out.display())
         }));
     }
+    let path = out.canonicalize().unwrap_or_else(|_| out.to_path_buf());
     let model = DownloadResult {
-        path: out
-            .canonicalize()
-            .unwrap_or_else(|_| out.to_path_buf())
-            .display()
-            .to_string(),
+        path: path.display().to_string(),
         bytes: response.bytes,
         source_url: safe_url::display(&response.url),
         content_type: response.content_type,
@@ -122,14 +101,11 @@ pub(super) fn publish(
     let copied = linked
         .copied
         .then(|| "download published by non-atomic copy because hard linking failed".to_owned());
-    result.warnings.extend(
-        if video {
-            [copied, cleanup]
-        } else {
-            [cleanup, copied]
-        }
-        .into_iter()
-        .flatten(),
-    );
+    result
+        .warnings
+        .extend([cleanup, copied].into_iter().flatten());
+    if video {
+        result.warnings.reverse();
+    }
     Ok(result)
 }

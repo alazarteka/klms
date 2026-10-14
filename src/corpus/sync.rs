@@ -1,9 +1,6 @@
 use super::{
     Corpus, SyncSummary, object_store,
-    observe::{
-        PendingResource, Run, digest_json, mark_missing_representations, representation_kind,
-        upsert_course, upsert_representation, upsert_resource,
-    },
+    observe::{PendingResource, Run, digest_json, representation_kind},
     query::{refresh_subject, row},
 };
 use crate::date::epoch_now as now;
@@ -101,11 +98,11 @@ impl Corpus {
         let mut frontier = BTreeMap::new();
         let (mut resource_count, mut representation_count, mut truncated_count) = (0_u64, 0_u64, 0);
         for (course, resources, _) in &collections {
-            let course_id = upsert_course(&x, course)?;
+            let course_id = x.upsert_course(course)?;
             listed.insert(course.reference.clone());
             refresh_subject(x.c, &course.reference)?;
             for resource in resources {
-                let resource_id = upsert_resource(&x, course_id, resource)?;
+                let resource_id = x.upsert_resource(course_id, resource)?;
                 resource_count += 1;
                 truncated_count += (resource.observe && !resource.complete) as u64;
                 let mut links = resource.links.clone();
@@ -122,14 +119,14 @@ impl Corpus {
                         continue;
                     };
                     seen_urls.insert(url.as_str().to_owned());
-                    let id = upsert_representation(&x, resource_id, &url, &link.title)?;
+                    let id = x.upsert_representation(resource_id, &url, &link.title)?;
                     if representation_kind(&url) == "file" {
                         frontier.insert(id, url.as_str().to_owned());
                     }
                     representation_count += 1;
                 }
                 if resource.representations_complete {
-                    mark_missing_representations(&x, resource_id, &seen_urls)?;
+                    x.mark_missing_representations(resource_id, &seen_urls)?;
                 }
                 refresh_subject(x.c, &resource.reference)?;
             }

@@ -23,24 +23,21 @@ pub(super) fn raw_get(
             "request get previews HTML and JSON only; use `files download` for other content",
         ));
     }
-    let (body, redacted) = if html {
+    let (redacted, body) = if html {
         let original = String::from_utf8_lossy(&response.bytes);
         let body = redact_secrets(&parse::safe_html_preview(&original));
-        let redacted = body != original;
-        (body, redacted)
+        (body != original, body)
     } else if response.truncated {
         (
-            "[JSON preview omitted because the bounded response is incomplete]".into(),
             true,
+            "[JSON preview omitted because the bounded response is incomplete]".into(),
         )
     } else {
         let mut value: serde_json::Value = serde_json::from_slice(&response.bytes)
             .map_err(|error| AppError::shape(format!("invalid JSON response: {error}")))?;
-        let original = value.to_string();
+        let original = value.clone();
         redact_json(&mut value);
-        let body = value.to_string();
-        let redacted = body != original;
-        (body, redacted)
+        (value != original, value.to_string())
     };
     let model = RawGet {
         url: safe_url::display(&response.url),
@@ -126,18 +123,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_reports_filtering_without_promising_secret_free_output() {
+    fn unchanged_json_preview_does_not_claim_redaction() {
         use crate::fixture_server::{Response, Server};
-        for (body, redacted) in [
-            (r#"{"name":"safe"}"#, false),
-            (r#"{"token":"secret"}"#, true),
-        ] {
-            let server = Server::new(move |_| Response::bytes("application/json", body));
-            let client = KlmsClient::new(&server.url(), None, 5).unwrap();
-            let result = raw_get(&client, "/mod/assign/view.php?id=7", 1024).unwrap();
-            assert_eq!(result.data["redacted"], redacted);
-            assert!(result.warnings[0].contains("heuristic"));
-        }
+        let server = Server::new(|_| Response::bytes("application/json", r#"{"name":"safe"}"#));
+        let client = KlmsClient::new(&server.url(), None, 5).unwrap();
+        let result = raw_get(&client, "/mod/assign/view.php?id=7", 1024).unwrap();
+        assert_eq!(result.data["redacted"], false);
+        assert!(result.warnings[0].contains("heuristic"));
     }
 
     #[test]

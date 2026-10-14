@@ -23,7 +23,7 @@ struct Ctx<'a> {
     timeout: u64,
 }
 
-pub fn run(cli: &Cli) -> Result<CommandResult, AppError> {
+pub(crate) fn run(cli: &Cli) -> Result<CommandResult, AppError> {
     match &cli.command {
         Command::Update(args) => return crate::update::run(args.check, cli.timeout),
         Command::Install { destination } => return crate::update::install(destination),
