@@ -88,6 +88,12 @@ course, calendar, known module view/index and board-article endpoints, the user
 grade report, attendance index, native video viewer, and pluginfile paths only;
 endpoint-specific query keys are allowlisted, with no action or secret keys.
 
+Collection parsers require a known region and reject any resolved item-endpoint
+link there that did not become a row. Headings, empty sections and empty-state
+rows are valid empty collections. Detail pages require Moodle body attributes
+identifying the expected module kind and module ID, or course page and course ID;
+a generic `main` region alone is insufficient.
+
 ## Library invariants
 
 1. Source observations and content blobs are immutable. Sync never overwrites

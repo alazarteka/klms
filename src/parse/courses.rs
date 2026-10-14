@@ -4,8 +4,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    all, first_text, has_any, href_url, link_items, query_id, resolve_http_url, sel,
-    selected_value, text, week_number,
+    all, collection_shape, first_text, has_any, href_url, link_items, module_view, page_identity,
+    query_id, resolve_http_url, sel, selected_value, text, week_number,
 };
 use crate::{
     date,
@@ -96,6 +96,7 @@ pub fn course_detail(
     mut course: Course,
 ) -> Result<CourseDetail, AppError> {
     let document = Html::parse_document(html);
+    page_identity(&document, "course", Some(&course.id))?;
     if let Some(title) = first_text(
         &document,
         ".page-header-headings h1, a.h1[href*='course/view.php'], h1",
@@ -134,22 +135,18 @@ pub fn activities(
     week: Option<u32>,
 ) -> Result<Vec<Activity>, AppError> {
     let document = Html::parse_document(html);
+    page_identity(&document, "course", query_id(base_url, &["id"]).as_deref())?;
     let mut rows = activities_from_document(&document, base_url);
-    let region = document.select(&sel(".course-content")).next();
-    let empty = region.is_some_and(|root| root.inner_html().trim().is_empty());
-    let unknown_links = document
-        .select(&sel(".course-content a[href*='/mod/']"))
-        .any(|anchor| {
-            !anchor
-                .ancestors()
-                .filter_map(ElementRef::wrap)
-                .any(|node| sel("li.activity, .activity-item[data-id]").matches(&node))
-        });
-    if (rows.is_empty() && !empty) || unknown_links {
-        return Err(AppError::shape(
-            "course page contained no recognizable activity region",
-        ));
-    }
+    collection_shape(
+        &document,
+        ".course-content",
+        base_url,
+        module_view,
+        |_, url| {
+            rows.iter()
+                .any(|row| row.url.as_deref() == Some(safe_url::display(url).as_str()))
+        },
+    )?;
     if let Some(week) = week {
         rows.retain(|row| row.week == Some(week));
     }
@@ -215,7 +212,9 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
     let headings = sel(".sectionname, .section-title, h3");
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for module in document.select(&sel("li.activity, .activity-item[data-id]")) {
+    for module in document.select(&sel(
+        ".course-content li.activity, .course-content .activity-item[data-id]",
+    )) {
         let id = module
             .value()
             .attr("id")
@@ -371,11 +370,20 @@ pub fn board_posts(
     let cells = sel("td");
     let mut seen = HashSet::new();
     let mut posts = Vec::new();
-    for anchor in document.select(&sel("a[href*='/mod/courseboard/article.php']")) {
+    let regions = ".courseboard, table.generaltable, table.board-list";
+    for anchor in document.select(&sel(
+        ".courseboard a[href], table.generaltable a[href], table.board-list a[href]",
+    )) {
         let Some(url) = href_url(anchor, base_url) else {
             continue;
         };
+        if url.path() != "/mod/courseboard/article.php" {
+            continue;
+        }
         let id = query_id(&url, &["bwid"]);
+        if id.is_none() || query_id(&url, &["id"]).is_none() {
+            continue;
+        }
         let title = text(anchor);
         if !seen.insert(id.clone().unwrap_or_else(|| url.to_string())) || title.is_empty() {
             continue;
@@ -402,27 +410,13 @@ pub fn board_posts(
             url: safe_url::display(&url),
         });
     }
-    let regions = sel(".courseboard, table.generaltable, table.board-list");
-    let empty = document
-        .select(&regions)
-        .any(|root| root.inner_html().trim().is_empty());
-    let unknown_rows = document
-        .select(&sel(
-            "table.generaltable tr, table.board-list tr, .courseboard tr",
-        ))
-        .any(|row| {
-            row.select(&cells).next().is_some()
-                && !text(row).is_empty()
-                && row
-                    .select(&sel("a[href*='/mod/courseboard/article.php']"))
-                    .next()
-                    .is_none()
-        });
-    if (posts.is_empty() && !empty) || unknown_rows {
-        return Err(AppError::shape(
-            "board page contained no recognizable post region",
-        ));
-    }
+    collection_shape(
+        &document,
+        regions,
+        base_url,
+        |url| url.path() == "/mod/courseboard/article.php",
+        |_, url| posts.iter().any(|post| post.url == safe_url::display(url)),
+    )?;
     Ok(posts)
 }
 
@@ -486,7 +480,7 @@ mod tests {
 
     #[test]
     fn parses_activities_with_sections_external_links_and_download_handlers() {
-        let html = r#"<li class="section"><h3>Week 3</h3><ul>
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3><ul>
           <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
           <li class="activity modtype_lti" id="module-8"><a href="https://tools.example/launch"><span class="instancename">Lab</span></a></li>
           </ul></li>"#;
@@ -494,7 +488,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(!rows[0].external);
         assert!(rows[1].external);
-        let html = r#"<li class="activity modtype_resource" id="module-9">
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="activity modtype_resource" id="module-9">
           <div class="aalink" onclick="M.course.format.downloadFile('https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf', 'notes.pdf')">
           <span class="instancename">Notes File</span></div></li>"#;
         let rows = activities(html, &base(), None).unwrap();
@@ -504,7 +498,7 @@ mod tests {
 
     #[test]
     fn parses_live_shape_course_header_and_professor() {
-        let html = r#"<a class="h1 mr-auto" href="/course/view.php?id=42">Programming Language(CS.30200_2026_3)</a>
+        let html = r#"<body id="page-course-view-kaistweeks" class="course-42"><a class="h1 mr-auto" href="/course/view.php?id=42">Programming Language(CS.30200_2026_3)</a>
           <div class="d-flex courseinfo"><div class="border-left py-2">Professors
           <div><a class="dropdown-toggle text-primary">Synthetic Instructor</a></div></div></div>"#;
         let course = Course {
@@ -524,7 +518,7 @@ mod tests {
     #[test]
     fn empty_activity_pages_require_a_recognizable_container() {
         assert!(activities("<html><body>maintenance</body></html>", &base(), None).is_err());
-        assert!(activities("<main class='course-content'></main>", &base(), None).is_ok());
+        assert!(activities("<body id='page-course-view-topics' class='course-42'><main class='course-content'></main>", &base(), None).is_ok());
     }
 
     #[test]
@@ -536,7 +530,11 @@ mod tests {
             (picker, "42", true),
             (picker, "4", false),
             (single_week, "42", false),
-            ("<main class='course-content'></main>", "42", false),
+            (
+                "<body id='page-course-view-topics' class='course-42'><main class='course-content'></main>",
+                "42",
+                false,
+            ),
         ] {
             assert_eq!(has_all_weeks_view(html, course), expected);
         }
@@ -545,7 +543,7 @@ mod tests {
     #[test]
     fn parses_posts_and_refuses_malformed_ids_for_typed_references() {
         let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
-        let html = "<table><tr><td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td><td>2026-08-29</td></tr></table>";
+        let html = "<table class='generaltable'><tr><td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td><td>2026-08-29</td></tr></table>";
         for id in ["", "oops", "8:9"] {
             assert!(board_posts(html, &base, Some(id.into())).is_err());
         }
@@ -553,8 +551,11 @@ mod tests {
         assert_eq!(rows[0].id.as_deref(), Some("9"));
         assert_eq!(rows[0].posted.as_deref(), Some("2026-08-29"));
         let html = html.replace("bwid=9", "bwid=oops");
-        let rows = board_posts(&html, &base, Some("8".into())).unwrap();
-        assert!(rows[0].id.is_none());
-        assert!(rows[0].reference.is_none());
+        assert_eq!(
+            board_posts(&html, &base, Some("8".into()))
+                .unwrap_err()
+                .code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
     }
 }

@@ -50,7 +50,11 @@ fn typed_and_preview_operands_refuse_actions_before_transport() {
 
 #[test]
 fn accepted_detail_urls_are_rebuilt_from_identity() {
-    let server = Server::new(|_| Response::html("<main><h1>Assignment</h1></main>"));
+    let server = Server::new(|_| {
+        Response::html(
+            "<body id='page-mod-assign-view' class='path-mod-assign cmid-7'><main><h1>Assignment</h1></main>",
+        )
+    });
     let env = Env::at(&server);
     env.ok(&format!(
         "assignments show '{}/mod/assign/view.php?%69d=007#ignored'",

@@ -15,7 +15,7 @@ use crate::{
 
 impl Ctx<'_> {
     pub(super) fn resources(&self, command: &Command) -> Result<CommandResult, AppError> {
-        let (client, base) = (self.client, self.base);
+        let client = self.client;
         match command {
             Command::Activities { command } => {
                 let ActivitiesCommand::List {
@@ -69,7 +69,7 @@ impl Ctx<'_> {
                 BoardsCommand::Posts { board, list } => {
                     let response = client.get(&module_path(board, &["courseboard"])?)?;
                     let board_id = query_value(&response.url, "id");
-                    let posts = parse::board_posts(&response.text, base, board_id)?;
+                    let posts = parse::board_posts(&response.text, &response.url, board_id)?;
                     let complete = !parse::has_next_page(&response.text);
                     listing(
                         "boards.posts",
@@ -93,7 +93,7 @@ impl Ctx<'_> {
                 FilesCommand::List { course, list } => {
                     let resolved = self.resolve_course(course)?;
                     let kinds = ["resource", "folder", "page", "coursefile", "url"];
-                    let files: Vec<_> = course_pages::activities(client, base, &resolved.id)?
+                    let files: Vec<_> = course_pages::activities(client, &resolved.id)?
                         .into_iter()
                         .filter(|row| kinds.contains(&row.kind.as_str()))
                         .map(|a| FileResource {
@@ -157,7 +157,7 @@ impl Ctx<'_> {
         keep: impl Fn(&Activity) -> bool,
     ) -> Result<CommandResult, AppError> {
         let resolved = self.resolve_course(course)?;
-        let mut rows = course_pages::activities(self.client, self.base, &resolved.id)?;
+        let mut rows = course_pages::activities(self.client, &resolved.id)?;
         rows.retain(|row| keep(row) && week.is_none_or(|week| row.week == Some(week)));
         activity_table(command, &resolved, rows, limit)
     }
@@ -195,7 +195,7 @@ impl Ctx<'_> {
 
     fn notices(&self, course: &str, limit: usize) -> Result<CommandResult, AppError> {
         let resolved = self.resolve_course(course)?;
-        let activities = course_pages::activities(self.client, self.base, &resolved.id)?;
+        let activities = course_pages::activities(self.client, &resolved.id)?;
         let mut rows = Vec::new();
         let mut source_complete = true;
         for board in activities.into_iter().filter(parse::is_notice_board) {
@@ -207,7 +207,7 @@ impl Ctx<'_> {
             let response = self.client.get(&ResourceRef::parse(&board_ref)?.path())?;
             source_complete &= !parse::has_next_page(&response.text);
             let board_id = query_value(&response.url, "id");
-            for post in parse::board_posts(&response.text, self.base, board_id)? {
+            for post in parse::board_posts(&response.text, &response.url, board_id)? {
                 let Some(reference) = post.reference else {
                     return Err(AppError::shape(
                         "notice post contained no canonical post reference",
