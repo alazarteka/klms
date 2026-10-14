@@ -522,6 +522,7 @@ fn device_registration_and_klms_handoff_across_two_origins() {
     assert!(session.contains("trusted-device") && session.contains("MoodleSession"));
     // The registration POST carries the device page as Referer and the SSO origin.
     let register = &fx.sso.requests("/auth/kaist/user/device/ajaxRegist")[0];
+    assert!(register.contains("x-requested-with: xmlhttprequest"));
     assert!(register.contains("referer: ") && register.contains(DEVICE_VIEW));
     let origin = fx.sso.url.origin().ascii_serialization();
     assert!(register.contains(&format!("origin: {origin}")));
@@ -652,4 +653,401 @@ fn a_code_that_never_reached_kaist_keeps_the_pending_login() {
     assert_eq!(result.data["user"], "student");
     assert!(fx.dirs.session().is_file() && !path.exists());
     assert_eq!(fx.sso.count(VALIDATE), 1);
+}
+
+/// Synthetic keyring with real secret-tool argument shapes and injectable failures.
+fn fake_keyring(fx: &mut Fixture) -> (Backend, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fx._root.path().join("keyring");
+    fs::create_dir_all(root.join("items")).unwrap();
+    let helper = root.join("secret-tool");
+    fs::write(
+        &helper,
+        format!(
+            r#"#!/bin/sh
+cd '{}' || exit 2
+printf '%s\n' "$*" >> calls
+case "$*" in
+  'store --label=klms service klms account '*)
+    [ ! -f fail-store ] || {{ echo 'store refused' >&2; exit 1; }}
+    cat > "items/$6" ;;
+  'lookup service klms account '*)
+    [ -f "items/$5" ] || exit 1
+    cat "items/$5" ;;
+  'clear service klms'|'clear service klms account '*)
+    [ ! -f fail-clear ] || {{ echo 'delete refused' >&2; exit 1; }}
+    [ ! -f locked ] || exit 1
+    if [ "$#" = 3 ]; then
+      removed=1
+      for item in items/*; do
+        [ -f "$item" ] || continue
+        rm "$item" || exit 2
+        removed=0
+      done
+      exit "$removed"
+    fi
+    [ -f "items/$5" ] || exit 1
+    rm "items/$5" ;;
+  'search --all service klms'|'search --all service klms account '*)
+    for item in items/*; do [ ! -f "$item" ] || echo '[remaining-item]'; done
+    exit 0 ;;
+  *) echo 'unexpected arguments' >&2; exit 2 ;;
+esac
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    fx.secrets.search_path = root.clone().into_os_string();
+    (Backend::SecretService(helper), root)
+}
+
+fn remember_direct(
+    fx: &Fixture,
+    previous: Option<&Identity>,
+    user: &str,
+    password: Option<(&Backend, &Zeroizing<String>)>,
+) -> (Identity, bool, Vec<String>) {
+    let env = Env {
+        dirs: &fx.dirs,
+        klms: &fx.klms.url,
+        sso: &fx.sso.url,
+        timeout: 5,
+        secrets: &fx.secrets,
+        interactive: true,
+        defer_code: false,
+        json: true,
+    };
+    let mut warnings = Vec::new();
+    let (identity, stored) = remember_login(
+        &env,
+        previous,
+        Identity::new(user, LoginMethod::Password, None),
+        password,
+        &mut warnings,
+    );
+    (identity, stored, warnings)
+}
+
+#[test]
+fn forget_corrupt_identity_purges_every_account_in_both_keyrings() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fx = Fixture::new();
+    let (backend, root) = fake_keyring(&mut fx);
+    backend.store("one", "pw1").unwrap();
+    backend.store("two", "pw2").unwrap();
+    fs::create_dir_all(&fx.dirs.config).unwrap();
+    fs::write(fx.dirs.identity(), "{broken").unwrap();
+    fs::write(fx.dirs.credentials(), "{broken plaintext").unwrap();
+    fs::write(root.join("mac-one"), "pw").unwrap();
+    fs::write(root.join("mac-two"), "pw").unwrap();
+    fx.secrets.security = root.join("security");
+    fs::write(
+        &fx.secrets.security,
+        format!(
+            r#"#!/bin/sh
+[ "$*" = 'delete-generic-password -s klms' ] || exit 2
+for item in '{}'/mac-*; do
+  [ -f "$item" ] || continue
+  rm "$item"
+  exit $?
+done
+exit 44
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fx.secrets.security, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(result.data["password_removed"], true);
+    assert_eq!(result.data["password_cleanup_complete"], true);
+    assert_eq!(
+        result.data["password_backends"],
+        json!({"keychain": true, "secret-service": true, "plaintext-file": true})
+    );
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("identity was unreadable"));
+    assert!(!root.join("mac-one").exists() && !root.join("mac-two").exists());
+    assert!(backend.lookup("one").unwrap().is_none());
+    assert!(backend.lookup("two").unwrap().is_none());
+    let again = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(again.data["password_removed"], false);
+    assert_eq!(again.data["password_cleanup_complete"], true);
+    assert!(again.warnings.is_empty());
+}
+
+#[test]
+fn forget_reports_failed_or_locked_keyring_deletion_and_retries_without_identity() {
+    for fault in ["fail-clear", "locked"] {
+        let mut fx = Fixture::new();
+        let (backend, root) = fake_keyring(&mut fx);
+        backend.store("orphan", "pw").unwrap();
+        fs::write(root.join(fault), "").unwrap();
+        fx.seed_remembered_password();
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["password_removed"], false, "{fault}");
+        assert_eq!(result.data["password_cleanup_complete"], false);
+        assert!(result.data["password_backends"]["secret-service"].is_null());
+        assert_eq!(result.data["password_backends"]["plaintext-file"], true);
+        assert!(!result.warnings.is_empty());
+        assert!(result.human.contains("incomplete"));
+        assert!(!fx.dirs.identity().exists());
+        fs::remove_file(root.join(fault)).unwrap();
+        let retry = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(retry.data["password_removed"], true);
+        assert!(backend.lookup("orphan").unwrap().is_none());
+    }
+}
+
+#[test]
+fn forget_unavailable_backend_remains_retryable_after_metadata_removal() {
+    let mut fx = Fixture::new();
+    let (backend, root) = fake_keyring(&mut fx);
+    backend.store("student", "pw").unwrap();
+    let mut identity = Identity::new("student", LoginMethod::Password, None);
+    identity.password_backend = Some("secret-service".into());
+    store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
+    fs::rename(root.join("secret-tool"), root.join("disabled")).unwrap();
+    for _ in 0..2 {
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["password_removed"], false);
+        assert!(!result.warnings.is_empty());
+        assert!(!fx.dirs.identity().exists());
+    }
+    fs::rename(root.join("disabled"), root.join("secret-tool")).unwrap();
+    assert_eq!(
+        forget_with(&fx.dirs, &fx.secrets).unwrap().data["password_removed"],
+        true
+    );
+    assert!(backend.lookup("student").unwrap().is_none());
+}
+
+#[test]
+fn identity_save_failure_rolls_back_password_and_reports_failed_rollback() {
+    for fail_rollback in [false, true] {
+        let mut fx = Fixture::new();
+        let (backend, root) = fake_keyring(&mut fx);
+        fs::create_dir_all(fx.dirs.identity()).unwrap();
+        if fail_rollback {
+            fs::write(root.join("fail-clear"), "").unwrap();
+        }
+        let password = Zeroizing::new("pw".to_owned());
+        let (identity, stored, warnings) =
+            remember_direct(&fx, None, "student", Some((&backend, &password)));
+        assert!(!stored);
+        assert!(identity.password_backend.is_none());
+        assert!(warnings[0].contains("could not remember the login"));
+        assert_eq!(warnings.len(), if fail_rollback { 2 } else { 1 });
+        assert_eq!(backend.lookup("student").unwrap().is_some(), fail_rollback);
+        if fail_rollback {
+            assert!(warnings[1].contains("could not roll back"));
+            fs::remove_file(root.join("fail-clear")).unwrap();
+        }
+        // An unreadable identity directory must not prevent keyring cleanup.
+        let forgotten = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(forgotten.data["login_removed"], false);
+        assert!(
+            forgotten
+                .warnings
+                .iter()
+                .any(|w| w.contains("cannot remove remembered login"))
+        );
+        assert!(backend.lookup("student").unwrap().is_none());
+    }
+}
+
+#[test]
+fn failed_account_switch_migration_and_stale_password_cleanup_are_recoverable() {
+    for (user, fail_store) in [("other", false), ("student", false), ("student", true)] {
+        let mut fx = Fixture::new();
+        let (old, root) = fake_keyring(&mut fx);
+        old.store("student", "old").unwrap();
+        let mut previous = Identity::new("student", LoginMethod::Password, None);
+        previous.password_backend = Some("secret-service".into());
+        store::save_json(&fx.dirs.identity(), &previous, "login").unwrap();
+        fs::write(root.join("fail-clear"), "").unwrap();
+        let new = Backend::File(fx.dirs.credentials());
+        let password = Zeroizing::new(if fail_store {
+            "p".repeat(1025)
+        } else {
+            "new".into()
+        });
+        let (identity, stored, warnings) =
+            remember_direct(&fx, Some(&previous), user, Some((&new, &password)));
+        assert_eq!(stored, !fail_store);
+        assert!(!warnings.is_empty());
+        assert_eq!(fx.identity().unwrap(), identity);
+        assert!(old.lookup("student").unwrap().is_some());
+        fs::remove_file(root.join("fail-clear")).unwrap();
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["password_removed"], true);
+        assert!(old.lookup("student").unwrap().is_none());
+        assert!(!fx.dirs.credentials().exists());
+    }
+}
+
+#[test]
+fn forget_and_logout_clean_only_their_owned_crash_temporaries() {
+    let fx = Fixture::new();
+    fx.seed_remembered_password();
+    fs::create_dir_all(&fx.dirs.state).unwrap();
+    for path in [
+        fx.dirs.identity(),
+        fx.dirs.credentials(),
+        fx.dirs.pending(),
+        fx.dirs.session(),
+    ] {
+        fs::write(path.with_extension("json.123.tmp"), "secret").unwrap();
+    }
+    let unrelated = fx.dirs.config.join("credentials.json.backup.tmp");
+    fs::write(&unrelated, "unrelated").unwrap();
+    forget_with(&fx.dirs, &fx.secrets).unwrap();
+    for path in [fx.dirs.identity(), fx.dirs.credentials(), fx.dirs.pending()] {
+        assert!(!path.with_extension("json.123.tmp").exists());
+    }
+    assert!(unrelated.exists());
+    assert!(fx.dirs.session().with_extension("json.123.tmp").exists());
+    fx.seed_remembered_password();
+    fs::write(
+        fx.dirs.credentials().with_extension("json.123.tmp"),
+        "secret",
+    )
+    .unwrap();
+    let result = logout_with(&fx.dirs.state).unwrap();
+    assert!(result.warnings.is_empty());
+    assert!(!fx.dirs.session().with_extension("json.123.tmp").exists());
+    assert!(
+        fx.dirs.identity().exists()
+            && fx
+                .dirs
+                .credentials()
+                .with_extension("json.123.tmp")
+                .exists()
+    );
+}
+
+#[test]
+fn logout_and_forget_report_file_and_temp_deletion_failures() {
+    let fx = Fixture::new();
+    for path in [
+        fx.dirs.session(),
+        fx.dirs.pending(),
+        fx.dirs.credentials(),
+        fx.dirs.credentials().with_extension("json.123.tmp"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let result = logout_with(&fx.dirs.state).unwrap();
+    assert_eq!(result.warnings.len(), 2);
+    assert_eq!(result.data["removed"], false);
+    assert_eq!(result.data["cleanup_complete"], false);
+    assert!(result.human.contains("incomplete"));
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(result.data["password_removed"], false);
+    assert_eq!(result.data["pending_removed"], false);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("credentials.json.123.tmp"))
+    );
+}
+
+#[test]
+fn consumed_code_cleanup_failures_are_reported_on_success_and_error() {
+    for correct in [false, true] {
+        let fx = Fixture::new();
+        fx.seed_remembered_password();
+        fx.pend();
+        fs::create_dir(fx.dirs.pending().with_extension("json.123.tmp")).unwrap();
+        if !correct {
+            *fx.otp.lock().unwrap() = "E001";
+        }
+        let result = fx.login(false, true, &code("123456"));
+        if correct {
+            assert!(
+                result
+                    .unwrap()
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("pending-login.json.123.tmp"))
+            );
+        } else {
+            let error = failure(result);
+            assert_eq!(error.code, "CODE_INCORRECT");
+            assert!(
+                error.details.unwrap()["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("pending-login.json.123.tmp")
+            );
+            assert!(error.message.contains("cleanup warnings"));
+        }
+        assert!(!fx.dirs.pending().exists());
+    }
+}
+
+#[test]
+fn forget_reports_partial_keychain_purge_as_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fx = Fixture::new();
+    let (_, root) = fake_keyring(&mut fx);
+    fs::write(root.join("first"), "pw").unwrap();
+    fx.secrets.security = root.join("security");
+    fs::write(
+        &fx.secrets.security,
+        format!(
+            r#"#!/bin/sh
+[ "$*" = 'delete-generic-password -s klms' ] || exit 2
+if [ -f '{0}/first' ]; then rm '{0}/first'; exit 0; fi
+echo 'keychain denied deletion' >&2
+exit 1
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fx.secrets.security, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert!(!root.join("first").exists());
+    assert_eq!(result.data["password_removed"], false);
+    assert_eq!(result.data["password_cleanup_complete"], false);
+    assert!(result.data["password_backends"]["keychain"].is_null());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("keychain denied deletion"))
+    );
+}
+
+#[test]
+fn deferred_login_reports_failed_old_password_deletion_in_human_and_json_errors() {
+    let mut fx = Fixture::new();
+    let (backend, root) = fake_keyring(&mut fx);
+    backend.store("student", "pw").unwrap();
+    let mut previous = Identity::new("student", LoginMethod::Password, None);
+    previous.password_backend = Some("secret-service".into());
+    store::save_json(&fx.dirs.identity(), &previous, "login").unwrap();
+    fs::write(root.join("fail-clear"), "").unwrap();
+    let error = failure(fx.login(
+        true,
+        true,
+        &LoginOptions {
+            user: Some("other".into()),
+            ..remember()
+        },
+    ));
+    assert_eq!(error.code, "CODE_REQUIRED");
+    assert!(error.message.contains("delete refused"));
+    let details = error.details.unwrap();
+    assert!(
+        details["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("delete refused")
+    );
+    assert_eq!(details["resume"], "klms auth login --code CODE");
 }
