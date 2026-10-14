@@ -12,13 +12,13 @@ use crate::{
 };
 use std::time::Duration;
 
-pub(crate) struct Policy {
-    pub klms: Url,
-    pub config: Config,
-    pub cookie: String,
-    pub jar: Jar,
-    pub bearer: Option<String>,
-    pub delivery_only: bool,
+pub(super) struct Policy {
+    pub(super) klms: Url,
+    pub(super) config: Config,
+    pub(super) cookie: String,
+    pub(super) jar: Jar,
+    pub(super) bearer: Option<String>,
+    pub(super) delivery_only: bool,
 }
 impl http::Policy for Policy {
     fn allow(&mut self, u: &Url) -> Result<(), AppError> {
@@ -63,7 +63,7 @@ impl http::Policy for Policy {
         Ok(())
     }
 }
-pub(crate) fn request(
+pub(super) fn request(
     agent: &ureq::Agent,
     policy: &mut Policy,
     method: Method,
@@ -94,7 +94,7 @@ pub(crate) fn request(
     }
     Ok(r)
 }
-pub(crate) fn text(r: Response) -> Result<String, AppError> {
+pub(super) fn text(r: Response) -> Result<String, AppError> {
     let b = http::read_prefix(r, 8 * 1024 * 1024)
         .map_err(|_| AppError::network("Panopto response interrupted"))?;
     if b.len() > 8 * 1024 * 1024 {
@@ -102,7 +102,7 @@ pub(crate) fn text(r: Response) -> Result<String, AppError> {
     }
     String::from_utf8(b).map_err(|_| AppError::shape("Panopto returned non-text metadata"))
 }
-pub fn launch(
+pub(crate) fn launch(
     klms: &Url,
     cookie: &str,
     timeout: u64,
@@ -170,7 +170,7 @@ pub fn launch(
 }
 
 /// Origin/path policy for the fixed authentication and metadata endpoints.
-pub(crate) fn allow_exchange(
+pub(super) fn allow_exchange(
     u: &Url,
     klms: &Url,
     config: &Config,
