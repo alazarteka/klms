@@ -4,8 +4,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    all, collection_shape, first_text, has_any, href_url, link_items, module_view, page_identity,
-    query_id, resolve_http_url, sel, selected_value, text, week_number,
+    all, first, first_text, has_any, href_url, link_items, module_view, page_identity, query_id,
+    resolve_http_url, sel, selected_value, text, week_number,
 };
 use crate::{
     date,
@@ -137,16 +137,18 @@ pub fn activities(
     let document = Html::parse_document(html);
     page_identity(&document, "course", query_id(base_url, &["id"]).as_deref())?;
     let mut rows = activities_from_document(&document, base_url);
-    collection_shape(
-        &document,
-        ".course-content",
-        base_url,
-        module_view,
-        |_, url| {
-            rows.iter()
-                .any(|row| row.url.as_deref() == Some(safe_url::display(url).as_str()))
-        },
-    )?;
+    // Every module view link in course content must have become an activity.
+    let represented: HashSet<_> = rows.iter().filter_map(|row| row.url.as_deref()).collect();
+    if !has_any(&document, &[".course-content"])
+        || document
+            .select(&sel(".course-content a[href]"))
+            .filter_map(|a| href_url(a, base_url))
+            .any(|url| module_view(&url) && !represented.contains(safe_url::display(&url).as_str()))
+    {
+        return Err(AppError::shape(
+            "course content is missing or has unrecognized activity links",
+        ));
+    }
     if let Some(week) = week {
         rows.retain(|row| row.week == Some(week));
     }
@@ -206,9 +208,18 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Vec<Course> {
     courses
 }
 
+pub(super) fn activity_title(module: ElementRef<'_>) -> Option<String> {
+    [".instancename, .activityname, .activity-title", "a[href]"]
+        .into_iter()
+        .find_map(|css| {
+            first(module, css)
+                .map(text)
+                .filter(|value| !value.is_empty())
+        })
+}
+
 fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
     let (anchors, downloads) = (sel("a[href]"), sel("[onclick*='downloadFile']"));
-    let names = sel(".instancename, .activityname, .activity-title");
     let headings = sel(".sectionname, .section-title, h3");
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
@@ -232,13 +243,7 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
         let url = href
             .as_deref()
             .and_then(|value| resolve_http_url(base_url, value));
-        let title = module
-            .select(&names)
-            .next()
-            .map(text)
-            .filter(|value| !value.is_empty())
-            .or_else(|| anchor.map(text).filter(|value| !value.is_empty()))
-            .unwrap_or_else(|| "Untitled activity".into());
+        let title = activity_title(module).unwrap_or_else(|| "Untitled activity".into());
         let kind = module
             .value()
             .classes()
@@ -371,20 +376,26 @@ pub fn board_posts(
     let mut seen = HashSet::new();
     let mut posts = Vec::new();
     let regions = ".courseboard, table.generaltable, table.board-list";
-    for anchor in document.select(&sel(
-        ".courseboard a[href], table.generaltable a[href], table.board-list a[href]",
-    )) {
-        let Some(url) = href_url(anchor, base_url) else {
-            continue;
-        };
+    // Any courseboard endpoint with bwid looks like a post, even after endpoint drift.
+    let links: Vec<_> = document
+        .select(&sel(
+            ".courseboard a[href], table.generaltable a[href], table.board-list a[href]",
+        ))
+        .filter_map(|a| Some((a, href_url(a, base_url)?)))
+        .filter(|(_, url)| {
+            url.path().starts_with("/mod/courseboard/")
+                && url.query_pairs().any(|(key, _)| key == "bwid")
+        })
+        .collect();
+    for (anchor, url) in &links {
         if url.path() != "/mod/courseboard/article.php" {
             continue;
         }
-        let id = query_id(&url, &["bwid"]);
-        if id.is_none() || query_id(&url, &["id"]).is_none() {
+        let id = query_id(url, &["bwid"]);
+        if id.is_none() || query_id(url, &["id"]).is_none() {
             continue;
         }
-        let title = text(anchor);
+        let title = text(*anchor);
         if !seen.insert(id.clone().unwrap_or_else(|| url.to_string())) || title.is_empty() {
             continue;
         }
@@ -407,16 +418,18 @@ pub fn board_posts(
             reference,
             title,
             posted,
-            url: safe_url::display(&url),
+            url: safe_url::display(url),
         });
     }
-    collection_shape(
-        &document,
-        regions,
-        base_url,
-        |url| url.path() == "/mod/courseboard/article.php",
-        |_, url| posts.iter().any(|post| post.url == safe_url::display(url)),
-    )?;
+    if !has_any(&document, &[regions])
+        || links
+            .iter()
+            .any(|(_, url)| !posts.iter().any(|post| post.url == safe_url::display(url)))
+    {
+        return Err(AppError::shape(
+            "board region is missing or has unrecognized post links",
+        ));
+    }
     Ok(posts)
 }
 

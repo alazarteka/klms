@@ -99,13 +99,17 @@ and calendar reads allow the stock date, category and lookahead filters.
 Module redirects must retain kind and ID. Resource/coursefile views may redirect
 to pluginfile; inline folders may redirect to a course; URL activities may
 redirect to another allowed same-origin read endpoint. Refused server links or
-redirects are `UPSTREAM_SHAPE_CHANGED`; invalid typed operands are `USAGE`.
+redirects are `UPSTREAM_SHAPE_CHANGED`; invalid typed operands are `USAGE`. A valid `request get` whose response is not
+HTML or JSON returns `CONTENT_UNAVAILABLE`.
 
-Collection parsers require a known region and reject any resolved item-endpoint
-link there that did not become a row. Headings, empty sections and empty-state
-rows are valid empty collections. Detail pages require Moodle body attributes
-identifying the expected module kind and module ID, or course page and course ID;
-a generic `main` region alone is insufficient.
+Collection parsers require a known region. Unrepresented module-view links in
+course content or courseboard links with `bwid` in board regions are shape errors;
+localized empty rows are valid. Calendar identity comes only from header/footer
+actions; recognizable events without usable identities are skipped with a warning
+and `complete:false`. Description cross-links do not identify events.
+Detail pages require Moodle body attributes identifying their kind and ID.
+Sync requests resource pages with `forceview=1`; pluginfile redirects are file
+representations, while inline folders are isolated by module ID on the course page.
 
 ## Library invariants
 

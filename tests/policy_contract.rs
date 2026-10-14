@@ -262,51 +262,6 @@ fn identity_changing_redirects_are_refused_before_second_request_or_publication(
 }
 
 #[test]
-fn query_pluginfile_downloads_and_corpus_classification_agree() {
-    const FILE: &str = "/pluginfile.php?file=%2F123%2Fmod_resource%2Fcontent%2F1%2Fnotes.txt";
-    let server = fixture::lib_server(|request, _| match request.target.as_str() {
-        "/mod/resource/view.php?id=7" => Some(Response::html(
-            fixture::DETAIL.replace("/pluginfile.php/1/lecture.txt", FILE),
-        )),
-        "/mod/coursefile/view.php?id=7" => Some(
-            Response::html("")
-                .status("302 Found")
-                .header("Location", FILE),
-        ),
-        FILE => Some(Response::bytes("text/plain", "query file bytes")),
-        _ => None,
-    });
-    let env = Env::at(&server);
-    for (i, source) in [FILE, "activity:coursefile:7"].iter().enumerate() {
-        let out = env.path(&format!("query-file-{i}"));
-        env.ok(&format!(
-            "files download '{source}' --out {}",
-            out.display()
-        ));
-        assert_eq!(std::fs::read_to_string(out).unwrap(), "query file bytes");
-    }
-    assert_eq!(
-        env.sync("--files --download changed")["data"]["status"],
-        "complete"
-    );
-    let shown = env.data("library show file:7");
-    let representation = &shown["representations"][0];
-    assert_eq!(representation["kind"], "file");
-    assert!(
-        server
-            .recorded()
-            .iter()
-            .any(|r| r.line == format!("HEAD {FILE} HTTP/1.1"))
-    );
-    assert!(
-        server
-            .recorded()
-            .iter()
-            .any(|r| r.line == format!("GET {FILE} HTTP/1.1"))
-    );
-}
-
-#[test]
 fn policy_refusals_from_server_links_and_redirects_are_upstream_errors() {
     for destination in [
         "/mod/assign/view.php?id=7&sesskey=secret",
@@ -360,24 +315,21 @@ fn folder_zip_and_folder_download_operands_are_not_supported() {
 
 #[test]
 fn sync_accepts_server_resource_read_parameters() {
-    let server = fixture::lib_server(|request, _| match request.target.as_str() {
-        "/course/view.php?id=42" => Some(Response::html(
-            fixture::manifest().replace("view.php?id=7", "view.php?id=7&redirect=1&forceview=1"),
-        )),
-        "/mod/resource/view.php?id=7&redirect=1&forceview=1" => {
-            Some(Response::html(fixture::DETAIL))
-        }
-        _ => None,
-    });
-    let env = Env::at(&server);
-    assert_eq!(env.sync("")["data"]["status"], "complete");
-    assert_eq!(env.data("library show file:7")["remote_state"], "present");
-    assert!(
-        server
-            .requests()
-            .iter()
-            .any(|line| line == "GET /mod/resource/view.php?id=7&redirect=1&forceview=1 HTTP/1.1")
-    );
+    for query in ["", "&redirect=1&forceview=0", "&redirect=1&forceview=1"] {
+        let server = fixture::lib_server(move |request, _| match request.target.as_str() {
+            "/course/view.php?id=42" => Some(Response::html(
+                fixture::manifest().replace("view.php?id=7", &format!("view.php?id=7{query}")),
+            )),
+            path if path.starts_with("/mod/resource/") => {
+                assert!(path.ends_with("&forceview=1"));
+                Some(Response::html(fixture::DETAIL))
+            }
+            _ => None,
+        });
+        let env = Env::at(&server);
+        assert_eq!(env.sync("")["data"]["status"], "complete");
+        assert_eq!(env.data("library show file:7")["remote_state"], "present");
+    }
 }
 
 #[test]
@@ -409,4 +361,78 @@ fn typed_foreign_origins_and_userinfo_remain_usage_errors() {
         }
     }
     assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn sync_redirects_discover_file_bytes_and_isolate_inline_folders() {
+    const BYTES: &[u8] = b"%PDF-fixture\0\xff";
+    for (kind, destination) in [
+        ("resource", "/pluginfile.php/123/notes.pdf"),
+        ("resource", "/pluginfile.php?file=%2F123%2Fnotes.pdf"),
+        ("coursefile", "/pluginfile.php/123/notes.pdf"),
+        ("coursefile", "/pluginfile.php?file=%2F123%2Fnotes.pdf"),
+        ("folder", "/course/view.php?id=42&section=1"),
+    ] {
+        let force = if kind == "resource" {
+            "&forceview=1"
+        } else {
+            ""
+        };
+        let module = format!("/mod/{kind}/view.php?id=7{force}");
+        let server = fixture::lib_server(move |r, _| match r.target.as_str() {
+            "/course/view.php?id=42" => {
+                Some(Response::html(fixture::course(&[(kind, 7, "Notes")])))
+            }
+            path if path == module => Some(
+                Response::html("")
+                    .status("302 Found")
+                    .header("Location", destination),
+            ),
+            "/course/view.php?id=42&section=1" => Some(Response::html(
+                "<main><li id='module-8'><a href='/pluginfile.php/other'>Other</a></li><div data-id='7'><span class='activityname'>Notes</span><a href='/pluginfile.php/123/notes.pdf'>notes.pdf</a></div></main>",
+            )),
+            path if path.starts_with("/pluginfile.php") => {
+                assert!(!path.contains("other"));
+                Some(Response::bytes("application/pdf", BYTES))
+            }
+            _ => None,
+        });
+        let env = Env::at(&server);
+        let result = env.sync("--files --download changed");
+        assert_eq!(result["data"]["status"], "complete", "{result}");
+        assert_eq!(result["data"]["representations"], 1);
+        assert_eq!(result["data"]["blobs_added"], 1);
+        assert!(
+            server
+                .requests()
+                .iter()
+                .any(|line| line.starts_with("HEAD /pluginfile.php"))
+        );
+        let out = env.path("export.pdf");
+        env.ok(&format!(
+            "library export representation:1 --out {}",
+            out.display()
+        ));
+        assert_eq!(std::fs::read(out).unwrap(), BYTES);
+        if kind != "folder" {
+            let locator = if kind == "resource" {
+                destination.to_owned()
+            } else {
+                "activity:coursefile:7".into()
+            };
+            let out = env.path("download.pdf");
+            env.ok(&format!(
+                "files download '{locator}' --out {}",
+                out.display()
+            ));
+            assert_eq!(std::fs::read(out).unwrap(), BYTES);
+        }
+        if kind == "resource" {
+            assert_eq!(
+                env.fail("request get /mod/resource/view.php?id=7&forceview=1")
+                    .1["code"],
+                "CONTENT_UNAVAILABLE"
+            );
+        }
+    }
 }

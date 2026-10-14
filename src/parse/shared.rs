@@ -125,32 +125,6 @@ pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
         .and_then(|href| resolve_http_url(base_url, href))
 }
 
-/// Every item link in a known collection must be represented, even when its
-/// surrounding row markup has changed. Non-item content is valid empty chrome.
-pub(super) fn collection_shape(
-    document: &Html,
-    regions: &str,
-    base: &Url,
-    is_item: impl Fn(&Url) -> bool,
-    represented: impl Fn(ElementRef<'_>, &Url) -> bool,
-) -> Result<(), AppError> {
-    let selector = sel(regions);
-    let mut regions = document.select(&selector).peekable();
-    if regions.peek().is_none()
-        || regions.any(|root| {
-            root.select(&sel("a[href]")).any(|anchor| {
-                href_url(anchor, base)
-                    .is_some_and(|url| is_item(&url) && !represented(anchor, &url))
-            })
-        })
-    {
-        return Err(AppError::shape(
-            "collection region is missing or has unrecognized item links",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn module_view(url: &Url) -> bool {
     url.path().rsplit_once("/mod/").is_some_and(|(_, tail)| {
         tail.strip_suffix("/view.php")
