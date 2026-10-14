@@ -797,26 +797,80 @@ fn forget_reports_failed_or_locked_keyring_deletion_and_retries_without_identity
 }
 
 #[test]
-fn forget_unavailable_backend_remains_retryable_after_metadata_removal() {
+fn forget_without_metadata_or_keyring_is_complete_and_quiet() {
+    let fx = Fixture::new();
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert!(result.warnings.is_empty());
+    assert_eq!(result.data["login_removed"], false);
+    assert_eq!(result.data["password_removed"], false);
+    assert_eq!(result.data["password_backend"], Value::Null);
+    assert_eq!(result.data["password_cleanup_complete"], true);
+    assert_eq!(
+        result.data["password_backends"],
+        json!({"plaintext-file": false})
+    );
+    assert!(!result.human.contains("incomplete"));
+}
+
+#[test]
+fn forget_unavailable_backend_keeps_metadata_until_purge_succeeds() {
     let mut fx = Fixture::new();
     let (backend, root) = fake_keyring(&mut fx);
     backend.store("student", "pw").unwrap();
     let mut identity = Identity::new("student", LoginMethod::Password, None);
     identity.password_backend = Some("secret-service".into());
     store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
+    let temporary = fx.dirs.identity().with_extension("json.123.tmp");
+    fs::write(&temporary, "old identity").unwrap();
     fs::rename(root.join("secret-tool"), root.join("disabled")).unwrap();
     for _ in 0..2 {
         let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
         assert_eq!(result.data["password_removed"], false);
-        assert!(!result.warnings.is_empty());
-        assert!(!fx.dirs.identity().exists());
+        assert_eq!(result.data["login_removed"], false);
+        assert_eq!(result.data["password_cleanup_complete"], false);
+        assert_eq!(result.data["password_backend"], "secret-service");
+        assert_eq!(
+            result.data["password_backends"]["secret-service"],
+            Value::Null
+        );
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("secret-tool` is not installed"));
+        assert_eq!(fx.identity(), Some(identity.clone()));
+        assert!(!temporary.exists());
     }
     fs::rename(root.join("disabled"), root.join("secret-tool")).unwrap();
-    assert_eq!(
-        forget_with(&fx.dirs, &fx.secrets).unwrap().data["password_removed"],
-        true
-    );
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(result.data["password_removed"], true);
+    assert_eq!(result.data["login_removed"], true);
+    assert_eq!(result.data["password_cleanup_complete"], true);
+    assert_eq!(result.data["password_backends"]["secret-service"], true);
+    assert!(result.warnings.is_empty());
+    assert!(!fx.dirs.identity().exists());
     assert!(backend.lookup("student").unwrap().is_none());
+}
+
+#[test]
+fn forget_failed_named_backend_keeps_metadata_until_purge_succeeds() {
+    for fault in ["fail-clear", "locked"] {
+        let mut fx = Fixture::new();
+        let (backend, root) = fake_keyring(&mut fx);
+        backend.store("student", "pw").unwrap();
+        let mut identity = Identity::new("student", LoginMethod::Password, None);
+        identity.password_backend = Some("secret-service".into());
+        store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
+        fs::write(root.join(fault), "").unwrap();
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["login_removed"], false);
+        assert_eq!(result.data["password_cleanup_complete"], false);
+        assert!(!result.warnings.is_empty());
+        assert_eq!(fx.identity(), Some(identity));
+        fs::remove_file(root.join(fault)).unwrap();
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["login_removed"], true);
+        assert_eq!(result.data["password_removed"], true);
+        assert!(result.warnings.is_empty());
+        assert!(backend.lookup("student").unwrap().is_none());
+    }
 }
 
 #[test]
@@ -926,6 +980,9 @@ fn forget_and_logout_clean_only_their_owned_crash_temporaries() {
 #[test]
 fn logout_and_forget_report_file_and_temp_deletion_failures() {
     let fx = Fixture::new();
+    let mut identity = Identity::new("student", LoginMethod::Password, None);
+    identity.password_backend = Some(secret::PLAINTEXT_FILE.into());
+    store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
     for path in [
         fx.dirs.session(),
         fx.dirs.pending(),
@@ -940,6 +997,8 @@ fn logout_and_forget_report_file_and_temp_deletion_failures() {
     assert_eq!(result.data["cleanup_complete"], false);
     assert!(result.human.contains("incomplete"));
     let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(result.data["login_removed"], false);
+    assert_eq!(fx.identity(), Some(identity));
     assert_eq!(result.data["password_removed"], false);
     assert_eq!(result.data["pending_removed"], false);
     assert!(
