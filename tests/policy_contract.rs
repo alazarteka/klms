@@ -125,3 +125,17 @@ fn file_locators_allow_resource_redirects_to_pluginfile() {
         );
     }
 }
+
+#[test]
+fn a_redirect_to_the_login_page_is_an_expired_session() {
+    let server = Server::new(|_| {
+        Response::html("")
+            .status("303 See Other")
+            .header("Location", "/login/index.php")
+    });
+    let env = Env::at(&server);
+    let (code, error) = env.fail("assignments show assign:7");
+    assert_eq!(error["code"], "AUTH_REQUIRED");
+    assert_ne!(code, 0);
+    assert_eq!(server.recorded().len(), 1);
+}
