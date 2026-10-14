@@ -1,5 +1,7 @@
+mod content;
 mod curate;
 mod object_store;
+mod observe;
 mod query;
 mod schema;
 mod sync;
