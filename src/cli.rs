@@ -1,3 +1,4 @@
+use crate::models::Semester;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -411,7 +412,7 @@ pub enum LibraryRelationsCommand {
 
 #[derive(Debug, Clone, Args)]
 pub struct ListArgs {
-    /// Maximum rows (1-1000; default 100). meta.complete=false means more rows exist.
+    /// Maximum rows (1-1000; default 100). meta.complete=false means rows were cut by --limit or KLMS returned an incomplete list.
     #[arg(long, value_name = "N", default_value_t = 100, value_parser = parse_list_limit)]
     pub limit: usize,
 }
@@ -571,25 +572,6 @@ pub struct AuthLoginArgs {
     pub code: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum Semester {
-    Spring,
-    Summer,
-    Fall,
-    Winter,
-}
-
-impl Semester {
-    pub fn course_suffix(self) -> &'static str {
-        match self {
-            Self::Spring => "1",
-            Self::Summer => "2",
-            Self::Fall => "3",
-            Self::Winter => "4",
-        }
-    }
-}
-
 #[derive(Debug, Args)]
 pub struct CourseListArgs {
     #[command(flatten)]
@@ -678,7 +660,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-video-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. The next remuxing download removes generated temporaries older than 24 hours, restricted to the same owner on Unix. An interrupted download may leave ffmpeg running until it finishes or fails. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-download-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. The next download removes generated temporaries older than 48 hours, restricted to the same owner on Unix. An interrupted download may leave ffmpeg running until it finishes or fails. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.
@@ -820,7 +802,7 @@ pub enum CourseShowCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RequestCommand {
-    /// GET a same-origin path or URL; redacted, bounded text preview (experimental last resort; prefer typed commands).
+    /// GET a same-origin path or URL; bounded preview with heuristic redaction (experimental last resort; prefer typed commands).
     #[command(
         after_help = "Example:\n  klms --json request get '/mod/assign/view.php?id=1210516' --max-bytes 65536"
     )]

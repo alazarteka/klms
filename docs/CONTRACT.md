@@ -179,12 +179,12 @@ waits for response headers or the next bytes beyond the stall timeout, or
 outlives `--max-seconds` (including the final remux copy), fails with
 NETWORK_ERROR; byte caps fail with LIMIT_EXCEEDED. There is no resume.
 Remuxing uses a private (0700), exclusively created
-`.klms-video-<pid>-<nonce>.scratch` directory beside `--out`; direct MP4 copies
+`.klms-download-<pid>-<nonce>.scratch` directory beside `--out`; direct MP4 copies
 need no scratch directory. Publication uses a private
-`.klms-video-<pid>-<nonce>.part` file. Both are removed on normal or error
+`.klms-download-<pid>-<nonce>.part` file. Both are removed on normal or error
 returns. An interrupted download (Ctrl-C or kill) may leave ffmpeg running
-until it finishes or fails; the next remuxing download sweeps generated leftovers older
-than 24 hours, restricted to the same owner on Unix. Sweeps skip symlinks and
+until it finishes or fails; the next download into that directory sweeps generated
+leftovers older than 48 hours, restricted to the same owner on Unix. Sweeps skip symlinks and
 unrelated names.
 User downloads may fall back to a non-atomic exclusive copy when hard links
 fail, with a warning; object-store publication requires an atomic hard link.

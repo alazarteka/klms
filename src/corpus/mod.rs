@@ -1,11 +1,13 @@
+mod content;
 mod curate;
 mod object_store;
+mod observe;
 mod query;
 mod schema;
 mod sync;
 
 use std::{
-    env, fmt, fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -111,16 +113,12 @@ pub struct ContentPreview {
 
 impl Corpus {
     pub fn open() -> Result<Self, AppError> {
-        let data_home = env::var_os("XDG_DATA_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                (env::var_os("HOME").filter(|value| !value.is_empty()))
-                    .map(|home| PathBuf::from(home).join(".local/share"))
-            })
-            .ok_or_else(|| {
-                AppError::config("HOME or XDG_DATA_HOME is required for the local library")
-            })?;
+        let home = crate::private_fs::env_path("HOME");
+        let data_home =
+            crate::private_fs::xdg_home("XDG_DATA_HOME", home.as_deref(), ".local/share")
+                .ok_or_else(|| {
+                    AppError::config("HOME or XDG_DATA_HOME is required for the local library")
+                })?;
         Self::open_at(&data_home, Duration::from_secs(5))
     }
 
@@ -233,6 +231,26 @@ fn sqlite_error(path: &Path, error: rusqlite::Error) -> AppError {
     let mut converted = AppError::from(error);
     converted.message = format!("{} ({})", converted.message, path.display());
     converted
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        use rusqlite::ErrorCode::*;
+        let code = match &error {
+            rusqlite::Error::SqliteFailure(code, _) => Some(code.code),
+            _ => None,
+        };
+        match code {
+            Some(DatabaseBusy | DatabaseLocked) => {
+                Self::corpus_busy("local library is locked by another process")
+            }
+            Some(DatabaseCorrupt | NotADatabase) => {
+                Self::corpus_corrupt("local library database is corrupt")
+            }
+            Some(SchemaChanged) => Self::migration_required("local library schema is incompatible"),
+            _ => Self::library_io(format!("SQLite failure: {error}")),
+        }
+    }
 }
 
 #[cfg(test)]

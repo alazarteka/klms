@@ -152,13 +152,15 @@ fn embedded_launch_ignores_description_links_and_prefers_the_activity_frame() {
 
 #[test]
 fn recording_uuid_identity_is_strict() {
-    assert!(uuid("11111111-2222-3333-4444-555555555555"));
+    assert!(crate::reference::valid_uuid(
+        "11111111-2222-3333-4444-555555555555"
+    ));
     for value in [
         "unknown",
         "11111111-2222-3333-4444-55555555555g",
         "11111111222233334444555555555555",
     ] {
-        assert!(!uuid(value));
+        assert!(!crate::reference::valid_uuid(value));
     }
 }
 

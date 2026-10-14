@@ -1,7 +1,7 @@
 //! The HTTP side of a login: only KLMS and SSO origins are ever contacted,
 //! redirects are followed by hand, and cookies live in a per-login jar.
 
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
 use serde_json::Value;
 use ureq::Agent;
@@ -100,10 +100,7 @@ impl SsoTransport {
         ajax: bool,
     ) -> Result<(Url, String), AppError> {
         let url = self.url(reference)?;
-        let payload = form.map(|form| Payload {
-            content_type: "application/x-www-form-urlencoded",
-            bytes: crate::url::form_urlencode(form.iter().copied()).into_bytes(),
-        });
+        let payload = form.map(|form| Payload::form(form.iter().copied()));
         let mut policy = SsoPolicy {
             cookies: &mut self.cookies,
             document_url: self.document_url.as_ref(),
@@ -155,10 +152,7 @@ fn text(response: Response) -> Result<(Url, String), AppError> {
         return Err(too_big());
     }
     let url = response.url().clone();
-    let mut bytes = Vec::new();
-    response
-        .take(MAX_BODY as u64 + 1)
-        .read_to_end(&mut bytes)
+    let bytes = http::read_prefix(response, MAX_BODY as u64)
         .map_err(|error| AppError::network(format!("failed to read SSO response: {error}")))?;
     if bytes.len() > MAX_BODY {
         return Err(too_big());
@@ -172,7 +166,7 @@ fn ensure_allowed(klms: &Url, sso: &Url, url: &Url) -> Result<(), AppError> {
             "KAIST SSO attempted a redirect to an untrusted origin",
         ));
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if crate::url::has_userinfo(url) {
         return Err(AppError::auth_protocol("SSO URL contained userinfo"));
     }
     Ok(())

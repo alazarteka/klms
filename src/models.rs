@@ -180,6 +180,7 @@ pub struct RawGet {
     pub bytes: usize,
     pub body: String,
     pub truncated: bool,
+    /// Heuristic filtering changed or withheld the preview, not a guarantee of secrecy.
     pub redacted: bool,
 }
 
@@ -317,4 +318,23 @@ pub struct Video {
     pub official_download_available: Option<bool>,
     pub stream_count: Option<usize>,
     pub output_composition: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Semester {
+    Spring,
+    Summer,
+    Fall,
+    Winter,
+}
+
+impl Semester {
+    pub(crate) fn course_suffix(self) -> &'static str {
+        match self {
+            Self::Spring => "1",
+            Self::Summer => "2",
+            Self::Fall => "3",
+            Self::Winter => "4",
+        }
+    }
 }

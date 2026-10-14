@@ -6,7 +6,7 @@
 use std::{
     env, fs,
     io::{ErrorKind, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -36,10 +36,8 @@ pub struct Dirs {
 }
 
 fn xdg(var: &str, fallback: &str) -> Result<PathBuf, AppError> {
-    env::var_os(var)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
+    let home = env::var_os("HOME").map(PathBuf::from);
+    crate::private_fs::xdg_home(var, home.as_deref(), fallback)
         .map(|root| root.join("klms"))
         .ok_or_else(|| AppError::config(format!("HOME or {var} is required for KLMS login")))
 }
@@ -86,10 +84,8 @@ fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> 
     name.push(format!(".{}.tmp", std::process::id()));
     let temp = path.with_file_name(name);
     remove_file(&temp, what)?;
-    let written = fs::OpenOptions::new()
-        .write(true)
+    let written = crate::private_fs::private_file_options()
         .create_new(true)
-        .mode(0o600)
         .open(&temp)
         .map_err(|error| AppError::config(format!("cannot create private {what} file: {error}")))
         .and_then(|mut file| {

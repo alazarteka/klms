@@ -252,11 +252,7 @@ fn read_library_text(
 }
 
 fn read_curation_text(reader: impl std::io::Read) -> Result<String, AppError> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_CURATION_TEXT as u64 + 1)
-        .read_to_end(&mut bytes)
+    let bytes = crate::http::read_prefix(reader, MAX_CURATION_TEXT as u64)
         .map_err(|e| AppError::config(format!("cannot read curation text: {e}")))?;
     if bytes.len() > MAX_CURATION_TEXT {
         return Err(AppError::limit("curation text exceeds 1 MiB"));
