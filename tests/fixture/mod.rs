@@ -123,6 +123,7 @@ impl Env {
     /// Runs `--json`, requires a failure with empty stdout, and returns (exit code, error object).
     pub fn fail(&self, args: &str) -> (i32, Value) {
         let output = self.out(args);
+        assert!(!output.status.success(), "{args:?}: unexpectedly succeeded");
         assert!(output.stdout.is_empty(), "{args:?}: stdout not empty");
         let envelope: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(envelope["ok"], false);

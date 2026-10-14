@@ -17,6 +17,32 @@ use fixture::{
 const ARTICLE: &str = "/mod/courseboard/article.php?id=9&bwid=10";
 const NOTICE_SYNC_HINT: &str = "library sync --course course:42 --notices --download changed";
 
+#[test]
+fn local_library_reads_need_neither_a_session_nor_a_valid_session_file() {
+    let env = Env::new();
+    for corrupt in [false, true] {
+        if corrupt {
+            fs::create_dir_all(env.path("state/klms")).unwrap();
+            fs::write(env.path("state/klms/session.json"), b"not json").unwrap();
+        }
+        assert!(env.data("library status")["last_sync"].is_null());
+        for command in ["library search compiler", "library changes"] {
+            let result = env.ok(command);
+            assert_eq!(result["data"], json!([]), "{command}");
+            assert_eq!(result["meta"]["complete"], true);
+            assert!(result["meta"]["source_complete"].is_null());
+        }
+        if corrupt {
+            assert_eq!(
+                fs::read(env.path("state/klms/session.json")).unwrap(),
+                b"not json"
+            );
+        } else {
+            assert!(!env.path("state/klms/session.json").exists());
+        }
+    }
+}
+
 fn html(body: impl Into<Vec<u8>>) -> Option<Response> {
     Some(Response::html(body))
 }
