@@ -13,6 +13,7 @@ pub(super) fn raw_get(
     max_bytes: usize,
 ) -> Result<CommandResult, AppError> {
     validate_read_target(path)?;
+    client.validate_operand(path)?;
     let response = client.get_preview(path, max_bytes)?;
     let kind = (response.content_type.as_deref())
         .map(str::to_ascii_lowercase)
@@ -58,7 +59,7 @@ fn validate_read_target(value: &str) -> Result<(), AppError> {
     let base = Url::parse("https://klms.invalid/").expect("valid fixed URL");
     let url =
         (base.join(value)).map_err(|e| AppError::usage(format!("invalid request target: {e}")))?;
-    crate::client::policy::read_url(&url)
+    crate::client::policy::read_url(&url).map_err(|error| AppError::usage(error.message))
 }
 
 fn redact_secrets(value: &str) -> String {
