@@ -115,6 +115,12 @@ fn auth_paths(text: &str) -> Vec<String> {
     paths
 }
 
+pub(crate) fn login_markup(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("name=\"username\"") && lower.contains("name=\"password\"")
+        || lower.contains("id=\"loginbtn\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

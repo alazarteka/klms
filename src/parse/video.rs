@@ -13,9 +13,8 @@ pub struct LaunchForm {
     pub action: Url,
     pub fields: Vec<(String, String)>,
 }
-/// Whether `url` is on the trusted Panopto `origin`, without userinfo.
 fn on_panopto(url: &Url, panopto: &Origin) -> bool {
-    url.origin() == *panopto && url.username().is_empty() && url.password().is_none()
+    url.origin() == *panopto && !crate::url::has_userinfo(url)
 }
 pub fn launch_form(
     html: &str,
@@ -186,18 +185,7 @@ pub fn folder_id(url: &Url) -> Option<String> {
     };
     let value = direct.or_else(fragment)?;
     let decoded = serde_json::from_str::<String>(&value).unwrap_or(value);
-    uuid(&decoded).then(|| decoded.to_ascii_lowercase())
-}
-
-pub fn uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| {
-            if [8, 13, 18, 23].contains(&i) {
-                b == b'-'
-            } else {
-                b.is_ascii_hexdigit()
-            }
-        })
+    crate::reference::valid_uuid(&decoded).then(|| decoded.to_ascii_lowercase())
 }
 
 #[cfg(test)]

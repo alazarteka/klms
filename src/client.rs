@@ -137,7 +137,7 @@ impl KlmsClient {
         })
     }
 
-    pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
+    fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let mut response = self.send_get(path)?;
         let bytes = read_capped(&mut response, max_bytes)?;
         check_logged_out(&response, &bytes)?;
@@ -499,15 +499,9 @@ fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Res
     }
 }
 
-/// Reads at most `max_bytes + 1` bytes; a longer result means the body was cut.
 fn read_prefix(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
-    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
-    response
-        .by_ref()
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-    Ok(body)
+    http::read_prefix(response, max_bytes as u64)
+        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))
 }
 
 /// The whole body, or a limit error when it is declared or turns out larger.
@@ -561,10 +555,7 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
 }
 
 fn looks_logged_out(url: &Url, html: &str) -> bool {
-    let lower = html.to_ascii_lowercase();
-    url.path().to_ascii_lowercase().contains("/login/")
-        || lower.contains("name=\"username\"") && lower.contains("name=\"password\"")
-        || lower.contains("id=\"loginbtn\"")
+    url.path().to_ascii_lowercase().contains("/login/") || crate::parse::login_markup(html)
 }
 
 /// Separate unauthenticated transport for explicit release checks/downloads.
@@ -606,10 +597,7 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
         )));
     }
     let expected = response.content_length();
-    let mut bytes = Vec::new();
-    response
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
+    let bytes = http::read_prefix(response, limit)
         .map_err(|e| AppError::network(format!("release response read failed: {e}")))?;
     if bytes.len() as u64 > limit {
         return Err(AppError::limit("release response exceeds size limit"));
@@ -812,7 +800,8 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, "NETWORK_ERROR");
-        assert!(started.elapsed() < Duration::from_millis(1600));
+        // Per-hop timeouts would follow every hop until the redirect cap (~4.5s).
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

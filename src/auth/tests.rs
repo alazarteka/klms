@@ -629,7 +629,13 @@ fn a_code_that_never_reached_kaist_keeps_the_pending_login() {
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     pending.document_url = None;
     store::save_json(&path, &pending, "pending login").unwrap();
-    let refused = Url::parse("http://127.0.0.1:9/").unwrap();
+    // A port that was just bound and released refuses connections.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let refused = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let env = Env {
         dirs: &fx.dirs,
         klms: &fx.klms.url,

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Recordings, recording};
-use crate::{error::AppError, parse::video};
+use super::{Recordings, delivery::recording};
+use crate::error::AppError;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +53,7 @@ pub(super) fn collect(
             let id = item
                 .get("DeliveryID")
                 .and_then(Value::as_str)
-                .filter(|id| video::uuid(id))
+                .filter(|id| crate::reference::valid_uuid(id))
                 .ok_or_else(|| AppError::shape("Panopto folder row omitted recording UUID"))?;
             if ids.insert(id.to_ascii_lowercase()) {
                 rows.push(recording(id, item));

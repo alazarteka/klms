@@ -8,6 +8,7 @@ mod native_video;
 mod shared;
 pub mod video;
 
+pub(crate) use auth::login_markup;
 pub use auth::{auth_handoff_form, auth_policy_shape, easy_login_code};
 pub use calendar::calendar_page;
 pub use courses::{

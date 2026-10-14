@@ -1,7 +1,7 @@
 //! The one blocking HTTP transport. The library never follows redirects:
 //! every caller supplies its own origin policy to [`follow`].
 use std::{
-    io,
+    io::{self, Read},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -84,6 +84,24 @@ impl io::Read for Response {
 pub struct Payload {
     pub content_type: &'static str,
     pub bytes: Vec<u8>,
+}
+
+impl Payload {
+    pub(crate) fn form<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        Self {
+            content_type: "application/x-www-form-urlencoded",
+            bytes: crate::url::form_urlencode(pairs).into_bytes(),
+        }
+    }
+}
+
+/// Read at most `limit + 1` bytes, so callers can detect overflow or truncate.
+pub(crate) fn read_prefix(reader: impl io::Read, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024) as usize);
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[derive(Debug)]

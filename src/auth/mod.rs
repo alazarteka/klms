@@ -134,18 +134,21 @@ struct Env<'a> {
 
 pub fn login(
     base_url: &Url,
-    sso_url: &Url,
     timeout: u64,
     options: &LoginOptions,
     json: bool,
 ) -> Result<CommandResult, AppError> {
+    let sso_url = match base_url.host_str() == Some("klms.kaist.ac.kr") {
+        true => Url::parse("https://sso.kaist.ac.kr/").expect("valid SSO URL"),
+        false => base_url.clone(),
+    };
     let dirs = Dirs::from_env()?;
     let secrets = Secrets::new(dirs.credentials());
     let interactive = std::io::stdin().is_terminal();
     let env = Env {
         dirs: &dirs,
         klms: base_url,
-        sso: sso_url,
+        sso: &sso_url,
         timeout,
         secrets: &secrets,
         interactive,

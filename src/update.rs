@@ -4,18 +4,18 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::digest::sha256_hex;
+use crate::private_fs::ScratchDir;
 use crate::{
     client::{Client, release_bytes as fetch},
     error::AppError,
     output,
 };
-use sha2::{Digest, Sha256};
 
 const REPO: &str = "alazarteka/klms";
 const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
@@ -103,7 +103,7 @@ fn run_with_source(
     let checksum = fetch(client, &format!("{base}/{archive_name}.sha256"), 4096)?;
     let archive = fetch(client, &format!("{base}/{archive_name}"), MAX_ARCHIVE)?;
     verify_checksum(&archive, &checksum, &archive_name)?;
-    let work = WorkDir::new(&env::temp_dir())?;
+    let work = ScratchDir::create(&env::temp_dir()).map_err(|(_, e)| io(e))?;
     let archive_path = work.0.join(&archive_name);
     fs::write(&archive_path, archive).map_err(io)?;
     let candidate = work.0.join("klms");
@@ -169,7 +169,7 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
         .parent()
         .ok_or_else(|| AppError::usage("missing install directory"))?;
     fs::create_dir_all(parent).map_err(io)?;
-    let work = WorkDir::new(parent)?;
+    let work = ScratchDir::create(parent).map_err(|(_, e)| io(e))?;
     let staged = work.0.join("klms");
     fs::copy(env::current_exe().map_err(io)?, &staged).map_err(io)?;
     executable(&staged)?;
@@ -200,15 +200,11 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
 /// Earlier releases installed an Agent Skill copy of the help text. klms no
 /// longer removes it; it only reports what is still there, so the user decides.
 fn legacy_skill_paths() -> Vec<PathBuf> {
-    let nonempty = |name| {
-        env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let Some(home) = nonempty("HOME") else {
+    let Some(home) = crate::private_fs::env_path("HOME") else {
         return Vec::new();
     };
-    let data_home = nonempty("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+    let data_home = crate::private_fs::xdg_home("XDG_DATA_HOME", Some(&home), ".local/share")
+        .expect("home is set");
     legacy_skill_paths_at(&home, &data_home)
 }
 
@@ -273,13 +269,6 @@ fn platform() -> Result<&'static str, AppError> {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn verify_checksum(bytes: &[u8], checksum: &[u8], name: &str) -> Result<(), AppError> {
     let text =
         std::str::from_utf8(checksum).map_err(|_| AppError::upstream("invalid checksum file"))?;
@@ -335,29 +324,6 @@ fn executable(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-struct WorkDir(PathBuf);
-impl WorkDir {
-    fn new(parent: &Path) -> Result<Self, AppError> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| AppError::internal(e.to_string()))?
-            .as_nanos();
-        let path = parent.join(format!(".klms-update-{}-{nonce}", std::process::id()));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path).map_err(io)?;
-        Ok(Self(path))
-    }
-}
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 fn io(error: std::io::Error) -> AppError {
     AppError::config(format!("release update failed: {error}"))
 }

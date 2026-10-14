@@ -158,8 +158,7 @@ pub fn native_sources(html: &str, page: &Url) -> Result<Vec<Url>, AppError> {
                             || !url.path().ends_with(".mp4")
                             || url.query().is_some()
                             || url.fragment().is_some()
-                            || !url.username().is_empty()
-                            || url.password().is_some()
+                            || crate::url::has_userinfo(&url)
                         {
                             return Err(AppError::shape(
                                 "native video source is outside the allowed same-origin /vod1/ MP4 path",
