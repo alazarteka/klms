@@ -157,7 +157,7 @@ impl Counter {
 }
 
 pub const DASHBOARD: &str = "<a href='/course/view.php?id=42'>Compilers(CS.420_2026_2)</a>";
-pub const DETAIL: &str = "<main><h1>Lecture One</h1><p>compiler body</p>\
+pub const DETAIL: &str = "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture One</h1><p>compiler body</p>\
     <a href='/pluginfile.php/1/lecture.txt'>lecture.txt</a></main>";
 pub const FILE_TEXT: &str = "Lecture One compiler body lecture.txt";
 pub const BYTES: &str = "fixture bytes";
@@ -175,7 +175,9 @@ pub fn course(modules: &[(&str, u32, &str)]) -> String {
             )
         })
         .collect();
-    format!("<main class='course-content'>{items}</main>")
+    format!(
+        "<body id='page-course-view-topics' class='course-42'><main class='course-content'>{items}</main></body>"
+    )
 }
 
 pub fn manifest() -> String {

@@ -36,7 +36,7 @@ impl Ctx<'_> {
         match command {
             VideosCommand::List { course, list } => {
                 let resolved = self.resolve_course(course)?;
-                let activities = course_pages::activities(self.client, self.base, &resolved.id)?;
+                let activities = course_pages::activities(self.client, &resolved.id)?;
                 let mut videos = Vec::new();
                 let mut complete = true;
                 // Metadata only: opening an activity (mod/*/view.php or its LTI

@@ -125,6 +125,70 @@ pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
         .and_then(|href| resolve_http_url(base_url, href))
 }
 
+/// Every item link in a known collection must be represented, even when its
+/// surrounding row markup has changed. Non-item content is valid empty chrome.
+pub(super) fn collection_shape(
+    document: &Html,
+    regions: &str,
+    base: &Url,
+    is_item: impl Fn(&Url) -> bool,
+    represented: impl Fn(ElementRef<'_>, &Url) -> bool,
+) -> Result<(), AppError> {
+    let selector = sel(regions);
+    let mut regions = document.select(&selector).peekable();
+    if regions.peek().is_none()
+        || regions.any(|root| {
+            root.select(&sel("a[href]")).any(|anchor| {
+                href_url(anchor, base)
+                    .is_some_and(|url| is_item(&url) && !represented(anchor, &url))
+            })
+        })
+    {
+        return Err(AppError::shape(
+            "collection region is missing or has unrecognized item links",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn module_view(url: &Url) -> bool {
+    url.path().rsplit_once("/mod/").is_some_and(|(_, tail)| {
+        tail.strip_suffix("/view.php")
+            .is_some_and(|kind| !kind.is_empty() && !kind.contains('/'))
+    })
+}
+
+pub(super) fn page_identity(document: &Html, kind: &str, id: Option<&str>) -> Result<(), AppError> {
+    let matches = document.select(&sel("body")).any(|body| {
+        let page = body.value().attr("id").unwrap_or_default();
+        let correct_kind = if kind == "course" {
+            page.starts_with("page-course-view-")
+        } else {
+            page == format!("page-mod-{kind}-view")
+                && body
+                    .value()
+                    .classes()
+                    .any(|class| class == format!("path-mod-{kind}"))
+        };
+        let prefix = if kind == "course" { "course-" } else { "cmid-" };
+        correct_kind
+            && id.is_none_or(|id| {
+                body.value().classes().any(|class| {
+                    class.strip_prefix(prefix).is_some_and(|found| {
+                        valid_id(found)
+                            && found.trim_start_matches('0') == id.trim_start_matches('0')
+                    })
+                })
+            })
+    });
+    if !matches {
+        return Err(AppError::shape(
+            "page body does not identify the expected course or module",
+        ));
+    }
+    Ok(())
+}
+
 /// Foreign hierarchical links are redacted; only mailto/tel opaque links are
 /// kept as written without a fragment. These links are shown, never fetched.
 fn foreign_link(href: &str) -> Option<String> {

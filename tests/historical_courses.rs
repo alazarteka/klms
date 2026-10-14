@@ -33,7 +33,9 @@ fn historical_server() -> Server {
                 json!([{"error":false,"data":data}]).to_string(),
             );
         }
-        Response::html("<main class='course-content'></main>")
+        Response::html(
+            "<body id='page-course-view-topics' class='course-42'><main class='course-content'></main>",
+        )
     })
 }
 
