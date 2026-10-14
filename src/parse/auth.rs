@@ -1,7 +1,7 @@
 use crate::url::Url;
 use scraper::Html;
 
-use super::shared::sel;
+use super::shared::{resolve_http_url, sel};
 use crate::error::AppError;
 
 pub struct AuthHandoffForm {
@@ -20,7 +20,7 @@ pub fn auth_handoff_form(
         let Some(action) = form
             .value()
             .attr("action")
-            .and_then(|action| document_url.join(action).ok())
+            .and_then(|action| resolve_http_url(document_url, action))
         else {
             continue;
         };

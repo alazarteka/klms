@@ -2,7 +2,8 @@ use crate::url::Url;
 use scraper::{ElementRef, Html};
 
 use super::shared::{
-    NEXT_PAGE_SELECTORS, first_text, has_any, link_items, query_id, sel, visible_text,
+    NEXT_PAGE_SELECTORS, first_text, has_any, link_items, query_id, resolve_http_url, sel,
+    visible_text,
 };
 use crate::{
     error::AppError,
@@ -136,9 +137,8 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
     else {
         return Ok(None);
     };
-    let url = base_url
-        .join(href)
-        .map_err(|e| AppError::shape(format!("invalid pagination URL: {e}")))?;
+    let url = resolve_http_url(base_url, href)
+        .ok_or_else(|| AppError::shape("invalid pagination URL"))?;
     if url.origin() != base_url.origin() {
         return Err(AppError::shape("pagination URL left the KLMS origin"));
     }

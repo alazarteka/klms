@@ -41,7 +41,7 @@ impl IndexedRow {
         Ok(self
             .cell(header)?
             .and_then(|cell| cell.2.as_deref())
-            .and_then(|value| base_url.join(value).ok()))
+            .and_then(|value| resolve_http_url(base_url, value)))
     }
 }
 
@@ -111,11 +111,18 @@ pub(super) fn indexed_rows(table: ElementRef<'_>) -> Vec<IndexedRow> {
     .collect()
 }
 
+pub(super) fn resolve_http_url(base_url: &Url, value: &str) -> Option<Url> {
+    base_url
+        .join(value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 pub(super) fn href_url(anchor: ElementRef<'_>, base_url: &Url) -> Option<Url> {
     anchor
         .value()
         .attr("href")
-        .and_then(|href| base_url.join(href).ok())
+        .and_then(|href| resolve_http_url(base_url, href))
 }
 
 /// Foreign hierarchical links are redacted; only mailto/tel opaque links are
@@ -146,9 +153,9 @@ pub(super) fn link_items<'a>(
         let Some(href) = anchor.value().attr("href") else {
             continue;
         };
-        let url = match base_url.join(href) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => safe_url::display(&url),
-            _ => match foreign_link(href) {
+        let url = match resolve_http_url(base_url, href) {
+            Some(url) => safe_url::display(&url),
+            None => match foreign_link(href) {
                 Some(link) => link,
                 None => continue,
             },
@@ -261,6 +268,41 @@ pub(super) fn query_id(url: &Url, names: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_links_accept_only_http_and_https() {
+        let base = Url::parse("https://klms.kaist.ac.kr/course/view.php?id=7").unwrap();
+        for (href, expected) in [
+            ("ftp://example.test/file", None),
+            ("file:///tmp/file", None),
+            ("javascript:alert(1)", None),
+            ("data:text/plain,hello", None),
+            ("mailto:ta@example.test", None),
+            ("http://example.test/path", Some("http://example.test/path")),
+            (
+                "https://example.test/path",
+                Some("https://example.test/path"),
+            ),
+            (
+                "/mod/page/view.php?id=8",
+                Some("https://klms.kaist.ac.kr/mod/page/view.php?id=8"),
+            ),
+            ("//example.test/path", Some("https://example.test/path")),
+        ] {
+            assert_eq!(
+                resolve_http_url(&base, href).as_ref().map(Url::as_str),
+                expected,
+                "{href}"
+            );
+            let html = Html::parse_document(&format!("<a href='{href}'>Link</a>"));
+            let anchor = first(html.root_element(), "a").unwrap();
+            assert_eq!(
+                href_url(anchor, &base).as_ref().map(Url::as_str),
+                expected,
+                "{href}"
+            );
+        }
+    }
 
     #[test]
     fn foreign_links_redact_hierarchical_secrets_and_drop_unknown_opaque_schemes() {
