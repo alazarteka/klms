@@ -11,7 +11,7 @@ use crate::{
     date,
     error::AppError,
     models::{Activity, BoardPost, Course, CourseDetail, Dashboard},
-    reference::{ResourceRef, valid_id},
+    reference::{ResourceRef, module_kind, valid_id},
     safe_url,
 };
 
@@ -216,7 +216,7 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
             .value()
             .classes()
             .find_map(|class| class.strip_prefix("modtype_").map(str::to_owned))
-            .or_else(|| url.as_ref()?.module_kind().map(str::to_owned))
+            .or_else(|| module_kind(url.as_ref()?).map(str::to_owned))
             .unwrap_or_else(|| "activity".into());
         let section = module
             .ancestors()

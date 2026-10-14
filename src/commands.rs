@@ -24,7 +24,7 @@ use crate::{
     private_fs::{PublishError, publish_new},
     reference::{ResourceRef, valid_id},
     safe_url,
-    url::Url,
+    url::{Url, query_value},
 };
 
 const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
@@ -291,7 +291,7 @@ impl Ctx<'_> {
                 }
                 BoardsCommand::Posts { board, list } => {
                     let response = client.get(&module_path(board, &["courseboard"])?)?;
-                    let board_id = response.url.query_value("id");
+                    let board_id = query_value(&response.url, "id");
                     let posts = parse::board_posts(&response.text, base, board_id)?;
                     let complete = !parse::has_next_page(&response.text);
                     listing(
@@ -709,7 +709,7 @@ impl Ctx<'_> {
             };
             let response = self.client.get(&ResourceRef::parse(&board_ref)?.path())?;
             source_complete &= !parse::has_next_page(&response.text);
-            let board_id = response.url.query_value("id");
+            let board_id = query_value(&response.url, "id");
             for post in parse::board_posts(&response.text, self.base, board_id)? {
                 let Some(reference) = post.reference else {
                     return Err(AppError::shape(
@@ -761,12 +761,7 @@ impl Ctx<'_> {
             post.into()
         };
         let response = self.client.get(&target)?;
-        let numeric = |key| {
-            response
-                .url
-                .query_value(key)
-                .is_some_and(|id| valid_id(&id))
-        };
+        let numeric = |key| query_value(&response.url, key).is_some_and(|id| valid_id(&id));
         if response.url.path() != "/mod/courseboard/article.php"
             || !numeric("id")
             || !numeric("bwid")
@@ -789,7 +784,10 @@ impl Ctx<'_> {
         let Some(requested) = ResourceRef::from_url(&requested_url) else {
             return Ok(());
         };
-        let same_id = |key| match (requested_url.query_value(key), final_url.query_value(key)) {
+        let same_id = |key| match (
+            query_value(&requested_url, key),
+            query_value(final_url, key),
+        ) {
             (Some(a), Some(b)) => a.trim_start_matches('0') == b.trim_start_matches('0'),
             (a, b) => a.is_none() && b.is_none(),
         };

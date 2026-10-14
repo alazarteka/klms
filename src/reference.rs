@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{error::AppError, url::Url};
+use crate::{
+    error::AppError,
+    url::{Url, query_value},
+};
 
 const VIDEO_KINDS: [&str; 4] = ["vod", "lti", "panopto", "panoptocourseembed"];
 
@@ -70,7 +73,7 @@ impl ResourceRef {
     }
 
     pub fn from_activity(kind: &str, id: Option<&str>, url: Option<&Url>) -> Option<Self> {
-        let id = id.map(str::to_owned).or_else(|| url?.query_value("id"))?;
+        let id = id.map(str::to_owned).or_else(|| query_value(url?, "id"))?;
         let kind = kind.to_ascii_lowercase();
         if !valid_id(&id) {
             return None;
@@ -87,7 +90,7 @@ impl ResourceRef {
     }
 
     pub fn from_url(url: &Url) -> Option<Self> {
-        Self::from_activity(url.module_kind()?, None, Some(url))
+        Self::from_activity(module_kind(url)?, None, Some(url))
     }
 
     pub fn activity_kind(&self) -> Option<&str> {
@@ -150,6 +153,12 @@ impl fmt::Display for ResourceRef {
     }
 }
 
+/// The segment after `/mod/` in a Moodle activity path.
+pub(crate) fn module_kind(url: &Url) -> Option<&str> {
+    let mut segments = url.path_segments()?.skip_while(|part| *part != "mod");
+    segments.nth(1)
+}
+
 pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
@@ -165,6 +174,18 @@ fn valid_kind(value: &str) -> bool {
 mod tests {
     use super::ResourceRef;
     use crate::url::Url;
+
+    #[test]
+    fn module_kind_reads_moodle_paths() {
+        for (path, expected) in [
+            ("/mod/quiz/view.php?id=7", Some("quiz")),
+            ("/mod", None),
+            ("/course/view.php?id=7", None),
+        ] {
+            let url = Url::parse(&format!("https://a.test{path}")).unwrap();
+            assert_eq!(super::module_kind(&url), expected);
+        }
+    }
 
     #[test]
     fn canonical_refs_round_trip_to_paths() {
