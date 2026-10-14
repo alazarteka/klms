@@ -131,11 +131,13 @@ fn run<B: ureq::AsSendBody>(
     request: http::Request<B>,
     remaining: Option<Duration>,
     proxy: Option<Proxy>,
+    response_timeout: Option<Duration>,
 ) -> Result<http::Response<ureq::Body>, ureq::Error> {
     agent.run(
         agent
             .configure_request(request)
             .timeout_global(remaining)
+            .timeout_recv_response(response_timeout)
             .proxy(proxy)
             .build(),
     )
@@ -150,6 +152,7 @@ fn send_until(
     headers: &[(&'static str, String)],
     payload: Option<&Payload>,
     deadline: Option<Instant>,
+    response_timeout: Option<Duration>,
 ) -> Result<Response, Failure> {
     let transport = |message: String| Failure::Transport(message.replace(url.as_str(), "<url>"));
     let remaining = match deadline {
@@ -176,10 +179,10 @@ fn send_until(
         Some(payload) => builder
             .header("content-type", payload.content_type)
             .body(payload.bytes.clone())
-            .map(|request| run(agent, request, remaining, proxy)),
+            .map(|request| run(agent, request, remaining, proxy, response_timeout)),
         None => builder
             .body(())
-            .map(|request| run(agent, request, remaining, proxy)),
+            .map(|request| run(agent, request, remaining, proxy, response_timeout)),
     };
     let response = result
         .map_err(|error| transport(error.to_string()))?
@@ -195,6 +198,11 @@ fn send_until(
 
 /// Per-hop behavior supplied by the caller of [`follow`].
 pub trait Policy {
+    /// Media callers also bound waiting for response headers by their stall budget.
+    fn response_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Extra headers for one hop, computed from that hop's method and URL.
     fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
         Vec::new()
@@ -245,6 +253,7 @@ pub fn follow(
             &extra,
             payload.as_ref(),
             deadline,
+            policy.response_timeout(),
         )?;
         policy.inspect(&response).map_err(Failure::Refused)?;
         let status = response.status();

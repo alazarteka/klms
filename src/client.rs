@@ -282,6 +282,7 @@ impl KlmsClient {
     ) -> Result<DownloadResponse, AppError> {
         let url = self.resolve(path)?;
         let mut policy = NativeVideoPolicy {
+            stall: limits.stall,
             origin: self.base_url.origin(),
             cookie: self.cookie.clone(),
         };
@@ -623,11 +624,15 @@ struct KlmsPolicy {
 }
 
 struct NativeVideoPolicy {
+    stall: Duration,
     origin: Origin,
     cookie: String,
 }
 
 impl http::Policy for NativeVideoPolicy {
+    fn response_timeout(&self) -> Option<Duration> {
+        Some(self.stall)
+    }
     fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
         if self.cookie.is_empty() {
             Vec::new()
@@ -931,6 +936,27 @@ mod tests {
             assert!(error.message.contains(message), "{}", error.message);
             assert!(started.elapsed() < Duration::from_secs(4));
         }
+    }
+
+    #[test]
+    fn native_video_stall_timeout_bounds_response_headers() {
+        let server = Server::new(|_| {
+            thread::sleep(Duration::from_secs(2));
+            Response::bytes("video/mp4", mp4())
+        });
+        let limits = Limits {
+            stall: Duration::from_millis(100),
+            ..Limits::new(1024, 5, 5)
+        };
+        let started = Instant::now();
+        let mut output = Vec::new();
+        let error = client(&server, None, 5)
+            .download_video_to("/vod1/file.mp4", limits, &mut output)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(output.is_empty());
     }
 
     #[test]
