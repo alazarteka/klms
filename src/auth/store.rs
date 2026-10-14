@@ -6,7 +6,7 @@
 use std::{
     env, fs,
     io::{ErrorKind, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -84,10 +84,8 @@ fn write_private(path: &Path, bytes: &[u8], what: &str) -> Result<(), AppError> 
     name.push(format!(".{}.tmp", std::process::id()));
     let temp = path.with_file_name(name);
     remove_file(&temp, what)?;
-    let written = fs::OpenOptions::new()
-        .write(true)
+    let written = crate::private_fs::private_file_options()
         .create_new(true)
-        .mode(0o600)
         .open(&temp)
         .map_err(|error| AppError::config(format!("cannot create private {what} file: {error}")))
         .and_then(|mut file| {

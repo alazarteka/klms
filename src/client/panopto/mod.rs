@@ -119,7 +119,6 @@ impl Session {
             ("isEditing", "false"),
             ("isKollectiveAgentInstalled", "false"),
         ];
-        let p = Payload::form(pairs);
         let endpoint = self
             .policy
             .config
@@ -129,7 +128,7 @@ impl Session {
             &mut self.policy,
             Method::POST,
             endpoint,
-            Some(p),
+            Some(Payload::form(pairs)),
         )?;
         let value: Value = serde_json::from_str(&text(r)?)
             .map_err(|_| AppError::shape("Panopto delivery metadata was not JSON"))?;

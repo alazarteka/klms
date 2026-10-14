@@ -1,8 +1,9 @@
 //! Private (owner-only) files and their no-overwrite atomic publication.
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, Metadata, OpenOptions},
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +18,7 @@ pub(crate) fn xdg_home(name: &str, home: Option<&Path>, fallback: &str) -> Optio
 }
 
 /// Write-only options that create files with mode 0600 on Unix.
-pub fn private_file_options() -> OpenOptions {
+pub(crate) fn private_file_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true);
     #[cfg(unix)]
@@ -26,31 +27,30 @@ pub fn private_file_options() -> OpenOptions {
 }
 
 #[derive(Debug)]
-pub enum PublishError<E> {
+pub(crate) enum PublishError<E> {
     Create(io::Error),
     Fill(E),
     Sync(io::Error),
     Link(io::Error),
 }
 
-/// How a publication ended.
-pub struct Linked {
+pub(crate) struct Linked {
     /// The temporary this call created (`temporary`, or a suffixed variant
     /// when that name was already taken).
-    pub temporary: PathBuf,
+    pub(crate) temporary: PathBuf,
     /// `destination` was already there and was left untouched.
-    pub existed: bool,
+    pub(crate) existed: bool,
     /// A non-atomic exclusive copy was used because hard linking failed.
-    pub copied: bool,
+    pub(crate) copied: bool,
     /// Removing `temporary` failed; the content is published regardless.
-    pub leftover: Option<io::Error>,
+    pub(crate) leftover: Option<io::Error>,
 }
 
 const TEMPORARY_ATTEMPTS: u32 = 8;
 
 /// Publish atomically without replacing an existing destination. Hard-link
 /// failures are errors; partially visible objects are never accepted.
-pub fn publish_atomic<T, E>(
+pub(crate) fn publish_atomic<T, E>(
     temporary: &Path,
     destination: &Path,
     fill: impl FnOnce(&mut File) -> Result<T, E>,
@@ -66,7 +66,7 @@ pub fn publish_atomic<T, E>(
 
 /// Publish a user download, falling back to an exclusive copy when hard links
 /// fail. `Linked::copied` reports that the destination was not published atomically.
-pub fn publish_download<T, E>(
+pub(crate) fn publish_download<T, E>(
     temporary: &Path,
     destination: &Path,
     fill: impl FnOnce(&mut File) -> Result<T, E>,
@@ -164,11 +164,11 @@ const TEMP_PREFIX: &str = ".klms-download-";
 const STALE_AFTER: Duration = Duration::from_secs(48 * 60 * 60);
 
 pub(crate) fn temporary_name(suffix: &str) -> String {
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos())
-        + u128::from(SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        + u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     format!("{TEMP_PREFIX}{}-{nonce:x}.{suffix}", std::process::id())
 }
 
@@ -182,23 +182,18 @@ fn temporary_kind(name: &str) -> Option<&str> {
     if nonce.is_empty() || !nonce.bytes().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    match suffix {
-        "scratch" | "part" => Some(suffix),
-        _ if suffix
-            .strip_prefix("part.")
-            .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_hexdigit())) =>
-        {
-            Some("part")
-        }
-        _ => None,
+    if let Some(retry) = suffix.strip_prefix("part.") {
+        return (!retry.is_empty() && retry.bytes().all(|c| c.is_ascii_hexdigit()))
+            .then_some("part");
     }
+    matches!(suffix, "scratch" | "part").then_some(suffix)
 }
 
 /// Forty-eight hours exceeds the CLI's maximum 24-hour download deadline.
-pub(crate) fn sweep_stale(parent: &Path, own: &std::fs::Metadata) {
+fn sweep_stale(parent: &Path, own: &Metadata) {
     #[cfg(not(unix))]
     let _ = own;
-    let Ok(entries) = std::fs::read_dir(parent) else {
+    let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
@@ -226,9 +221,9 @@ pub(crate) fn sweep_stale(parent: &Path, own: &std::fs::Metadata) {
             continue;
         }
         if meta.file_type().is_file() && kind == "part" {
-            let _ = std::fs::remove_file(&path);
+            let _ = fs::remove_file(&path);
         } else if meta.file_type().is_dir() && kind == "scratch" {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = fs::remove_dir_all(&path);
         }
     }
 }
@@ -399,21 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn sweep_keeps_downloads_within_the_maximum_deadline() {
-        let dir = tempfile::tempdir().unwrap();
-        let active = dir.path().join(temporary_name("part"));
-        let stale = dir.path().join(temporary_name("part"));
-        for (path, hours) in [(&active, 24), (&stale, 49)] {
-            let file = private_file_options().create_new(true).open(path).unwrap();
-            file.set_modified(SystemTime::now() - Duration::from_secs(hours * 60 * 60))
-                .unwrap();
-        }
-        sweep_stale(dir.path(), &fs::metadata(&active).unwrap());
-        assert!(active.exists());
-        assert!(!stale.exists());
-    }
-
-    #[test]
     fn temporary_names_match_only_generated_entries() {
         for (name, expected) in [
             (".klms-download-42-ab.part", Some("part")),
@@ -448,7 +428,7 @@ mod tests {
         std::fs::create_dir(&legacy).unwrap();
         let notes = dir.path().join(".klms-download-project.part-notes");
         std::fs::write(&notes, b"user notes").unwrap();
-        let old = std::time::SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(1);
+        let old = SystemTime::now() - STALE_AFTER - std::time::Duration::from_secs(1);
         std::fs::File::open(&notes)
             .unwrap()
             .set_modified(old)

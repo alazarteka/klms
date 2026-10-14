@@ -1,6 +1,6 @@
 use super::{
     Ctx,
-    download::{publish, validate_out, workspace},
+    download::{publish, validate_out},
     resources::module_path,
 };
 use crate::{cli::VideosCommand, client::stream::Limits, models::Video, reference::module_kind};
@@ -9,7 +9,7 @@ use crate::{
     error::AppError,
     output::{self, CommandResult, listing, row, table},
     parse,
-    private_fs::out_parent,
+    private_fs::{ScratchDir, out_parent},
     reference::ResourceRef,
     url::{Url, query_value},
 };
@@ -180,8 +180,17 @@ impl Ctx<'_> {
                             .join(&ResourceRef::parse(&launch_ref)?.path())
                             .map_err(|_| AppError::shape("Panopto launch locator is invalid"))?;
                         let limits = Limits::new(cap, *max_seconds, *stall_seconds);
-                        let workspace =
-                            delivery.needs_remux().then(|| workspace(out)).transpose()?;
+                        let workspace = delivery
+                            .needs_remux()
+                            .then(|| {
+                                ScratchDir::create(out_parent(out)).map_err(|(path, e)| {
+                                    AppError::config(format!(
+                                        "could not create video workspace {}: {e}",
+                                        path.display()
+                                    ))
+                                })
+                            })
+                            .transpose()?;
                         publish("videos.download", out, |file| {
                             let downloaded = session.download_to(
                                 &delivery,

@@ -2,7 +2,6 @@ use super::Config;
 use crate::{error::AppError, url::Url};
 use serde_json::Value;
 
-#[derive(Debug)]
 pub(crate) struct Recording {
     pub(crate) id: String,
     pub(crate) title: String,

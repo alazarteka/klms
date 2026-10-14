@@ -13,7 +13,6 @@ pub struct LaunchForm {
     pub action: Url,
     pub fields: Vec<(String, String)>,
 }
-/// Whether `url` is on the trusted Panopto `origin`, without userinfo.
 fn on_panopto(url: &Url, panopto: &Origin) -> bool {
     url.origin() == *panopto && !crate::url::has_userinfo(url)
 }

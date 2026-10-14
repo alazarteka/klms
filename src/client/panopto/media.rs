@@ -1,6 +1,5 @@
 use super::{
     Config, Delivery, Download, Session,
-    delivery::SourceGroup,
     hls::{ByteRange, fetch_local, local_playlist},
     remux::{remux, require_ffmpeg},
 };
@@ -27,17 +26,9 @@ impl Session {
         let mut fetch = |u: &Url, w: &mut dyn Write, limits: Limits, range: Option<ByteRange>| {
             media_copy(config, u, w, limits, Expect::Media, range)
         };
-        if let [
-            SourceGroup {
-                mp4: Some(source),
-                offset,
-                ..
-            },
-        ] = d.groups.as_slice()
-        {
-            if *offset == 0.0 {
-                return media_copy(config, source, writer, limits, Expect::Mp4, None);
-            }
+        if !d.needs_remux() {
+            let source = d.groups[0].mp4.as_ref().expect("single unshifted MP4");
+            return media_copy(config, source, writer, limits, Expect::Mp4, None);
         }
         // Each track's source, preferring MP4 (true) over HLS (false).
         let Some(sources) = d
