@@ -21,6 +21,16 @@ pub fn embedded_activity(html: &str, module: &str) -> Result<String, AppError> {
     Ok(node.html())
 }
 
+/// The activity name inside an isolated fragment; the course page around it
+/// carries the course's identity, not the module's.
+pub fn embedded_title(fragment: &str) -> Option<String> {
+    let doc = Html::parse_fragment(fragment);
+    doc.select(&Selector::parse(".instancename").ok()?)
+        .next()
+        .map(super::shared::text)
+        .filter(|title| !title.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
