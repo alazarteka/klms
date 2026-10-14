@@ -1,7 +1,18 @@
 use std::path::Path;
 
-use super::*;
+use super::{Ctx, resources::module_path};
 use crate::{cli::VideosCommand, client::stream::Limits, models::Video, reference::module_kind};
+use crate::{
+    course_pages,
+    error::AppError,
+    models::DownloadResult,
+    output::{self, CommandResult, listing, row, table},
+    parse,
+    private_fs::{PublishError, publish_download},
+    reference::ResourceRef,
+    safe_url,
+    url::{Url, query_value},
+};
 
 /// Which transport a video reference uses: native KLMS VOD or Panopto.
 #[derive(Clone, Copy, PartialEq, Eq)]
