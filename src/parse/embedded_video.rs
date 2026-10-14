@@ -1,34 +1,31 @@
 //! A Moodle embedded activity redirects to its course instead of a module page.
+use super::{courses::activity_title, shared::sel};
 use crate::{error::AppError, reference::valid_id};
-use scraper::{Html, Selector};
+use scraper::Html;
 
-/// Isolate the exact module before inspecting its iframe, preserving copied targets.
+/// Isolate one activity before inspecting its content, preserving copied targets.
 pub fn embedded_activity(html: &str, module: &str) -> Result<String, AppError> {
     if !valid_id(module) {
-        return Err(AppError::usage("embedded video module id must be numeric"));
-    }
-    let doc = Html::parse_document(html);
-    let selector = Selector::parse(&format!("li#module-{module}.modtype_panoptocourseembed, .activity-item[data-id='{module}'].modtype_panoptocourseembed")).map_err(|_|AppError::internal("invalid numeric module selector"))?;
-    let mut nodes = doc.select(&selector);
-    let node = nodes.next().ok_or_else(|| {
-        AppError::shape("embedded video redirect did not contain the requested module identity")
-    })?;
-    if nodes.next().is_some() {
-        return Err(AppError::shape(
-            "embedded video module identity was ambiguous",
+        return Err(AppError::usage(
+            "embedded activity module id must be numeric",
         ));
     }
-    Ok(node.html())
+    let doc = Html::parse_document(html);
+    let selector = sel(&format!("li#module-{module}, [data-id='{module}']"));
+    let nodes: Vec<_> = doc.select(&selector).collect();
+    match nodes.as_slice() {
+        [node] => Ok(node.html()),
+        _ => Err(AppError::shape(
+            "course redirect must contain exactly one requested activity",
+        )),
+    }
 }
 
 /// The activity name inside an isolated fragment; the course page around it
 /// carries the course's identity, not the module's.
 pub fn embedded_title(fragment: &str) -> Option<String> {
     let doc = Html::parse_fragment(fragment);
-    doc.select(&Selector::parse(".instancename").ok()?)
-        .next()
-        .map(super::shared::text)
-        .filter(|title| !title.is_empty())
+    activity_title(doc.root_element())
 }
 
 #[cfg(test)]
