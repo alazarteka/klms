@@ -1,7 +1,10 @@
 //! Run the actual bootstrap script against a local release fixture, without a network.
 #![cfg(unix)]
 
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command};
+
+#[path = "fixture/executable.rs"]
+mod fixture_executable;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -62,8 +65,7 @@ impl InstallFixture {
         fs::write(checksum, format!("{digest}  {archive}\n")).unwrap();
         let curl = root.path().join("mock-bin/curl");
         fs::create_dir(curl.parent().unwrap()).unwrap();
-        fs::write(&curl, MOCK_CURL).unwrap();
-        fs::set_permissions(curl, fs::Permissions::from_mode(0o755)).unwrap();
+        fixture_executable::write_executable(&curl, MOCK_CURL);
         let destination = root.path().join("custom binary directory/klms");
         Self {
             root,
