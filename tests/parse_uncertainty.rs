@@ -58,7 +58,7 @@ fn failed_details_prevent_absences_in_their_course_scope() {
                 "/course/view.php?id=42" => {
                     Some(Response::html(fixture::course(&[("resource", 8, "Other")])))
                 }
-                "/mod/resource/view.php?id=8" => {
+                "/mod/resource/view.php?id=8&forceview=1" => {
                     Some(Response::html("<body>Maintenance</body>"))
                 }
                 _ => None,
@@ -142,7 +142,7 @@ fn uncertain_and_relative_drift_preserves_resources_across_two_syncs() {
             } else {
                 drift.clone()
             })),
-            "/mod/resource/view.php?id=8" => {
+            "/mod/resource/view.php?id=8&forceview=1" => {
                 Some(Response::html(fixture::DETAIL.replace("cmid-7", "cmid-8")))
             }
             _ => None,

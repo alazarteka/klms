@@ -211,7 +211,9 @@ pub fn lib_server(
         over(request, run).unwrap_or_else(|| match request.target.as_str() {
             "/my/" => Response::html(DASHBOARD),
             "/course/view.php?id=42" => Response::html(manifest()),
-            "/mod/resource/view.php?id=7" => Response::html(DETAIL),
+            "/mod/resource/view.php?id=7" | "/mod/resource/view.php?id=7&forceview=1" => {
+                Response::html(DETAIL)
+            }
             target if target.starts_with("/pluginfile.php/") => {
                 Response::bytes("text/plain", BYTES).header("ETag", "\"fixture-v1\"")
             }
