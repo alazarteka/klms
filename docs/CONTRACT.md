@@ -184,10 +184,10 @@ Remuxing uses a private (0700), exclusively created
 `.klms-video-<pid>-<nonce>.scratch` directory beside `--out`; direct MP4 copies
 need no scratch directory. Publication uses a private
 `.klms-video-<pid>-<nonce>.part` file. Both are removed on normal or error
-returns. On Linux a later download removes generated temporaries older than
-24 hours owned by the same user only when their process no longer exists;
-other platforms retain crash leftovers. Sweeps skip symlinks and unrelated
-names.
+returns. An interrupted download (Ctrl-C or kill) may leave ffmpeg running
+until it finishes or fails; the next download sweeps generated leftovers older
+than 24 hours, restricted to the same owner on Unix. Sweeps skip symlinks and
+unrelated names.
 User downloads may fall back to a non-atomic exclusive copy when hard links
 fail, with a warning; object-store publication requires an atomic hard link.
 A remux peaks at about twice the media size on that filesystem; free space is not checked in
