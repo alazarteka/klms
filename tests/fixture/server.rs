@@ -44,6 +44,8 @@ pub struct Response {
     body: Vec<u8>,
     /// No `Content-Length`: the body ends only when the client hangs up.
     open_ended: bool,
+    /// A `Content-Length` larger than the bytes actually sent.
+    declared_length: Option<u64>,
 }
 
 impl Response {
@@ -54,6 +56,7 @@ impl Response {
             headers: Vec::new(),
             body: body.into(),
             open_ended: false,
+            declared_length: None,
         }
     }
 
@@ -64,6 +67,7 @@ impl Response {
             headers: Vec::new(),
             body: body.into(),
             open_ended: false,
+            declared_length: None,
         }
     }
 
@@ -74,6 +78,13 @@ impl Response {
             open_ended: true,
             ..Self::bytes("application/octet-stream", body)
         }
+    }
+
+    /// Declares `length` bytes but sends only the body: a client that reads
+    /// the body to its declared end fails, one that never reads it does not.
+    pub fn declared_length(mut self, length: u64) -> Self {
+        self.declared_length = Some(length);
+        self
     }
 
     pub fn status(mut self, status: &'static str) -> Self {
@@ -144,7 +155,8 @@ impl Server {
                     response.status, response.content_type
                 );
                 if !response.open_ended {
-                    headers.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+                    let length = (response.declared_length).unwrap_or(response.body.len() as u64);
+                    headers.push_str(&format!("Content-Length: {length}\r\n"));
                 }
                 for (name, value) in response.headers {
                     headers.push_str(&format!("{name}: {value}\r\n"));

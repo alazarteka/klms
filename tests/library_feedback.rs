@@ -652,6 +652,83 @@ fn sync_records_courses_resources_and_representations() {
 }
 
 #[test]
+fn resource_redirected_to_a_large_file_is_observed_without_reading_its_body() {
+    const FILE: &str = "/pluginfile.php/1/mod_resource/content/1/huge.bin";
+    // Declared far beyond any body limit; only a short prefix is ever sent.
+    let server = lib_server(|r, _| match r.target.as_str() {
+        "/mod/resource/view.php?id=7&forceview=1" => Some(
+            Response::html("")
+                .status("302 Found")
+                .header("Location", FILE),
+        ),
+        FILE => Some(
+            Response::bytes("application/octet-stream", "prefix")
+                .declared_length(1 << 40)
+                .header("ETag", "\"huge-v1\""),
+        ),
+        _ => None,
+    });
+    let env = Env::at(&server);
+    let sync = env.sync("--files");
+    assert_eq!(sync["data"]["status"], "complete", "{sync}");
+    assert_eq!(sync["data"]["failures"], json!([]));
+    assert_eq!(sync["data"]["truncated"], 0);
+    let shown = env.data("library show file:7");
+    assert_eq!(shown["remote_state"], "present");
+    assert_eq!(shown["source"]["complete"], true);
+    rep(&shown, FILE);
+    // The detail read follows the redirect once; --files then only HEADs the file.
+    let count = |method: &str| {
+        let line = format!("{method} {FILE} HTTP/1.1");
+        server.requests().iter().filter(|r| **r == line).count()
+    };
+    assert_eq!((count("GET"), count("HEAD")), (1, 1));
+}
+
+#[test]
+fn only_pluginfile_links_are_file_representations() {
+    const INDEX: &str = "/mod/resource/index.php?id=42";
+    const FILE: &str = "/pluginfile.php/1/mod_resource/content/1/a.txt";
+    let server = lib_server(|r, _| match r.target.as_str() {
+        "/mod/resource/view.php?id=7&forceview=1" => html(format!(
+            "<body id='page-mod-resource-view' class='path-mod-resource cmid-7'><main><h1>Lecture</h1>\
+             <a href='{INDEX}'>All resources</a><a href='{FILE}'>a.txt</a></main>"
+        )),
+        INDEX => html("<main>resource index</main>"),
+        _ => None,
+    });
+    let env = Env::at(&server);
+    assert_eq!(env.sync("--files")["data"]["status"], "complete");
+    let kinds: Vec<(String, String)> = env
+        .db()
+        .prepare("SELECT url,kind FROM representations ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let kind = |suffix: &str| {
+        kinds
+            .iter()
+            .find(|(url, _)| url.ends_with(suffix))
+            .unwrap_or_else(|| panic!("{suffix} not recorded: {kinds:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(kind(INDEX), "link");
+    assert_eq!(kind(FILE), "file");
+    // Links are never validated, so the index page is not requested.
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|r| r.contains("/mod/resource/index.php")),
+        "{:?}",
+        server.requests()
+    );
+}
+
+#[test]
 fn notices_are_synced_only_on_request_and_walk_board_pages() {
     let server = lib_server(|r, _| match r.target.as_str() {
         "/course/view.php?id=42" => html(notice_manifest()),
