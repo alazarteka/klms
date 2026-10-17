@@ -45,7 +45,11 @@ Android/JNI crates below are in the lockfile but are not compiled on those targe
 | winapi-util | 0.1.11 | walkdir/same-file Windows branch; not shipping | Windows filesystem/handle operations |
 | webpki-root-certs | 1.0.9 | Verifier wasm32 roots; not shipping | Root-certificate provenance and generation |
 
-`rustls` 0.23.45 is now pinned directly to select ring/std/tls12 for ureq;
+`rustls` is now pinned directly to select ring/std/tls12 for ureq;
 it retains its existing exact-version exemption, so is not a new pending entry.
+On 2026-10-17 the pin and exemption moved from 0.23.45 to 0.23.46 for
+RUSTSEC-2026-0346, 0347, 0348 and 0349. This is a carry-over, not an audit:
+the 0.23.45..0.23.46 source diff was not inspected. Reviewer: pending
+`@alazarteka` (prepared by Claude Code).
 The direct pin is not a new audit. ureq's `rustls-no-provider` feature avoids
 its default webpki-roots bundle; shipping verification uses platform trust.
