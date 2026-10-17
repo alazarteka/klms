@@ -57,7 +57,8 @@ it yourself.
 
 ## Development
 
-`make check` runs fmt, tests and clippy. See [AGENTS.md](AGENTS.md),
+`make check` runs the same gates as CI: cargo-deny, cargo-vet, fmt, tests and
+clippy. See [AGENTS.md](AGENTS.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/CONTRACT.md](docs/CONTRACT.md).
 `python3 scripts/release_smoke.py ARCHIVE.tar.gz` checks a release archive offline.
 

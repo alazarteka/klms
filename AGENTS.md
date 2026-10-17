@@ -15,8 +15,9 @@ forbidden.
 
 ## Checks
 
-Run `make check` (fmt, `cargo test --locked --all-targets`, clippy with
-`-D warnings`) before finishing. Use the pinned toolchain, exact `=` dependency
+Run `make check` before finishing. It runs exactly what CI runs:
+`scripts/supply-chain.sh deny` and `vet`, the offline supply-chain script test,
+fmt, `cargo test --locked --all-targets`, and clippy with `-D warnings`. Use the pinned toolchain, exact `=` dependency
 pins in `Cargo.toml`, the committed `Cargo.lock`, and `--locked`; pin GitHub
 Actions to full commit SHAs. Behavior changes need tests. No ignored tests,
 lint suppressions, or placeholder success paths. The shared test fixture is the

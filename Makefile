@@ -1,6 +1,6 @@
 .PHONY: check build supply-chain
 
-check:
+check: supply-chain
 	./scripts/test-supply-chain.sh
 	cargo fmt --all -- --check
 	cargo test --locked --all-targets
