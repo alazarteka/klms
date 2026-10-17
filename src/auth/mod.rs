@@ -333,14 +333,16 @@ fn stored_password(
 }
 
 /// KAIST rejected the stored password. Every later non-interactive login would
-/// resend it, and KAIST locks password login after repeated failures, so it is
-/// removed now.
+/// resend it, and KAIST locks password login after repeated failures, so
+/// login.json stops naming it even when the backend cannot delete it now;
+/// `auth forget` purges the whole klms namespace without that metadata.
 fn drop_rejected_password(
     env: &Env<'_>,
     remembered: Option<Identity>,
     error: AppError,
     mut warnings: Vec<String>,
 ) -> AppError {
+    let mut removed = true;
     if let Some(mut identity) = remembered {
         if let Some(kind) = identity.password_backend.take() {
             let cleared = env
@@ -348,6 +350,7 @@ fn drop_rejected_password(
                 .open(&kind)
                 .and_then(|backend| backend.clear(&identity.username));
             if let Err(cleared) = cleared {
+                removed = false;
                 warnings.push(format!("could not remove the rejected password from the {kind} backend: {}; retry `klms auth forget` when it is available", cleared.message));
             }
         }
@@ -358,9 +361,14 @@ fn drop_rejected_password(
             ));
         }
     }
-    let error = error.with_hint(
-        "The stored password was removed. Store the current one from a terminal with `klms auth login --method password --remember-password`.",
-    );
+    let what = if removed {
+        "The stored password was removed."
+    } else {
+        "The stored password is no longer used but could not be deleted; run `klms auth forget`."
+    };
+    let error = error.with_hint(format!(
+        "{what} Store the current one from a terminal with `klms auth login --method password --remember-password`."
+    ));
     store::with_cleanup_warnings(error, &warnings)
 }
 

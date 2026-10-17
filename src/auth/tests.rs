@@ -351,6 +351,27 @@ fn a_lockout_or_a_rejected_typed_password_keeps_what_is_stored() {
 }
 
 #[test]
+fn a_rejected_password_the_keyring_cannot_delete_is_not_reported_removed() {
+    let mut fx = Fixture::new();
+    let (backend, root) = fake_keyring(&mut fx);
+    backend.store("student", "s3cret").unwrap();
+    let mut identity = Identity::new("student", LoginMethod::Password, Some(SecondFactor::Email));
+    identity.password_backend = Some("secret-service".into());
+    store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
+    fs::write(root.join("fail-clear"), "").unwrap();
+    *fx.password_result.lock().unwrap() = Some("EAU001");
+    let error = failure(fx.login(false, true, &LoginOptions::default()));
+    assert_eq!(error.code, "CREDENTIALS_REJECTED");
+    assert!(error.hint.unwrap().contains("could not be deleted"));
+    assert!(
+        error
+            .message
+            .contains("could not remove the rejected password")
+    );
+    assert_eq!(fx.identity().unwrap().password_backend, None);
+}
+
+#[test]
 fn a_prompted_identifier_is_validated_before_it_is_remembered() {
     struct BadId;
     impl AuthPrompt for BadId {
