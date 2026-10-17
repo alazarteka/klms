@@ -895,7 +895,7 @@ fn forget_without_metadata_or_keyring_is_complete_and_quiet() {
 }
 
 #[test]
-fn forget_unavailable_backend_keeps_metadata_until_purge_succeeds() {
+fn forget_without_the_recorded_helper_removes_metadata_and_a_later_forget_purges() {
     let mut fx = Fixture::new();
     let (backend, root) = fake_keyring(&mut fx);
     backend.store("student", "pw").unwrap();
@@ -905,30 +905,100 @@ fn forget_unavailable_backend_keeps_metadata_until_purge_succeeds() {
     let temporary = fx.dirs.identity().with_extension("json.123.tmp");
     fs::write(&temporary, "old identity").unwrap();
     fs::rename(root.join("secret-tool"), root.join("disabled")).unwrap();
-    for _ in 0..2 {
-        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
-        assert_eq!(result.data["password_removed"], false);
-        assert_eq!(result.data["login_removed"], false);
-        assert_eq!(result.data["password_cleanup_complete"], false);
-        assert_eq!(result.data["password_backend"], "secret-service");
-        assert_eq!(
-            result.data["password_backends"]["secret-service"],
-            Value::Null
-        );
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("secret-tool` is not installed"));
-        assert_eq!(fx.identity(), Some(identity.clone()));
-        assert!(!temporary.exists());
-    }
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert_eq!(result.data["password_removed"], false);
+    assert_eq!(result.data["login_removed"], true);
+    assert_eq!(result.data["password_cleanup_complete"], false);
+    assert_eq!(result.data["password_backend"], "secret-service");
+    assert_eq!(
+        result.data["password_backends"]["secret-service"],
+        Value::Null
+    );
+    assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    let warning = &result.warnings[0];
+    assert!(
+        warning.contains("secret-tool` is not installed"),
+        "{warning}"
+    );
+    assert!(warning.contains("passwords may remain"), "{warning}");
+    assert!(warning.contains("install `secret-tool`"), "{warning}");
+    assert!(result.human.contains("incomplete"));
+    assert!(!fx.dirs.identity().exists() && !temporary.exists());
+
+    // Nothing is left that names the backend: a repeat is complete and quiet.
+    let again = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    assert_eq!(again.data["password_cleanup_complete"], true);
+
+    // Forget purges every reachable keyring without metadata, so the stored
+    // password is still removed once the helper is back.
     fs::rename(root.join("disabled"), root.join("secret-tool")).unwrap();
     let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
     assert_eq!(result.data["password_removed"], true);
-    assert_eq!(result.data["login_removed"], true);
     assert_eq!(result.data["password_cleanup_complete"], true);
     assert_eq!(result.data["password_backends"]["secret-service"], true);
     assert!(result.warnings.is_empty());
-    assert!(!fx.dirs.identity().exists());
     assert!(backend.lookup("student").unwrap().is_none());
+}
+
+#[test]
+fn forget_removes_metadata_naming_a_backend_this_machine_cannot_open() {
+    // An unknown name, and the macOS keychain without `security`.
+    for (kind, detail) in [
+        ("bogus-vault", "unknown password backend \"bogus-vault\""),
+        ("keychain", "cannot run `security`"),
+    ] {
+        let fx = Fixture::new();
+        let mut identity = Identity::new("student", LoginMethod::Password, None);
+        identity.password_backend = Some(kind.into());
+        store::save_json(&fx.dirs.identity(), &identity, "login").unwrap();
+        let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert_eq!(result.data["login_removed"], true, "{kind}");
+        assert_eq!(result.data["password_cleanup_complete"], false);
+        assert_eq!(result.data["password_backend"], kind);
+        assert_eq!(result.data["password_backends"][kind], Value::Null);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        let warning = &result.warnings[0];
+        assert!(warning.contains(detail), "{warning}");
+        assert!(warning.contains("passwords may remain"), "{warning}");
+        assert!(!fx.dirs.identity().exists());
+        let again = forget_with(&fx.dirs, &fx.secrets).unwrap();
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    }
+    // The hint for an unknown backend names a command that recovers.
+    let error = Fixture::new().secrets.open("bogus-vault").err().unwrap();
+    assert!(error.hint.unwrap().contains("klms auth forget"));
+}
+
+#[test]
+fn forget_says_when_the_secret_service_is_unreachable_rather_than_refusing() {
+    let fx = Fixture::new();
+    let bin = fx._root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    write_executable(
+        &bin.join("secret-tool"),
+        "#!/bin/sh\necho 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY' >&2\nexit 1\n",
+    );
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    // klms cannot know whether it stored a password there: still incomplete.
+    assert_eq!(result.data["password_cleanup_complete"], false);
+    assert!(result.human.contains("incomplete"));
+    assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    let warning = &result.warnings[0];
+    assert!(
+        warning.contains("cannot reach a Secret Service (no D-Bus session or unlocked keyring)"),
+        "{warning}"
+    );
+    assert!(!warning.contains("delete failed"), "{warning}");
+
+    // A reachable service that refuses the delete still says so.
+    let mut fx = Fixture::new();
+    let (_, root) = fake_keyring(&mut fx);
+    fs::write(root.join("fail-clear"), "").unwrap();
+    let result = forget_with(&fx.dirs, &fx.secrets).unwrap();
+    let warning = &result.warnings[0];
+    assert!(warning.contains("delete refused"), "{warning}");
+    assert!(!warning.contains("cannot reach"), "{warning}");
 }
 
 #[test]
