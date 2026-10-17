@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.base64]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "0.23.1"
+notes = "No build.rs, proc macros, or include!/env!. Library code does no fs/net/process/env access, uses no FFI and has no static mutable state; the io adapters only wrap caller-supplied Read/Write. All unsafe is confined to src/engine/simd.rs behind the default `simd-unsafe` feature (AVX2/NEON intrinsics with bounds-guarded unaligned loads/stores, gated by runtime CPU-feature detection); ureq and ureq-proto disable it, and without it the crate is #![forbid(unsafe_code)]. Only examples/base64.rs opens a user-named file."
+
 [[audits.block-buffer]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
 criteria = "safe-to-run"
@@ -120,6 +126,12 @@ who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
 criteria = "safe-to-run"
 version = "0.40.2"
 
+[[audits.rustls-platform-verifier]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "0.7.1"
+notes = "No build.rs or proc macros; include_bytes! only embeds cfg(test) fixtures. On Linux the crate itself does no I/O: it calls rustls_native_certs::load_native_certs(), which reads SSL_CERT_FILE/SSL_CERT_DIR or the openssl-probe default CA bundles under /etc read-only, then verifies offline with webpki (no OCSP/CRL/AIA fetching). On macOS it builds in-memory SecCertificate/SecPolicy/SecTrust objects and calls SecTrustEvaluateWithError, with no keychain writes or prompts, though the OS trustd may fetch intermediates or revocation data. Its only unsafe on those targets reads the kCFAbsoluteTimeIntervalSince1970 constant; Windows/Android paths were grepped, not read. examples/update-certs.rs does network I/O and writes into the crate dir only when run explicitly."
+
 [[audits.sha2]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
 criteria = "safe-to-run"
@@ -129,6 +141,24 @@ version = "0.11.0"
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "1.20.1"
+
+[[audits.ureq]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "3.4.2"
+notes = "Reviewed as compiled with rustls-no-provider + platform-verifier and no default features. No build.rs or proc macros, #![forbid(unsafe_code)] unconditionally, no process spawning, and no filesystem access beyond caller-supplied File bodies. Connections go only to the request URL, redirect targets or the configured proxy; Config::default() reads ALL_PROXY/HTTPS_PROXY/HTTP_PROXY/NO_PROXY (klms overrides with .proxy(None) and per-request proxies), and fixed hosts appear only in ureq's own cfg(test) tests. Logging goes through the log facade with non-allowlisted headers redacted; paths/queries and Location only at trace. The only thread is a detached DNS-with-timeout helper when a resolve timeout is set."
+
+[[audits.ureq-proto]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "0.6.4"
+notes = "Reviewed with only the `client` feature, as ureq enables it. No build.rs (build = false), no proc macros or include!/env!, and #![forbid(unsafe_code)]. No std::net/fs/process/env/thread/time use anywhere in src: the only I/O is io::Write into caller-supplied buffers, consistent with a sans-IO HTTP/1.1 state machine, and there is no global mutable state. Logging is via the log facade; trace! hex-dumps raw request/response bytes (util.rs:73), which only appears if an application enables trace logging (klms installs no logger)."
+
+[[audits.utf8-zero]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+version = "0.8.1"
+notes = "Read all of src (lib.rs, read.rs, lossy.rs). No build.rs, proc macros, dependencies or include!. no_std with optional std; no fs/net/process/env access, and BufReadDecoder only consumes a caller-supplied BufRead. The only unsafe is three str::from_utf8_unchecked calls on bytes already validated by str::from_utf8; no FFI, statics or threads."
 
 [[audits.vcpkg]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"

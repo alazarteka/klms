@@ -6,9 +6,10 @@ not correctness, memory safety, or independent cryptographic validation.
 
 The store retains 139 exact-version exemptions from the existing baseline and
 2 older clap/clap_builder exemptions that anchor the retained delta audits.
-The 27 audit records retain their original authors and scope; the 27th is the
-2026-10-17 `clap_complete` 4.6.9 -> 4.6.11 delta audit, which replaces
-Dependabot's #22. Exemptions are
+The 32 audit records retain their original authors and scope. Added on
+2026-10-17: the `clap_complete` 4.6.9 -> 4.6.11 delta audit, which replaces
+Dependabot's #22, and full audits of the five shipping crates that had been
+pending (see below). Exemptions are
 trust debt, not audits. Do not advance or add one without recording the decision
 here; prefer a full or delta audit and remove unused exemptions.
 
@@ -19,7 +20,15 @@ network access and a platform with pinned tool hashes.
 
 ## Pending owner review
 
-The following 19 exact versions are temporary exemptions, not certifications.
+The five shipping crates first listed here (`ureq` 3.4.2, `ureq-proto` 0.6.4,
+`base64` 0.23.1, `utf8-zero` 0.8.1, `rustls-platform-verifier` 0.7.1) were
+reviewed on 2026-10-17 and now carry `safe-to-run` audits in `audits.toml`
+instead of exemptions. Each audit note states what was read, the side effects
+found (proxy environment variables in ureq; read-only system CA bundles on
+Linux and OS trustd network fetches on macOS for the verifier), and what was
+only grepped. Reviewer: `@alazarteka` (prepared by Claude Code).
+
+The following 14 exact versions are temporary exemptions, not certifications.
 Owner review is outstanding: inspect the source at the locked checksum, enabled
 features, build scripts, process/filesystem/network effects, and upstream origin;
 then replace each exemption with an audit or record an explicit retention decision.
@@ -28,11 +37,6 @@ Android/JNI crates below are in the lockfile but are not compiled on those targe
 
 | Crate | Version | Why present / reachability | Review focus |
 | --- | --- | --- | --- |
-| ureq | 3.4.2 | Direct HTTP client; shipping | Transport, redirects, TLS features and side effects |
-| ureq-proto | 0.6.4 | ureq protocol layer; shipping | HTTP parsing/serialization and side effects |
-| base64 | 0.23.1 | ureq/ureq-proto encoding; shipping | Pure computation and enabled features |
-| utf8-zero | 0.8.1 | ureq text handling; shipping | String conversion and side effects |
-| rustls-platform-verifier | 0.7.1 | ureq platform-verifier; shipping | OS trust access and platform-specific behavior |
 | rustls-platform-verifier-android | 0.2.0 | Verifier Android backend; not shipping | Bundled Android code and trust calls |
 | jni | 0.22.4 | Verifier Android JNI; not shipping | Native calls and class loading |
 | jni-macros | 0.22.4 | JNI proc macros; not shipping | Compile-time effects and generated code |
