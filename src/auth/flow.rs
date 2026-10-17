@@ -98,10 +98,9 @@ fn next(stage: Stage, code: &str) -> Result<Next, AppError> {
         (Password | Policy, "SS0004" | "SS0005" | "SS0006") => Err(AppError::auth_required(
             "KAIST requires a password update before this account can sign in",
         )),
-        (Password, "EAU001") => denied(
+        (Password, "EAU001") => Err(AppError::credentials_rejected(
             "KAIST rejected the login identifier or password",
-            "Check the credentials and retry `klms auth login --method password`.",
-        ),
+        )),
         (Password, "EAU005" | "EAU006" | "EAU007") => denied(
             "KAIST temporarily locked password login after repeated failures",
             "Wait for the lockout to expire, then retry.",
@@ -686,7 +685,8 @@ mod tests {
         }
         for (stage, code, error) in [
             (Password, "SS0004", "AUTH_REQUIRED"),
-            (Password, "EAU001", "AUTH_REQUIRED"),
+            (Password, "EAU001", "CREDENTIALS_REJECTED"),
+            (Password, "EAU005", "AUTH_REQUIRED"),
             (Password, "EAU016", "AUTH_PROTOCOL_CHANGED"),
             (Otp, "E001", "CODE_INCORRECT"),
             (Otp, "E002", "CODE_EXPIRED"),

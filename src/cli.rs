@@ -28,7 +28,8 @@ JSON contract (conventionally put global --json before the command):
 Exit codes:
   0 ok (a partial sync also exits 0: check data.status, failures, truncated, warnings)
   2 USAGE (bad syntax, value or ref)      10 AUTH_REQUIRED (ask the user to run `klms auth login`;
-                                             `auth login` may also give CODE_INCORRECT or CODE_EXPIRED)
+                                             `auth login` may also give CREDENTIALS_REJECTED,
+                                             CODE_INCORRECT or CODE_EXPIRED)
   11 AUTH_PROTOCOL_CHANGED                12 CODE_REQUIRED (resume: `auth login --code`)
   13 PERMISSION_DENIED                    20 NETWORK_ERROR (retryable)
   21 HTTP_ERROR                           30 UPSTREAM_SHAPE_CHANGED
@@ -521,9 +522,10 @@ Without a terminal (agents, scripts, or --json):
 
 Exit codes: 0 signed in; 12 CODE_REQUIRED (resume with --code); 2 bad flags;
 11 KAIST protocol changed; 10 for all of these, told apart by error.code:
-  AUTH_REQUIRED    KAIST rejected the sign-in (ID, password, lockout)
-  CODE_INCORRECT   wrong verification code (with --code, the pending login is consumed)
-  CODE_EXPIRED     no pending login, or it or its code expired (start over)
+  AUTH_REQUIRED         KAIST refused the sign-in (lockout, blocked account, password update)
+  CREDENTIALS_REJECTED  KAIST rejected the ID or password (a stored password is removed)
+  CODE_INCORRECT        wrong verification code (with --code, the pending login is consumed)
+  CODE_EXPIRED          no pending login, or it or its code expired (start over)
 
 Examples:
   klms auth login

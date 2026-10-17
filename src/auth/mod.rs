@@ -240,7 +240,8 @@ fn login_with(
     let previous_devices = store::load_session(&env.dirs.session(), env.klms)
         .map(|session| session.devices)
         .unwrap_or_default();
-    let begun = flow::begin(
+    let used_stored = stored.is_some();
+    let begun = match flow::begin(
         Attempt {
             klms: env.klms,
             sso: env.sso,
@@ -253,7 +254,12 @@ fn login_with(
             password: stored,
         },
         &mut terminal,
-    )?;
+    ) {
+        Err(error) if used_stored && error.code == "CREDENTIALS_REJECTED" => {
+            return Err(drop_rejected_password(env, remembered, error, warnings));
+        }
+        begun => begun?,
+    };
     // KAIST accepted the credentials (even if it still wants a code), so it
     // is safe to remember them now.
     let (identity, stored_now) = remember_login(
@@ -324,6 +330,38 @@ fn stored_password(
         }
         other => other,
     }
+}
+
+/// KAIST rejected the stored password. Every later non-interactive login would
+/// resend it, and KAIST locks password login after repeated failures, so it is
+/// removed now.
+fn drop_rejected_password(
+    env: &Env<'_>,
+    remembered: Option<Identity>,
+    error: AppError,
+    mut warnings: Vec<String>,
+) -> AppError {
+    if let Some(mut identity) = remembered {
+        if let Some(kind) = identity.password_backend.take() {
+            let cleared = env
+                .secrets
+                .open(&kind)
+                .and_then(|backend| backend.clear(&identity.username));
+            if let Err(cleared) = cleared {
+                warnings.push(format!("could not remove the rejected password from the {kind} backend: {}; retry `klms auth forget` when it is available", cleared.message));
+            }
+        }
+        if let Err(saved) = store::save_json(&env.dirs.identity(), &identity, "remembered login") {
+            warnings.push(format!(
+                "could not update the remembered login: {}",
+                saved.message
+            ));
+        }
+    }
+    let error = error.with_hint(
+        "The stored password was removed. Store the current one from a terminal with `klms auth login --method password --remember-password`.",
+    );
+    store::with_cleanup_warnings(error, &warnings)
 }
 
 /// Persist `login.json` (and the password, when asked) after KAIST accepted
