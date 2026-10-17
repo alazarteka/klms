@@ -149,6 +149,23 @@ impl KlmsClient {
         })
     }
 
+    /// Like `get_bytes`, but a response that ends at a pluginfile URL yields
+    /// only that URL: its body is never read, so its size cannot fail the call.
+    pub(crate) fn get_bytes_unless_file(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Url, Option<Vec<u8>>), AppError> {
+        let mut response = self.send_get(path)?;
+        if policy::pluginfile(response.url()) {
+            check_logged_out(&response, &[])?;
+            return Ok((response.url().clone(), None));
+        }
+        let bytes = read_capped(&mut response, max_bytes)?;
+        check_logged_out(&response, &bytes)?;
+        Ok((response.url().clone(), Some(bytes)))
+    }
+
     pub fn head(&self, path: &str) -> Result<RemoteMetadata, AppError> {
         let url = self.resolve(path)?;
         let response = self.fetch(Method::HEAD, url, None, Vec::new(), "KLMS HEAD failed")?;

@@ -365,24 +365,27 @@ fn collect_course(
                             .extend_pairs(pairs)
                             .append_pair("forceview", "1");
                     }
-                    let response = client.get_bytes(url.as_str(), MAX_DOWNLOAD)?;
-                    if crate::client::policy::pluginfile(&response.url) {
-                        row.links.push(LinkItem {
-                            title: activity.title.clone(),
-                            url: response.url.to_string(),
-                        });
-                        row.source["detail"] =
-                            json!({"state": "representation", "url": response.url.as_str()});
-                        row.representations_complete = true;
-                    } else {
-                        let text = String::from_utf8_lossy(&response.bytes);
+                    // A resource that redirects to its file needs only the final URL;
+                    // the frontier validates and downloads the bytes when asked.
+                    let (final_url, body) =
+                        client.get_bytes_unless_file(url.as_str(), MAX_DOWNLOAD)?;
+                    if let Some(bytes) = body {
+                        let text = String::from_utf8_lossy(&bytes);
                         let detail =
-                            parse::resource_detail(&text, &response.url, &url, &activity.kind)?;
+                            parse::resource_detail(&text, &final_url, &url, &activity.kind)?;
                         row.complete = !detail.text_truncated && !detail.links_truncated;
                         row.representations_complete = !detail.links_truncated;
                         row.source["detail"] = json!(detail);
                         row.text = Some(detail.text);
                         row.links = detail.links;
+                    } else {
+                        row.links.push(LinkItem {
+                            title: activity.title.clone(),
+                            url: final_url.to_string(),
+                        });
+                        row.source["detail"] =
+                            json!({"state": "representation", "url": final_url.as_str()});
+                        row.representations_complete = true;
                     }
                     Ok::<_, AppError>(())
                 });

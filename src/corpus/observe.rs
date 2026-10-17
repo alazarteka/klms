@@ -352,10 +352,9 @@ impl Run<'_> {
 }
 
 pub(super) fn representation_kind(url: &Url) -> &'static str {
-    let path = url.path();
-    if crate::client::policy::pluginfile(url)
-        || path.contains("/mod/resource/") && !path.ends_with("/view.php")
-    {
+    // Moodle serves resource bytes only from pluginfile.php; /mod/resource/
+    // pages are HTML that the read policy treats as pages, not files.
+    if crate::client::policy::pluginfile(url) {
         "file"
     } else {
         "link"
