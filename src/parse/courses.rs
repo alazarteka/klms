@@ -1,19 +1,23 @@
 use std::collections::HashSet;
 
+use crate::url::Url;
 use scraper::{ElementRef, Html};
-use url::Url;
 
-use super::shared::{first_text, has_any, link_items, selected_value, selector, text, week_number};
+use super::shared::{
+    all, first, first_text, has_any, href_url, link_items, module_view, page_identity, query_id,
+    resolve_http_url, sel, selected_value, text, week_number,
+};
 use crate::{
+    date,
     error::AppError,
-    models::{Activity, Course, CourseDetail, Dashboard},
-    reference::ResourceRef,
+    models::{Activity, BoardPost, Course, CourseDetail, Dashboard},
+    reference::{ResourceRef, module_kind, valid_id},
     safe_url,
 };
 
 pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
     let document = Html::parse_document(html);
-    let courses = courses_from_document(&document, base_url)?;
+    let courses = courses_from_document(&document, base_url);
     if courses.is_empty() {
         return Err(AppError::shape(
             "authenticated dashboard contained no recognizable course links",
@@ -23,11 +27,12 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
         .zip(selected_value(&document, "select[name=semester]"))
         .map(|(year, semester)| format!("{year} {semester}"));
     let upcoming = link_items(
-        &document,
+        document.select(&sel(
+            ".block_timeline a[href], [data-region=event-list-content] a[href]",
+        )),
         base_url,
-        ".block_timeline a[href], [data-region=event-list-content] a[href]",
         usize::MAX,
-    )?;
+    );
     Ok(Dashboard {
         term,
         course_count: courses.len(),
@@ -39,16 +44,63 @@ pub fn dashboard(html: &str, base_url: &Url) -> Result<Dashboard, AppError> {
     })
 }
 
+/// Parse only Moodle's documented enrolled-course metadata, never course images/media paths.
+pub fn enrolled_courses(
+    value: &serde_json::Value,
+    base: &Url,
+) -> Result<(Vec<Course>, usize), AppError> {
+    let records = value
+        .get("courses")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AppError::shape("enrolled courses response has no courses array"))?;
+    let next = value
+        .get("nextoffset")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| AppError::shape("enrolled courses response has no numeric nextoffset"))?;
+    let mut rows = Vec::new();
+    for record in records {
+        let id = record
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|id| *id > 0)
+            .map(|id| id.to_string())
+            .ok_or_else(|| AppError::shape("enrolled course has no positive numeric id"))?;
+        let title = record
+            .get("fullname")
+            .and_then(serde_json::Value::as_str)
+            .filter(|title| !title.trim().is_empty())
+            .ok_or_else(|| AppError::shape("enrolled course has no title"))?;
+        let code = record
+            .get("shortname")
+            .and_then(serde_json::Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .map(str::to_owned);
+        rows.push(Course {
+            reference: format!("course:{id}"),
+            url: resolve_http_url(base, &format!("/course/view.php?id={id}"))
+                .expect("built-in course path")
+                .into(),
+            id,
+            title: title.to_owned(),
+            term: code.as_deref().and_then(term_from_code),
+            code,
+        });
+    }
+    Ok((rows, next))
+}
+
 pub fn course_detail(
     html: &str,
     base_url: &Url,
     mut course: Course,
 ) -> Result<CourseDetail, AppError> {
     let document = Html::parse_document(html);
+    page_identity(&document, "course", Some(&course.id))?;
     if let Some(title) = first_text(
         &document,
         ".page-header-headings h1, a.h1[href*='course/view.php'], h1",
-    )? {
+    ) {
         course.code = course_code(&title).or(course.code);
         course.term = course
             .code
@@ -57,11 +109,22 @@ pub fn course_detail(
             .or(course.term);
         course.title = title.split('(').next().unwrap_or(&title).trim().to_owned();
     }
-    let professors = professors(&document)?;
-    let activity_count = activities_from_document(&document, base_url)?.len();
+    if !has_any(
+        &document,
+        &[".course-content", "a.h1[href*='course/view.php']"],
+    ) {
+        return Err(AppError::shape(
+            "course page contained no recognizable course region",
+        ));
+    }
+    let activity_count = if has_any(&document, &[".course-content"]) {
+        activities(html, base_url, None)?.len()
+    } else {
+        0
+    };
     Ok(CourseDetail {
         course,
-        professors,
+        professors: professors(&document),
         activity_count,
     })
 }
@@ -72,10 +135,31 @@ pub fn activities(
     week: Option<u32>,
 ) -> Result<Vec<Activity>, AppError> {
     let document = Html::parse_document(html);
-    let mut rows = activities_from_document(&document, base_url)?;
-    if rows.is_empty() && !has_any(&document, &[".course-content"])? {
+    page_identity(&document, "course", query_id(base_url, &["id"]).as_deref())?;
+    let mut rows = activities_from_document(&document, base_url);
+    // Every same-origin module view link in course content must name the module
+    // id of a parsed activity; extra query params or fragments do not matter.
+    let represented: HashSet<String> = rows
+        .iter()
+        .flat_map(|row| {
+            let linked = row
+                .url
+                .as_deref()
+                .and_then(|url| Url::parse(url).ok())
+                .filter(module_view)
+                .and_then(|url| query_id(&url, &["id"]));
+            row.id.clone().into_iter().chain(linked)
+        })
+        .collect();
+    if !has_any(&document, &[".course-content"])
+        || document
+            .select(&sel(".course-content a[href]"))
+            .filter_map(|a| href_url(a, base_url))
+            .filter(|url| url.origin() == base_url.origin() && module_view(url))
+            .any(|url| query_id(&url, &["id"]).is_none_or(|id| !represented.contains(&id)))
+    {
         return Err(AppError::shape(
-            "course page contained no recognizable activity region",
+            "course content is missing or has unrecognized activity links",
         ));
     }
     if let Some(week) = week {
@@ -89,40 +173,25 @@ pub fn activities(
 /// The `kaistweeks` format renders only the current weeks on the default course
 /// page. Its week picker links are `javascript:M.course.format.dayselect(n, course, …)`,
 /// where `n = 0` is "All", served at `course/view.php?id=<course>&section=0`.
-pub fn has_all_weeks_view(html: &str, course_id: &str) -> Result<bool, AppError> {
-    let document = Html::parse_document(html);
-    let anchors = selector("a[href*='dayselect']")?;
-    Ok(document.select(&anchors).any(|anchor| {
-        anchor.value().attr("href").is_some_and(|href| {
+pub fn has_all_weeks_view(html: &str, course_id: &str) -> bool {
+    let wanted = format!("format.dayselect(0,{course_id},");
+    Html::parse_document(html)
+        .select(&sel("a[href*='dayselect']"))
+        .filter_map(|anchor| anchor.value().attr("href"))
+        .any(|href| {
             let compact: String = href.chars().filter(|c| !c.is_whitespace()).collect();
-            compact.contains(&format!("format.dayselect(0,{course_id},"))
+            compact.contains(&wanted)
         })
-    }))
 }
 
-pub fn is_video_activity(activity: &Activity) -> bool {
-    matches!(
-        activity.kind.to_ascii_lowercase().as_str(),
-        "vod" | "panopto" | "panoptocourseembed"
-    ) || activity.kind.eq_ignore_ascii_case("lti")
-        && (activity.title.to_ascii_lowercase().contains("panopto")
-            || activity.title.to_ascii_lowercase().contains("vod"))
-}
-
-fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>, AppError> {
-    let selector = selector("a[href*='course/view.php']")?;
+fn courses_from_document(document: &Html, base_url: &Url) -> Vec<Course> {
     let mut seen = HashSet::new();
     let mut courses = Vec::new();
-    for anchor in document.select(&selector) {
-        let Some(href) = anchor.value().attr("href") else {
+    for anchor in document.select(&sel("a[href*='course/view.php']")) {
+        let Some(url) = href_url(anchor, base_url) else {
             continue;
         };
-        let Ok(url) = base_url.join(href) else {
-            continue;
-        };
-        let Some(id) = url.query_pairs().find_map(|(key, value)| {
-            (key == "id" && crate::reference::valid_id(&value)).then(|| value.into_owned())
-        }) else {
+        let Some(id) = query_id(&url, &["id"]) else {
             continue;
         };
         if !seen.insert(id.clone()) {
@@ -149,18 +218,27 @@ fn courses_from_document(document: &Html, base_url: &Url) -> Result<Vec<Course>,
             url: safe_url::display(&url),
         });
     }
-    Ok(courses)
+    courses
 }
 
-fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activity>, AppError> {
-    let modules = selector("li.activity, .activity-item[data-id]")?;
-    let anchors = selector(".activityinstance a[href], a.aalink[href], a[href]")?;
-    let downloads = selector("[onclick*='downloadFile']")?;
-    let names = selector(".instancename, .activityname, .activity-title")?;
-    let headings = selector(".sectionname, .section-title, h3")?;
+pub(super) fn activity_title(module: ElementRef<'_>) -> Option<String> {
+    [".instancename, .activityname, .activity-title", "a[href]"]
+        .into_iter()
+        .find_map(|css| {
+            first(module, css)
+                .map(text)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn activities_from_document(document: &Html, base_url: &Url) -> Vec<Activity> {
+    let (anchors, downloads) = (sel("a[href]"), sel("[onclick*='downloadFile']"));
+    let headings = sel(".sectionname, .section-title, h3");
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for module in document.select(&modules) {
+    for module in document.select(&sel(
+        ".course-content li.activity, .course-content .activity-item[data-id]",
+    )) {
         let id = module
             .value()
             .attr("id")
@@ -175,33 +253,21 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
                     .select(&downloads)
                     .find_map(|node| node.value().attr("onclick").and_then(download_url))
             });
-        let url = href.as_deref().and_then(|value| base_url.join(value).ok());
-        let title = module
-            .select(&names)
-            .next()
-            .map(text)
-            .filter(|value| !value.is_empty())
-            .or_else(|| anchor.map(text).filter(|value| !value.is_empty()))
-            .unwrap_or_else(|| "Untitled activity".into());
+        let url = href
+            .as_deref()
+            .and_then(|value| resolve_http_url(base_url, value));
+        let title = activity_title(module).unwrap_or_else(|| "Untitled activity".into());
         let kind = module
             .value()
             .classes()
             .find_map(|class| class.strip_prefix("modtype_").map(str::to_owned))
-            .or_else(|| {
-                url.as_ref().and_then(|url| {
-                    let parts: Vec<_> = url.path_segments()?.collect();
-                    parts
-                        .windows(2)
-                        .find_map(|pair| (pair[0] == "mod").then(|| pair[1].to_owned()))
-                })
-            })
+            .or_else(|| module_kind(url.as_ref()?).map(str::to_owned))
             .unwrap_or_else(|| "activity".into());
         let section = module
             .ancestors()
             .filter_map(ElementRef::wrap)
             .find_map(|ancestor| ancestor.select(&headings).next().map(text))
             .filter(|value| !value.is_empty());
-        let week = section.as_deref().and_then(week_number);
         let key = id
             .clone()
             .or_else(|| url.as_ref().map(ToString::to_string))
@@ -209,60 +275,51 @@ fn activities_from_document(document: &Html, base_url: &Url) -> Result<Vec<Activ
         if !seen.insert(key) {
             continue;
         }
-        let reference =
-            ResourceRef::from_activity(&kind, id.as_deref(), url.as_ref().map(Url::as_str))
-                .map(|reference| reference.to_string());
+        let reference = ResourceRef::from_activity(&kind, id.as_deref(), url.as_ref())
+            .map(|reference| reference.to_string());
         rows.push(Activity {
             id,
             reference,
             kind,
             title,
-            week,
+            week: section.as_deref().and_then(week_number),
             section,
-            external: url.as_ref().is_some_and(|url| !same_origin(url, base_url)),
+            external: url
+                .as_ref()
+                .is_some_and(|url| url.origin() != base_url.origin()),
             url: url.as_ref().map(safe_url::display),
         });
     }
-    Ok(rows)
+    rows
 }
 
-fn professors(document: &Html) -> Result<Vec<String>, AppError> {
-    let generic_selector =
-        selector(".teachers a, .teacher a, [class*=professor] a, [class*=instructor] a")?;
+fn professors(document: &Html) -> Vec<String> {
+    let root = document.root_element();
+    let listed = all(root, ".courseinfo .border-left")
+        .into_iter()
+        .filter(|node| text(*node).to_ascii_lowercase().starts_with("professors"))
+        .flat_map(|node| all(node, "a.dropdown-toggle.text-primary"));
+    let generic = all(
+        root,
+        ".teachers a, .teacher a, [class*=professor] a, [class*=instructor] a",
+    );
     let mut names = Vec::new();
-    for node in document.select(&generic_selector) {
-        let value = text(node);
+    for value in generic.into_iter().chain(listed).map(text) {
         if !value.is_empty() && !names.contains(&value) {
             names.push(value);
         }
     }
-    let course_info = selector(".courseinfo .border-left")?;
-    let anchors = selector("a.dropdown-toggle.text-primary")?;
-    for container in document.select(&course_info) {
-        if !text(container)
-            .to_ascii_lowercase()
-            .starts_with("professors")
-        {
-            continue;
-        }
-        for node in container.select(&anchors) {
-            let value = text(node);
-            if !value.is_empty() && !names.contains(&value) {
-                names.push(value);
-            }
-        }
-    }
-    Ok(names)
+    names
 }
 
 fn course_code(title: &str) -> Option<String> {
-    if let Some(start) = title.rfind('(').map(|index| index + 1) {
-        if let Some(relative_end) = title[start..].find(')') {
-            let value = title[start..start + relative_end].trim();
-            if value.contains('_') && value.chars().any(|c| c.is_ascii_digit()) {
-                return Some(value.to_owned());
-            }
-        }
+    let parenthesized = title
+        .rsplit_once('(')
+        .and_then(|(_, tail)| tail.split_once(')'))
+        .map(|(value, _)| value.trim())
+        .filter(|value| value.contains('_') && value.chars().any(|c| c.is_ascii_digit()));
+    if let Some(value) = parenthesized {
+        return Some(value.to_owned());
     }
     title
         .split_whitespace()
@@ -276,18 +333,18 @@ fn course_code(title: &str) -> Option<String> {
 }
 
 fn is_noise_course(title: &str) -> bool {
+    const NOISE: [&str; 8] = [
+        "exam bank",
+        "기출문제은행",
+        "micro learning",
+        "teaching skills",
+        "learning skills",
+        "how to use panopto",
+        "guide to klms",
+        "how to use klms",
+    ];
     let normalized = title.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "exam bank"
-            | "기출문제은행"
-            | "micro learning"
-            | "teaching skills"
-            | "learning skills"
-            | "how to use panopto"
-            | "guide to klms"
-            | "how to use klms"
-    ) || normalized.contains("panopto guide")
+    NOISE.contains(&normalized.as_str()) || normalized.contains("panopto guide")
 }
 
 fn term_from_code(code: &str) -> Option<String> {
@@ -296,22 +353,15 @@ fn term_from_code(code: &str) -> Option<String> {
     let year = parts.next()?;
     (year.len() == 4
         && year.chars().all(|c| c.is_ascii_digit())
-        && semester.chars().all(|c| c.is_ascii_digit()))
+        && matches!(semester, "1" | "2" | "3" | "4"))
     .then(|| format!("{year}-{semester}"))
 }
 
-fn same_origin(left: &Url, right: &Url) -> bool {
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.port_or_known_default() == right.port_or_known_default()
-}
-
 fn download_url(script: &str) -> Option<String> {
-    for marker in ["downloadFile('", "downloadFile(\""] {
-        let Some(rest) = script.split(marker).nth(1) else {
+    for quote in ['\'', '"'] {
+        let Some(rest) = script.split(&format!("downloadFile({quote}")).nth(1) else {
             continue;
         };
-        let quote = marker.chars().last()?;
         let value = rest.split(quote).next()?.trim();
         if value.starts_with('/') || value.starts_with("https://") {
             return Some(value.into());
@@ -320,62 +370,163 @@ fn download_url(script: &str) -> Option<String> {
     None
 }
 
+pub fn is_notice_board(activity: &Activity) -> bool {
+    activity.kind.eq_ignore_ascii_case("courseboard")
+        && (activity.title.to_ascii_lowercase().contains("notice")
+            || activity.title.contains("공지"))
+}
+
+pub fn board_posts(
+    html: &str,
+    base_url: &Url,
+    board_id: Option<String>,
+) -> Result<Vec<BoardPost>, AppError> {
+    if board_id.as_deref().is_some_and(|id| !valid_id(id)) {
+        return Err(AppError::shape("board page had no numeric board id"));
+    }
+    let document = Html::parse_document(html);
+    let cells = sel("td");
+    let mut seen = HashSet::new();
+    let mut posts = Vec::new();
+    let regions = ".courseboard, table.generaltable, table.board-list";
+    // Any courseboard endpoint with bwid looks like a post, even after endpoint drift.
+    let links: Vec<_> = document
+        .select(&sel(
+            ".courseboard a[href], table.generaltable a[href], table.board-list a[href]",
+        ))
+        .filter_map(|a| Some((a, href_url(a, base_url)?)))
+        .filter(|(_, url)| {
+            url.path().starts_with("/mod/courseboard/")
+                && url.query_pairs().any(|(key, _)| key == "bwid")
+        })
+        .collect();
+    for (anchor, url) in &links {
+        if url.path() != "/mod/courseboard/article.php" {
+            continue;
+        }
+        let (Some(id), Some(_)) = (query_id(url, &["bwid"]), query_id(url, &["id"])) else {
+            continue;
+        };
+        // Untitled (icon) links must not claim the post before its titled link.
+        let title = text(*anchor);
+        if title.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        let id = Some(id);
+        let posted = anchor
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .find(|node| node.value().name() == "tr")
+            .and_then(|row| {
+                row.select(&cells)
+                    .map(text)
+                    .find(|value| date::normalize_datetime(value).is_some())
+            });
+        let reference = board_id
+            .clone()
+            .zip(id.clone())
+            .map(|(board, post)| ResourceRef::BoardPost { board, post }.to_string());
+        posts.push(BoardPost {
+            board_id: board_id.clone(),
+            id,
+            reference,
+            title,
+            posted,
+            url: safe_url::display(url),
+        });
+    }
+    // Any courseboard link (article, comment, paging) must name a parsed post's bwid.
+    if !has_any(&document, &[regions])
+        || links
+            .iter()
+            .any(|(_, url)| query_id(url, &["bwid"]).is_none_or(|bwid| !seen.contains(&bwid)))
+    {
+        return Err(AppError::shape(
+            "board region is missing or has unrecognized post links",
+        ));
+    }
+    Ok(posts)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{activities, course_detail, dashboard, has_all_weeks_view};
+    use super::{activities, board_posts, course_detail, dashboard, has_all_weeks_view};
     use crate::models::Course;
-    use url::Url;
+    use crate::url::Url;
 
     const BASE: &str = "https://klms.kaist.ac.kr";
 
-    #[test]
-    fn parses_dashboard_and_deduplicates_courses() {
-        let html = r#"<select name="year"><option selected>2026</option></select>
-          <select name="semester"><option selected>Fall</option></select>
-          <a href="/course/view.php?id=42">Compilers(CS.420_2026_2)</a>
-          <a href="/course/view.php?id=42">duplicate</a>"#;
-        let model = dashboard(html, &Url::parse(BASE).unwrap()).unwrap();
-        assert_eq!(model.course_count, 1);
-        assert_eq!(model.term.as_deref(), Some("2026 Fall"));
-        assert_eq!(model.courses[0].code.as_deref(), Some("CS.420_2026_2"));
+    fn base() -> Url {
+        Url::parse(BASE).unwrap()
     }
 
     #[test]
-    fn filters_global_training_cards() {
-        let html = r#"<a href="/course/view.php?id=1">Exam Bank</a>
-          <a href="/course/view.php?id=2">Machine Learning</a>"#;
-        let model = dashboard(html, &Url::parse(BASE).unwrap()).unwrap();
-        assert_eq!(model.course_count, 1);
-        assert_eq!(model.courses[0].id, "2");
-    }
-
-    #[test]
-    fn parses_activities_with_sections_and_external_links() {
-        let html = r#"<li class="section"><h3>Week 3</h3><ul>
-          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
-          <li class="activity modtype_lti" id="module-8"><a href="https://tools.example/launch"><span class="instancename">Lab</span></a></li>
-          </ul></li>"#;
-        let rows = activities(html, &Url::parse(BASE).unwrap(), Some(3)).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(!rows[0].external);
-        assert!(rows[1].external);
-    }
-
-    #[test]
-    fn extracts_direct_file_url_from_klms_download_handler() {
-        let html = r#"<li class="activity modtype_resource" id="module-9">
-          <div class="aalink" onclick="M.course.format.downloadFile('https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf', 'notes.pdf')">
-          <span class="instancename">Notes File</span></div></li>"#;
-        let rows = activities(html, &Url::parse(BASE).unwrap(), None).unwrap();
+    fn historical_terms_use_shortnames_and_preserve_unknowns() {
+        let data = serde_json::json!({"courses": [
+            {"id":42,"fullname":"Compilers","shortname":"CS350_2024_3","courseimage":"/2026/fall/image.png"},
+            {"id":43,"fullname":"Summer","shortname":"CS350_2024_2"},
+            {"id":44,"fullname":"Unknown","shortname":"training_2024_20"},
+            {"id":45,"fullname":"Unknown","courseimage":"/2024/1/image.png"}
+        ],"nextoffset":4});
+        let (rows, next) = super::enrolled_courses(&data, &base()).unwrap();
+        assert_eq!(next, 4);
+        assert_eq!(rows[0].term.as_deref(), Some("2024-3"));
+        assert_eq!(rows[1].term.as_deref(), Some("2024-2"));
+        assert!(rows[2].term.is_none() && rows[3].term.is_none());
+        assert_eq!(rows[0].reference, "course:42");
+        let empty = super::enrolled_courses(&serde_json::json!({"courses":[]}), &base());
         assert_eq!(
-            rows[0].url.as_deref(),
-            Some("https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf")
+            empty.unwrap_err().message,
+            "enrolled courses response has no numeric nextoffset"
+        );
+        let bad_id = super::enrolled_courses(
+            &serde_json::json!({"courses":[{"id":"oops"}],"nextoffset":1}),
+            &base(),
+        );
+        assert_eq!(
+            bad_id.unwrap_err().message,
+            "enrolled course has no positive numeric id"
         );
     }
 
     #[test]
+    fn parses_dashboard_deduplicates_courses_and_filters_training_cards() {
+        let html = r#"<select name="year"><option selected>2026</option></select>
+          <select name="semester"><option selected>Fall</option></select>
+          <a href="/course/view.php?id=42">Compilers(CS.420_2026_2)</a>
+          <a href="/course/view.php?id=42">duplicate</a>
+          <a href="/course/view.php?id=1">Exam Bank</a>"#;
+        let model = dashboard(html, &base()).unwrap();
+        assert_eq!(model.course_count, 1);
+        assert_eq!(model.term.as_deref(), Some("2026 Fall"));
+        assert_eq!(model.courses[0].code.as_deref(), Some("CS.420_2026_2"));
+        let html = r#"<a href="/course/view.php?id=1">Exam Bank</a>
+          <a href="/course/view.php?id=2">Machine Learning</a>"#;
+        let model = dashboard(html, &base()).unwrap();
+        assert_eq!((model.course_count, model.courses[0].id.as_str()), (1, "2"));
+    }
+
+    #[test]
+    fn parses_activities_with_sections_external_links_and_download_handlers() {
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3><ul>
+          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
+          <li class="activity modtype_lti" id="module-8"><a href="https://tools.example/launch"><span class="instancename">Lab</span></a></li>
+          </ul></li>"#;
+        let rows = activities(html, &base(), Some(3)).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(!rows[0].external);
+        assert!(rows[1].external);
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="activity modtype_resource" id="module-9">
+          <div class="aalink" onclick="M.course.format.downloadFile('https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf', 'notes.pdf')">
+          <span class="instancename">Notes File</span></div></li>"#;
+        let rows = activities(html, &base(), None).unwrap();
+        let direct = "https://klms.kaist.ac.kr/pluginfile.php/123/notes.pdf";
+        assert_eq!(rows[0].url.as_deref(), Some(direct));
+    }
+
+    #[test]
     fn parses_live_shape_course_header_and_professor() {
-        let html = r#"<a class="h1 mr-auto" href="/course/view.php?id=42">Programming Language(CS.30200_2026_3)</a>
+        let html = r#"<body id="page-course-view-kaistweeks" class="course-42"><a class="h1 mr-auto" href="/course/view.php?id=42">Programming Language(CS.30200_2026_3)</a>
           <div class="d-flex courseinfo"><div class="border-left py-2">Professors
           <div><a class="dropdown-toggle text-primary">Synthetic Instructor</a></div></div></div>"#;
         let course = Course {
@@ -386,7 +537,7 @@ mod tests {
             term: None,
             url: format!("{BASE}/course/view.php?id=42"),
         };
-        let detail = course_detail(html, &Url::parse(BASE).unwrap(), course).unwrap();
+        let detail = course_detail(html, &base(), course).unwrap();
         assert_eq!(detail.course.title, "Programming Language");
         assert_eq!(detail.course.code.as_deref(), Some("CS.30200_2026_3"));
         assert_eq!(detail.professors, ["Synthetic Instructor"]);
@@ -394,19 +545,109 @@ mod tests {
 
     #[test]
     fn empty_activity_pages_require_a_recognizable_container() {
-        let base = Url::parse(BASE).unwrap();
-        assert!(activities("<html><body>maintenance</body></html>", &base, None).is_err());
-        assert!(activities("<main class='course-content'></main>", &base, None).is_ok());
+        assert!(activities("<html><body>maintenance</body></html>", &base(), None).is_err());
+        assert!(activities("<body id='page-course-view-topics' class='course-42'><main class='course-content'></main>", &base(), None).is_ok());
+    }
+
+    #[test]
+    fn course_completeness_ignores_off_origin_links_and_extra_params_on_parsed_activities() {
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3>
+          <div class="summary"><a href="https://other-moodle.example/mod/page/view.php?id=99">Elsewhere</a>
+          <a href="/mod/quiz/view.php?id=7&amp;forceview=1#top">Take the quiz</a></div><ul>
+          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
+          </ul></li>"#;
+        let rows = activities(html, &base(), None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn course_completeness_still_fails_for_unknown_same_origin_module_ids() {
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3>
+          <div class="summary"><a href="/mod/page/view.php?id=99&amp;forceview=1">Unparsed</a></div><ul>
+          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
+          </ul></li>"#;
+        assert_eq!(
+            activities(html, &base(), None).unwrap_err().code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
+    }
+
+    #[test]
+    fn board_icon_link_before_titled_link_still_yields_the_post() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'><img alt=''></a></td>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        let rows = board_posts(html, &base(), Some("8".into())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].id.as_deref(), rows[0].title.as_str()),
+            (Some("9"), "Notice")
+        );
+    }
+
+    #[test]
+    fn board_completeness_accepts_other_links_to_parsed_posts() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a>\
+          <a href='/mod/courseboard/article.php?id=8&bwid=9&page=2'>Notice (page 2)</a>\
+          <a href='/mod/courseboard/comment.php?id=8&bwid=9'>3 comments</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        let rows = board_posts(html, &base(), Some("8".into())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn board_completeness_still_fails_for_unknown_post_ids() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a>\
+          <a href='/mod/courseboard/comment.php?id=8&bwid=10'>3 comments</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        assert_eq!(
+            board_posts(html, &base(), Some("8".into()))
+                .unwrap_err()
+                .code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
     }
 
     #[test]
     fn recognizes_the_all_weeks_choice_for_this_course_only() {
         let picker = r#"<div class="week-slider"><a href="javascript:M.course.format.dayselect(0,42,0)">All</a>
           <a href="javascript:M.course.format.dayselect(6,42,0)">week 6</a></div>"#;
-        assert!(has_all_weeks_view(picker, "42").unwrap());
-        assert!(!has_all_weeks_view(picker, "4").unwrap());
         let single_week = r#"<a href="javascript:M.course.format.dayselect(6,42,0)">week 6</a>"#;
-        assert!(!has_all_weeks_view(single_week, "42").unwrap());
-        assert!(!has_all_weeks_view("<main class='course-content'></main>", "42").unwrap());
+        for (html, course, expected) in [
+            (picker, "42", true),
+            (picker, "4", false),
+            (single_week, "42", false),
+            (
+                "<body id='page-course-view-topics' class='course-42'><main class='course-content'></main>",
+                "42",
+                false,
+            ),
+        ] {
+            assert_eq!(has_all_weeks_view(html, course), expected);
+        }
+    }
+
+    #[test]
+    fn parses_posts_and_refuses_malformed_ids_for_typed_references() {
+        let base = Url::parse("https://klms.kaist.ac.kr").unwrap();
+        let html = "<table class='generaltable'><tr><td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td><td>2026-08-29</td></tr></table>";
+        for id in ["", "oops", "8:9"] {
+            assert!(board_posts(html, &base, Some(id.into())).is_err());
+        }
+        let rows = board_posts(html, &base, Some("8".into())).unwrap();
+        assert_eq!(rows[0].id.as_deref(), Some("9"));
+        assert_eq!(rows[0].posted.as_deref(), Some("2026-08-29"));
+        let html = html.replace("bwid=9", "bwid=oops");
+        assert_eq!(
+            board_posts(&html, &base, Some("8".into()))
+                .unwrap_err()
+                .code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
     }
 }

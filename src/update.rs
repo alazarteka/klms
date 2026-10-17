@@ -4,15 +4,18 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
-use crate::{client::release_bytes as fetch, error::AppError, output, skill};
+use crate::digest::sha256_hex;
+use crate::private_fs::ScratchDir;
+use crate::{
+    client::{Client, release_bytes as fetch},
+    error::AppError,
+    output,
+};
 
 const REPO: &str = "alazarteka/klms";
 const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
@@ -35,8 +38,7 @@ pub fn run(check: bool, timeout: u64) -> Result<output::CommandResult, AppError>
             downloads_url: format!("https://github.com/{REPO}/releases/download"),
             current_version: env!("CARGO_PKG_VERSION").into(),
             destination: env::current_exe().and_then(fs::canonicalize).map_err(io)?,
-            #[cfg(test)]
-            home: None,
+            legacy_skill: legacy_skill_paths(),
         },
     )
 }
@@ -46,8 +48,7 @@ struct ReleaseSource {
     downloads_url: String,
     current_version: String,
     destination: PathBuf,
-    #[cfg(test)]
-    home: Option<PathBuf>,
+    legacy_skill: Vec<PathBuf>,
 }
 
 fn run_with_source(
@@ -66,26 +67,32 @@ fn run_with_source(
     let latest = version(&release.tag_name)?;
     let current = version(&source.current_version)?;
     let available = latest > current;
-    if check || !available {
-        return output::result(
+    let report = |updated: bool, available: bool, text: String| {
+        let mut result = output::result(
             "update",
             &json!({
                 "current_version": source.current_version,
                 "latest_version": release.tag_name.trim_start_matches('v'),
                 "update_available": available,
-                "updated": false,
+                "updated": updated,
                 "path": source.destination,
             }),
+            text,
+        )?;
+        result
+            .warnings
+            .extend(legacy_skill_warning(&source.legacy_skill));
+        Ok(result)
+    };
+    if check || !available {
+        let (tag, installed) = (&release.tag_name, &source.current_version);
+        return report(
+            false,
+            available,
             if available {
-                format!(
-                    "{} is available (installed: {}). Run `klms update`.",
-                    release.tag_name, source.current_version
-                )
+                format!("{tag} is available (installed: {installed}). Run `klms update`.")
             } else {
-                format!(
-                    "klms {} is current; latest stable release is {}.",
-                    source.current_version, release.tag_name
-                )
+                format!("klms {installed} is current; latest stable release is {tag}.")
             },
         );
     }
@@ -96,7 +103,7 @@ fn run_with_source(
     let checksum = fetch(client, &format!("{base}/{archive_name}.sha256"), 4096)?;
     let archive = fetch(client, &format!("{base}/{archive_name}"), MAX_ARCHIVE)?;
     verify_checksum(&archive, &checksum, &archive_name)?;
-    let work = WorkDir::new(&env::temp_dir())?;
+    let work = ScratchDir::create(&env::temp_dir()).map_err(|(_, e)| io(e))?;
     let archive_path = work.0.join(&archive_name);
     fs::write(&archive_path, archive).map_err(io)?;
     let candidate = work.0.join("klms");
@@ -114,17 +121,11 @@ fn run_with_source(
         ));
     }
     let destination = &source.destination;
-    let mut command = Command::new(&candidate);
-    command
+    let installed = Command::new(&candidate)
         .args(["--json", "__install", "--destination"])
-        .arg(destination);
-    #[cfg(test)]
-    if let Some(home) = &source.home {
-        command
-            .env("HOME", home)
-            .env("XDG_DATA_HOME", home.join("data"));
-    }
-    let installed = command.output().map_err(io)?;
+        .arg(destination)
+        .output()
+        .map_err(io)?;
     if !installed.status.success() {
         let diagnostic = serde_json::from_slice::<serde_json::Value>(&installed.stdout)
             .or_else(|_| serde_json::from_slice(&installed.stderr))
@@ -135,15 +136,9 @@ fn run_with_source(
             .unwrap_or("candidate installation failed");
         return Err(AppError::config(message).with_details(json!({"candidate_error": diagnostic})));
     }
-    output::result(
-        "update",
-        &json!({
-            "current_version": source.current_version,
-            "latest_version": release.tag_name.trim_start_matches('v'),
-            "update_available": false,
-            "updated": true,
-            "path": destination,
-        }),
+    report(
+        true,
+        false,
         format!(
             "Updated to {} at {}",
             release.tag_name,
@@ -152,9 +147,9 @@ fn run_with_source(
     )
 }
 
-/// Called by the verified candidate itself, so its embedded skill matches it.
-/// Stage a copy on the destination filesystem, install the skill with rollback,
-/// then atomically rename the binary. No fallible operation follows the switch.
+/// Called by the verified candidate itself. Stage a copy on the destination
+/// filesystem, then atomically rename it over the binary. A leftover legacy
+/// skill is only reported, never removed.
 pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
     if !destination.is_absolute() {
         return Err(AppError::usage("installation destination must be absolute"));
@@ -174,7 +169,7 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
         .parent()
         .ok_or_else(|| AppError::usage("missing install directory"))?;
     fs::create_dir_all(parent).map_err(io)?;
-    let work = WorkDir::new(parent)?;
+    let work = ScratchDir::create(parent).map_err(|(_, e)| io(e))?;
     let staged = work.0.join("klms");
     fs::copy(env::current_exe().map_err(io)?, &staged).map_err(io)?;
     executable(&staged)?;
@@ -194,20 +189,67 @@ pub fn install(destination: &Path) -> Result<output::CommandResult, AppError> {
             destination.display()
         ),
     )?;
-    skill::with_install(|| fs::rename(&staged, &destination).map_err(io))?;
+    fs::rename(&staged, &destination).map_err(io)?;
+    let mut result = result;
+    result
+        .warnings
+        .extend(legacy_skill_warning(&legacy_skill_paths()));
     Ok(result)
 }
 
+/// Earlier releases installed an Agent Skill copy of the help text. klms no
+/// longer removes it; it only reports what is still there, so the user decides.
+fn legacy_skill_paths() -> Vec<PathBuf> {
+    let Some(home) = crate::private_fs::env_path("HOME") else {
+        return Vec::new();
+    };
+    let data_home = crate::private_fs::xdg_home("XDG_DATA_HOME", Some(&home), ".local/share")
+        .expect("home is set");
+    legacy_skill_paths_at(&home, &data_home)
+}
+
+/// The klms-managed leftovers: the payload under its data directory and a
+/// symlink that points at exactly that directory. Anything else is the user's.
+fn legacy_skill_paths_at(home: &Path, data_home: &Path) -> Vec<PathBuf> {
+    let payload_dir = data_home.join("klms/skills/klms");
+    let link = home.join(".agents/skills/klms");
+    let payload = payload_dir.join("SKILL.md");
+    let mut found = Vec::new();
+    // read_link fails for anything that is not a symlink, so real files and
+    // directories at the discovery path are never reported.
+    if fs::read_link(&link).is_ok_and(|target| target == payload_dir) {
+        found.push(link);
+    }
+    if fs::symlink_metadata(&payload).is_ok_and(|m| m.is_file()) {
+        found.push(payload_dir);
+    }
+    found
+}
+
+fn legacy_skill_warning(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let list: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
+    Some(format!(
+        "The `klms skill` command and its SKILL.md are deprecated; `klms --help` is now the manual. \
+         An old installed skill is still present and klms no longer manages it; you can delete: {}",
+        list.join(", ")
+    ))
+}
+
 fn version(value: &str) -> Result<(u64, u64, u64), AppError> {
-    let value = value.strip_prefix('v').unwrap_or(value);
-    let parts: Vec<_> = value.split('.').collect();
-    if parts.len() != 3
-        || parts.iter().any(|p| {
-            p.is_empty()
-                || !p.bytes().all(|b| b.is_ascii_digit())
-                || (p.len() > 1 && p.starts_with('0'))
-        })
-    {
+    let parts: Vec<_> = value
+        .strip_prefix('v')
+        .unwrap_or(value)
+        .split('.')
+        .collect();
+    let plain = |p: &&str| {
+        !p.is_empty()
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && (p.len() == 1 || !p.starts_with('0'))
+    };
+    if parts.len() != 3 || !parts.iter().all(plain) {
         return Err(AppError::upstream(
             "release version must be stable major.minor.patch",
         ));
@@ -230,17 +272,14 @@ fn platform() -> Result<&'static str, AppError> {
 fn verify_checksum(bytes: &[u8], checksum: &[u8], name: &str) -> Result<(), AppError> {
     let text =
         std::str::from_utf8(checksum).map_err(|_| AppError::upstream("invalid checksum file"))?;
-    let fields: Vec<_> = text.split_whitespace().collect();
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if fields.len() != 2 || fields[0] != digest || fields[1].trim_start_matches('*') != name {
-        return Err(AppError::upstream(
+    match text.split_whitespace().collect::<Vec<_>>()[..] {
+        [digest, file] if digest == sha256_hex(bytes) && file.trim_start_matches('*') == name => {
+            Ok(())
+        }
+        _ => Err(AppError::upstream(
             "release archive checksum verification failed",
-        ));
+        )),
     }
-    Ok(())
 }
 
 fn extract_binary(archive: &Path, member: &str, candidate: &Path) -> Result<(), AppError> {
@@ -285,29 +324,6 @@ fn executable(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-struct WorkDir(PathBuf);
-impl WorkDir {
-    fn new(parent: &Path) -> Result<Self, AppError> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| AppError::internal(e.to_string()))?
-            .as_nanos();
-        let path = parent.join(format!(".klms-update-{}-{nonce}", std::process::id()));
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path).map_err(io)?;
-        Ok(Self(path))
-    }
-}
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 fn io(error: std::io::Error) -> AppError {
     AppError::config(format!("release update failed: {error}"))
 }

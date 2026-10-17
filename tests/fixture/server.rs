@@ -15,19 +15,25 @@ pub struct Request {
     pub target: String,
 }
 
-/// One recorded request: the request line plus its header lines.
+/// One recorded request: the request line, its header lines, and its body.
 #[derive(Debug, Clone)]
 pub struct Recorded {
     pub line: String,
     pub headers: Vec<String>,
+    pub body: String,
 }
 
 impl Recorded {
     pub fn has_header(&self, name: &str) -> bool {
-        let prefix = format!("{}:", name.to_ascii_lowercase());
-        self.headers
-            .iter()
-            .any(|header| header.to_ascii_lowercase().starts_with(&prefix))
+        self.header_value(name).is_some()
+    }
+
+    /// The trimmed value of the first header called `name` (case-insensitive).
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find_map(|header| {
+            let (key, value) = header.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
     }
 }
 
@@ -36,6 +42,10 @@ pub struct Response {
     content_type: &'static str,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// No `Content-Length`: the body ends only when the client hangs up.
+    open_ended: bool,
+    /// A `Content-Length` larger than the bytes actually sent.
+    declared_length: Option<u64>,
 }
 
 impl Response {
@@ -45,6 +55,8 @@ impl Response {
             content_type: "text/html; charset=utf-8",
             headers: Vec::new(),
             body: body.into(),
+            open_ended: false,
+            declared_length: None,
         }
     }
 
@@ -54,7 +66,25 @@ impl Response {
             content_type,
             headers: Vec::new(),
             body: body.into(),
+            open_ended: false,
+            declared_length: None,
         }
+    }
+
+    /// A 200 body that is never terminated by length or EOF while the client
+    /// is still reading it.
+    pub fn open_ended(body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            open_ended: true,
+            ..Self::bytes("application/octet-stream", body)
+        }
+    }
+
+    /// Declares `length` bytes but sends only the body: a client that reads
+    /// the body to its declared end fails, one that never reads it does not.
+    pub fn declared_length(mut self, length: u64) -> Self {
+        self.declared_length = Some(length);
+        self
     }
 
     pub fn status(mut self, status: &'static str) -> Self {
@@ -105,15 +135,14 @@ impl Server {
                     continue;
                 };
                 let raw = String::from_utf8_lossy(&buffer);
-                let mut lines = raw.lines();
+                let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+                let mut lines = head.lines();
                 let line = lines.next().unwrap_or_default().to_owned();
-                let headers = lines
-                    .take_while(|header| !header.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect();
+                let headers = lines.map(ToOwned::to_owned).collect();
                 thread_requests.lock().unwrap().push(Recorded {
                     line: line.clone(),
                     headers,
+                    body: body.to_owned(),
                 });
                 let mut parts = line.split_whitespace();
                 let request = Request {
@@ -122,11 +151,13 @@ impl Server {
                 };
                 let response = router(&request);
                 let mut headers = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
-                    response.status,
-                    response.content_type,
-                    response.body.len()
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\n",
+                    response.status, response.content_type
                 );
+                if !response.open_ended {
+                    let length = (response.declared_length).unwrap_or(response.body.len() as u64);
+                    headers.push_str(&format!("Content-Length: {length}\r\n"));
+                }
                 for (name, value) in response.headers {
                     headers.push_str(&format!("{name}: {value}\r\n"));
                 }
@@ -138,6 +169,11 @@ impl Server {
                         Ok(())
                     }
                 });
+                if response.open_ended {
+                    // Hold the connection open until the client gives up.
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    let _ = stream.read(&mut [0_u8; 64]);
+                }
                 if let Err(error) = written {
                     // Cancellation may close a client before its response is sent.
                     if !disconnected(&error) {
@@ -176,7 +212,8 @@ fn disconnected(error: &io::Error) -> bool {
     )
 }
 
-/// Incomplete, oversized, or stalled requests are discarded, never routed.
+/// Reads the head plus any Content-Length body. Incomplete, oversized, or
+/// stalled requests are discarded, never routed.
 fn read_headers(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
     let deadline = Instant::now() + Duration::from_secs(1);
     let mut buffer = [0_u8; 16 * 1024];
@@ -194,7 +231,15 @@ fn read_headers(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
             Ok(read) => {
                 length += read;
                 if let Some(end) = buffer[..length].windows(4).position(|s| s == b"\r\n\r\n") {
-                    return Ok(Some(buffer[..end + 4].to_vec()));
+                    let head = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                    let body_length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if length >= end + 4 + body_length {
+                        return Ok(Some(buffer[..end + 4 + body_length].to_vec()));
+                    }
                 }
             }
             Err(error)

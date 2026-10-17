@@ -1,19 +1,14 @@
-PREFIX ?= $(HOME)/.local
-BINDIR ?= $(PREFIX)/bin
+.PHONY: check build supply-chain
 
-.PHONY: check install-local install-skill test
-
-check:
+check: supply-chain
+	./scripts/test-supply-chain.sh
 	cargo fmt --all -- --check
-	cargo test --locked
+	cargo test --locked --all-targets
 	cargo clippy --locked --all-targets -- -D warnings
 
-test:
-	cargo test --locked
-
-install-local:
+build:
 	cargo build --release --locked
-	target/release/klms __install --destination "$(BINDIR)/klms"
 
-install-skill:
-	"$(BINDIR)/klms" skill install
+supply-chain:
+	./scripts/supply-chain.sh deny
+	./scripts/supply-chain.sh vet

@@ -1,6 +1,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SEOUL_OFFSET: &str = "+09:00";
+const SEOUL_OFFSET: &str = "+09:00";
+const SEOUL_SECS: i64 = 9 * 3600;
+
+fn seoul(date: impl std::fmt::Display, (hour, minute, second): (u32, u32, u32)) -> String {
+    format!("{date}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}")
+}
+
+fn digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
 
 pub fn moodle_datetime(value: &str) -> Option<String> {
     if let Some(normalized) = korean_datetime(value) {
@@ -8,35 +17,34 @@ pub fn moodle_datetime(value: &str) -> Option<String> {
     }
     let parts: Vec<_> = value.split(',').map(str::trim).collect();
     let (date, time) = match parts.as_slice() {
-        [_, date, time] => (*date, *time),
-        [date, time] => (*date, *time),
+        [_, date, time] | [date, time] => (*date, *time),
         _ => return None,
     };
-    let date_parts: Vec<_> = date.split_whitespace().collect();
-    let [day, month, year] = date_parts.as_slice() else {
+    let [day, month, year] = date.split_whitespace().collect::<Vec<_>>()[..] else {
         return None;
     };
-    let day = day.parse::<u32>().ok()?;
-    let year = year.parse::<i32>().ok()?;
-    let month = month_number(month)?;
-    let time_parts: Vec<_> = time.split_whitespace().collect();
-    let [clock, period] = time_parts.as_slice() else {
+    let (day, year) = (day.parse::<u32>().ok()?, year.parse::<i32>().ok()?);
+    let month =
+        "January February March April May June July August September October November December"
+            .split(' ')
+            .position(|name| name.eq_ignore_ascii_case(month))? as u32
+            + 1;
+    let [clock, period] = time.split_whitespace().collect::<Vec<_>>()[..] else {
         return None;
     };
     let (hour, minute) = clock.split_once(':')?;
-    let mut hour = hour.parse::<u32>().ok()?;
-    let minute = minute.parse::<u32>().ok()?;
+    let (hour, minute) = (hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?);
     if hour == 0 || hour > 12 || minute > 59 || day == 0 || day > days_in_month(year, month) {
         return None;
     }
-    hour %= 12;
-    if period.eq_ignore_ascii_case("PM") {
-        hour += 12;
-    } else if !period.eq_ignore_ascii_case("AM") {
-        return None;
-    }
-    Some(format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00{SEOUL_OFFSET}"
+    let pm = match period.to_ascii_uppercase().as_str() {
+        "PM" => 12,
+        "AM" => 0,
+        _ => return None,
+    };
+    Some(seoul(
+        format!("{year:04}-{month:02}-{day:02}"),
+        (hour % 12 + pm, minute, 0),
     ))
 }
 
@@ -54,9 +62,9 @@ fn korean_datetime(value: &str) -> Option<String> {
     if let Some(weekday) = rest.strip_prefix('(') {
         rest = weekday.split_once(')')?.1.trim();
     }
-    let (hour, minute, second) = localized_clock(rest)?;
-    Some(format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}"
+    Some(seoul(
+        format!("{year:04}-{month:02}-{day:02}"),
+        localized_clock(rest)?,
     ))
 }
 
@@ -73,152 +81,127 @@ pub fn calendar_datetime(value: &str, today: &str) -> Option<String> {
         "어제" | "yesterday" => -1,
         _ => return None,
     };
-    let date = add_days(today, offset)?;
-    let (hour, minute, second) = localized_clock(clock.trim())?;
-    Some(format!(
-        "{date}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}"
-    ))
+    Some(seoul(add_days(today, offset)?, localized_clock(clock)?))
 }
 
+/// `[오전|오후] H:MM[:SS]` or `H:MM[:SS] [AM|PM]` or a 24-hour clock.
 fn localized_clock(value: &str) -> Option<(u32, u32, u32)> {
     let value = value.trim();
-    let (clock, period) = if let Some(clock) = value.strip_prefix("오전") {
-        (clock.trim(), Some(false))
+    let (clock, pm) = if let Some(clock) = value.strip_prefix("오전") {
+        (clock, Some(false))
     } else if let Some(clock) = value.strip_prefix("오후") {
-        (clock.trim(), Some(true))
+        (clock, Some(true))
     } else if let Some((clock, suffix)) = value.rsplit_once(' ') {
-        match suffix.to_ascii_lowercase().as_str() {
-            "am" => (clock.trim(), Some(false)),
-            "pm" => (clock.trim(), Some(true)),
-            _ => return None,
-        }
+        (
+            clock,
+            Some(match suffix.to_ascii_lowercase().as_str() {
+                "am" => false,
+                "pm" => true,
+                _ => return None,
+            }),
+        )
     } else {
         (value, None)
     };
-    let parts: Vec<_> = clock.split(':').collect();
-    if !(2..=3).contains(&parts.len())
-        || parts
-            .iter()
-            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    let parts: Vec<_> = clock.trim().split(':').collect();
+    if !(2..=3).contains(&parts.len()) || !parts.iter().all(|part| digits(part)) {
         return None;
     }
-    let mut hour = parts[0].parse::<u32>().ok()?;
-    let minute = parts[1].parse::<u32>().ok()?;
-    let second = parts
-        .get(2)
-        .map_or(Some(0), |value| value.parse::<u32>().ok())?;
+    let number = |index: usize| {
+        parts
+            .get(index)
+            .map_or(Some(0), |part| part.parse::<u32>().ok())
+    };
+    let (mut hour, minute, second) = (number(0)?, number(1)?, number(2)?);
     if minute > 59 || second > 59 {
         return None;
     }
-    if let Some(pm) = period {
-        if !(1..=12).contains(&hour) {
-            return None;
-        }
-        hour = hour % 12 + if pm { 12 } else { 0 };
-    } else if hour > 23 {
-        return None;
+    match pm {
+        Some(pm) if (1..=12).contains(&hour) => hour = hour % 12 + if pm { 12 } else { 0 },
+        None if hour <= 23 => {}
+        _ => return None,
     }
     Some((hour, minute, second))
 }
 
 pub fn normalize_datetime(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.as_bytes().get(10) == Some(&b'T') {
-        return iso_datetime_to_seoul(value);
+    let date = value.get(..10).and_then(parse_date);
+    match value.as_bytes().get(10) {
+        Some(b'T') => iso_datetime_to_seoul(value),
+        Some(b' ') if date.is_some() => {
+            iso_datetime_to_seoul(&format!("{}T{}", &value[..10], &value[11..]))
+        }
+        None if value.len() == 10 && value.as_bytes().get(4) == Some(&b'-') => {
+            let (year, month, day) = date?;
+            Some(seoul(format!("{year:04}-{month:02}-{day:02}"), (0, 0, 0)))
+        }
+        _ => moodle_datetime(value),
     }
-    if value.as_bytes().get(10) == Some(&b' ') && parse_date(&value[..10]).is_some() {
-        return iso_datetime_to_seoul(&format!("{}T{}", &value[..10], &value[11..]));
-    }
-    if value.len() == 10 && value.as_bytes().get(4) == Some(&b'-') {
-        let (year, month, day) = parse_date(value)?;
-        return Some(format!(
-            "{year:04}-{month:02}-{day:02}T00:00:00{SEOUL_OFFSET}"
-        ));
-    }
-    moodle_datetime(value)
 }
 
 fn iso_datetime_to_seoul(value: &str) -> Option<String> {
     let (date, time_and_zone) = value.split_once('T')?;
     let (year, month, day) = parse_date(date)?;
-
-    let (clock, offset_seconds) = if let Some(clock) = time_and_zone.strip_suffix('Z') {
-        (clock, 0)
-    } else if let Some(index) = time_and_zone
+    let zone_start = time_and_zone
         .char_indices()
         .skip(1)
-        .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))
-    {
+        .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index));
+    let (clock, offset_seconds) = if let Some(clock) = time_and_zone.strip_suffix('Z') {
+        (clock, 0)
+    } else if let Some(index) = zone_start {
         let (clock, offset) = time_and_zone.split_at(index);
-        let sign = if offset.starts_with('-') { -1 } else { 1 };
-        let (hours, minutes) = offset.get(1..)?.split_once(':')?;
-        if hours.len() != 2
-            || minutes.len() != 2
-            || !hours
-                .bytes()
-                .chain(minutes.bytes())
-                .all(|byte| byte.is_ascii_digit())
-        {
-            return None;
-        }
-        let hours = hours.parse::<i64>().ok()?;
-        let minutes = minutes.parse::<i64>().ok()?;
+        let (hours, minutes) = offset[1..].split_once(':')?;
+        let two = |part: &str| (part.len() == 2 && digits(part)).then(|| part.parse::<i64>().ok());
+        let (hours, minutes) = (two(hours)??, two(minutes)??);
         if hours > 23 || minutes > 59 {
             return None;
         }
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
         (clock, sign * (hours * 3600 + minutes * 60))
     } else {
-        (time_and_zone, 9 * 3600)
+        (time_and_zone, SEOUL_SECS)
     };
-
-    let mut parts = clock.split(':');
-    let hour = parts.next()?.parse::<i64>().ok()?;
-    let minute = parts.next()?.parse::<i64>().ok()?;
-    let second = parts.next().unwrap_or("0");
-    let second = if let Some((second, fraction)) = second.split_once('.') {
-        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        second
-    } else {
-        second
-    }
-    .parse::<i64>()
-    .ok()?;
-    if parts.next().is_some()
-        || !(0..=23).contains(&hour)
-        || !(0..=59).contains(&minute)
-        || !(0..=59).contains(&second)
-    {
-        return None;
-    }
+    let clock = match clock.rsplit_once('.') {
+        Some((head, fraction)) if head.matches(':').count() == 2 && digits(fraction) => head,
+        Some(_) => return None,
+        None => clock,
+    };
+    let (hour, minute, second) = hms(clock)?;
     let unix = days_from_civil(year, month, day)
         .checked_mul(86_400)?
-        .checked_add(hour * 3600 + minute * 60 + second)?
+        .checked_add(i64::from(hour * 3600 + minute * 60 + second))?
         .checked_sub(offset_seconds)?;
     epoch_to_seoul(unix)
 }
 
-pub fn seoul_today() -> String {
-    let seconds = SystemTime::now()
+/// A 24-hour `H:MM[:SS]` clock.
+fn hms(clock: &str) -> Option<(u32, u32, u32)> {
+    let plain = clock.starts_with(|c: char| c.is_ascii_digit()) && !clock.contains(' ');
+    localized_clock(clock).filter(|_| plain)
+}
+
+pub fn epoch_now() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-        + 9 * 60 * 60;
-    civil_from_days(seconds.div_euclid(86_400))
+}
+
+pub fn seoul_today() -> String {
+    civil_from_days((epoch_now() + SEOUL_SECS).div_euclid(86_400))
 }
 
 pub fn epoch_to_seoul(timestamp: i64) -> Option<String> {
-    let seconds = timestamp.checked_add(9 * 60 * 60)?;
-    let days = seconds.div_euclid(86_400);
-    let day_seconds = seconds.rem_euclid(86_400);
-    let hour = day_seconds / 3600;
-    let minute = day_seconds % 3600 / 60;
-    let second = day_seconds % 60;
-    Some(format!(
-        "{}T{hour:02}:{minute:02}:{second:02}{SEOUL_OFFSET}",
-        civil_from_days(days)
+    let seconds = timestamp.checked_add(SEOUL_SECS)?;
+    let day_seconds = seconds.rem_euclid(86_400) as u32;
+    Some(seoul(
+        civil_from_days(seconds.div_euclid(86_400)),
+        (
+            day_seconds / 3600,
+            day_seconds % 3600 / 60,
+            day_seconds % 60,
+        ),
     ))
 }
 
@@ -227,44 +210,18 @@ pub fn add_days(date: &str, days: i64) -> Option<String> {
     Some(civil_from_days(days_from_civil(year, month, day) + days))
 }
 
+/// `YYYY-MM-DD` that names a real calendar day.
 fn parse_date(value: &str) -> Option<(i32, u32, u32)> {
-    if value.len() != 10
-        || value.as_bytes()[4] != b'-'
-        || value.as_bytes()[7] != b'-'
-        || !value
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    let [year, month, day] = value.split('-').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    if [year.len(), month.len(), day.len()] != [4, 2, 2]
+        || ![year, month, day].iter().all(|p| digits(p))
     {
         return None;
     }
-    let mut parts = value.split('-');
-    let (year, month, day) = (
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    );
+    let (year, month, day) = (year.parse().ok()?, month.parse().ok()?, day.parse().ok()?);
     (day > 0 && day <= days_in_month(year, month)).then_some((year, month, day))
-}
-
-fn month_number(value: &str) -> Option<u32> {
-    [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ]
-    .iter()
-    .position(|month| month.eq_ignore_ascii_case(value))
-    .map(|index| index as u32 + 1)
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -293,12 +250,11 @@ fn civil_from_days(days: i64) -> String {
     let day_of_era = days - era * 146_097;
     let year_of_era =
         (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + i64::from(month <= 2);
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
@@ -307,7 +263,7 @@ mod tests {
     use super::{add_days, calendar_datetime, epoch_to_seoul, moodle_datetime, normalize_datetime};
 
     #[test]
-    fn normalizes_korean_absolute_dates_and_validates_the_clock() {
+    fn normalizes_supported_formats_and_rejects_invalid_ones() {
         for (input, expected) in [
             (
                 "2030년 3월 17일(일요일) 오후 11:50",
@@ -316,6 +272,17 @@ mod tests {
             ("2030년 3월 17일 오전 12:05", "2030-03-17T00:05:00+09:00"),
             ("2030년 3월 17일 오후 12:05", "2030-03-17T12:05:00+09:00"),
             ("2030년 3월 17일 23:50", "2030-03-17T23:50:00+09:00"),
+            (
+                "Tuesday, 17 March 2026, 11:59 PM",
+                "2026-03-17T23:59:00+09:00",
+            ),
+            ("1 January 2026, 12:05 AM", "2026-01-01T00:05:00+09:00"),
+            ("2026-09-01", "2026-09-01T00:00:00+09:00"),
+            ("2026-09-01 16:30:00", "2026-09-01T16:30:00+09:00"),
+            ("2026-09-01 16:30:00Z", "2026-09-02T01:30:00+09:00"),
+            ("2026-09-01T16:30", "2026-09-01T16:30:00+09:00"),
+            ("2026-09-01T16:00:00Z", "2026-09-02T01:00:00+09:00"),
+            ("2026-09-01T23:30:00-05:00", "2026-09-02T13:30:00+09:00"),
         ] {
             assert_eq!(
                 normalize_datetime(input).as_deref(),
@@ -329,103 +296,52 @@ mod tests {
             "2030년 3월 17일 24:00",
             "2030년 3월 17일 23:60",
             "2030년 3월 17일 23:50 trailing",
-        ] {
-            assert!(moodle_datetime(input).is_none(), "{input}");
-        }
-    }
-
-    #[test]
-    fn relative_calendar_dates_use_the_explicit_seoul_day() {
-        assert_eq!(
-            calendar_datetime("내일 , 23:50", "2030-12-31").as_deref(),
-            Some("2031-01-01T23:50:00+09:00")
-        );
-        assert_eq!(
-            calendar_datetime("오늘, 오전 12:05", "2031-01-01").as_deref(),
-            Some("2031-01-01T00:05:00+09:00")
-        );
-        assert_eq!(
-            calendar_datetime("Yesterday, 11:50 PM", "2031-01-01").as_deref(),
-            Some("2030-12-31T23:50:00+09:00")
-        );
-        let seoul = normalize_datetime("2030-12-31T16:00:00Z").unwrap();
-        assert_eq!(
-            calendar_datetime("Tomorrow, 23:50", &seoul[..10]).as_deref(),
-            Some("2031-01-02T23:50:00+09:00")
-        );
-        assert!(calendar_datetime("someday, 23:50", "2030-12-31").is_none());
-    }
-
-    #[test]
-    fn normalizes_moodle_deadlines_to_seoul_iso() {
-        assert_eq!(
-            moodle_datetime("Tuesday, 17 March 2026, 11:59 PM").as_deref(),
-            Some("2026-03-17T23:59:00+09:00")
-        );
-        assert_eq!(
-            moodle_datetime("1 January 2026, 12:05 AM").as_deref(),
-            Some("2026-01-01T00:05:00+09:00")
-        );
-    }
-
-    #[test]
-    fn adds_days_across_month_and_year_boundaries() {
-        assert_eq!(add_days("2026-12-31", 1).as_deref(), Some("2027-01-01"));
-        assert_eq!(add_days("2028-02-28", 1).as_deref(), Some("2028-02-29"));
-    }
-
-    #[test]
-    fn converts_unix_event_time_to_seoul() {
-        assert_eq!(
-            epoch_to_seoul(1_767_225_600).as_deref(),
-            Some("2026-01-01T09:00:00+09:00")
-        );
-    }
-
-    #[test]
-    fn converts_iso_offsets_to_seoul_across_date_boundaries() {
-        assert_eq!(
-            normalize_datetime("2026-09-01T16:00:00Z").as_deref(),
-            Some("2026-09-02T01:00:00+09:00")
-        );
-        assert_eq!(
-            normalize_datetime("2026-09-01T23:30:00-05:00").as_deref(),
-            Some("2026-09-02T13:30:00+09:00")
-        );
-        assert!(normalize_datetime("2026-02-30T12:00:00+09:00").is_none());
-    }
-
-    #[test]
-    fn normalizes_supported_formats_without_discarding_time() {
-        for (input, expected) in [
-            (
-                "Tuesday, 17 March 2026, 11:59 PM",
-                "2026-03-17T23:59:00+09:00",
-            ),
-            ("1 January 2026, 12:05 AM", "2026-01-01T00:05:00+09:00"),
-            ("2026-09-01", "2026-09-01T00:00:00+09:00"),
-            ("2026-09-01 16:30:00", "2026-09-01T16:30:00+09:00"),
-            ("2026-09-01 16:30:00Z", "2026-09-02T01:30:00+09:00"),
-            ("2026-09-01T16:30", "2026-09-01T16:30:00+09:00"),
-        ] {
-            assert_eq!(
-                normalize_datetime(input).as_deref(),
-                Some(expected),
-                "{input}"
-            );
-        }
-        for input in [
             "2026-09-01 garbage",
             "2026-09-01extra",
             "2026-00-01",
             "2026-02-29",
+            "2026-02-30T12:00:00+09:00",
             "2026-09-01extraT12:00",
             "2026-09-01T12:00:00.garbage",
             "2026-09-01T12:00:00+09:-1",
         ] {
             assert!(normalize_datetime(input).is_none(), "{input}");
         }
+        for input in ["2030년 2월 29일 오후 11:50", "2030년 3월 17일 23:60"] {
+            assert!(moodle_datetime(input).is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn relative_calendar_dates_use_the_explicit_seoul_day() {
+        for (label, today, expected) in [
+            ("내일 , 23:50", "2030-12-31", "2031-01-01T23:50:00+09:00"),
+            (
+                "오늘, 오전 12:05",
+                "2031-01-01",
+                "2031-01-01T00:05:00+09:00",
+            ),
+            (
+                "Yesterday, 11:50 PM",
+                "2031-01-01",
+                "2030-12-31T23:50:00+09:00",
+            ),
+            ("Tomorrow, 23:50", "2031-01-01", "2031-01-02T23:50:00+09:00"),
+        ] {
+            assert_eq!(calendar_datetime(label, today).as_deref(), Some(expected));
+        }
+        assert!(calendar_datetime("someday, 23:50", "2030-12-31").is_none());
+    }
+
+    #[test]
+    fn day_arithmetic_and_epoch_conversion() {
+        assert_eq!(add_days("2026-12-31", 1).as_deref(), Some("2027-01-01"));
+        assert_eq!(add_days("2028-02-28", 1).as_deref(), Some("2028-02-29"));
         assert!(add_days("2026-02-29", 1).is_none());
         assert!(add_days("2026-09-01T12:00", 1).is_none());
+        assert_eq!(
+            epoch_to_seoul(1_767_225_600).as_deref(),
+            Some("2026-01-01T09:00:00+09:00")
+        );
     }
 }

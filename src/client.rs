@@ -1,26 +1,35 @@
+pub mod panopto;
+pub(crate) mod policy;
+pub mod stream;
 use std::{
+    borrow::Cow,
     io::{Read, Write},
     time::Duration,
 };
 
-use reqwest::{
-    blocking::Client,
-    header::{
-        CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG, HeaderValue, IF_MODIFIED_SINCE,
-        IF_NONE_MATCH, LAST_MODIFIED,
-    },
-    redirect::{Attempt, Policy},
+use crate::{
+    error::AppError,
+    http::{self, Failure, Follow, HeaderValue, Method, Payload, Response},
+    url::{Origin, Url, has_userinfo, is_http_loopback},
 };
-use url::Url;
 
-use crate::error::AppError;
+pub type Client = ureq::Agent;
 
+/// Redirects any KLMS or release request may follow.
+const MAX_REDIRECTS: usize = 5;
+/// Every Moodle AJAX method the client may call; there is no arbitrary POST.
+const AJAX_METHODS: [&str; 3] = [
+    "core_session_time_remaining",
+    "core_session_touch",
+    "core_course_get_enrolled_courses_by_timeline_classification",
+];
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct KlmsClient {
     base_url: Url,
     http: Client,
-    cookie: HeaderValue,
+    cookie: String,
+    panopto: panopto::Config,
 }
 
 pub struct HtmlResponse {
@@ -63,42 +72,58 @@ pub struct ConditionalResponse {
     pub bytes: Option<Vec<u8>>,
 }
 
+fn too_big(max: usize) -> AppError {
+    AppError::limit(format!("KLMS response exceeded the {max} byte limit"))
+}
+
+fn expired_session() -> AppError {
+    AppError::auth_required("the saved KLMS session is missing or expired")
+}
+
+fn bad_status(response: &Response) -> AppError {
+    AppError::http(response.status(), response.url().path())
+}
+
 impl KlmsClient {
+    /// Points the Panopto exchange and media policies at fixture origins.
+    #[cfg(test)]
+    pub fn with_panopto_config(mut self, config: panopto::Config) -> Self {
+        self.panopto = config;
+        self
+    }
+    pub fn panopto_launch(
+        &self,
+        page: &HtmlResponse,
+        timeout: u64,
+        kind: crate::parse::video::PageKind,
+    ) -> Result<panopto::Session, AppError> {
+        panopto::launch(
+            &self.base_url,
+            &self.cookie,
+            timeout,
+            &page.text,
+            &page.url,
+            &self.panopto,
+            kind,
+        )
+    }
     pub fn new(
         base: &str,
         cookie_header: Option<&str>,
         timeout_seconds: u64,
     ) -> Result<Self, AppError> {
-        let base_url = validate_base_url(base)?;
-        let expected_origin = origin(&base_url);
-        let policy = Policy::custom(move |attempt: Attempt<'_>| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("too many redirects");
-            }
-            if origin(attempt.url()) != expected_origin {
-                return attempt.error("cross-origin redirect refused");
-            }
-            if !attempt.url().username().is_empty() || attempt.url().password().is_some() {
-                return attempt.error("URL userinfo refused");
-            }
-            attempt.follow()
-        });
-        let http = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .connect_timeout(Duration::from_secs(8))
-            .redirect(policy)
-            .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| {
-                AppError::internal(format!("failed to create HTTP client: {error}"))
-            })?;
-        let cookie = HeaderValue::from_str(cookie_header.unwrap_or("")).map_err(|_| {
+        let cookie = cookie_header.unwrap_or("");
+        HeaderValue::from_str(cookie).map_err(|_| {
             AppError::config("storage state contains a cookie value invalid for HTTP headers")
         })?;
         Ok(Self {
-            base_url,
-            http,
-            cookie,
+            base_url: validate_base_url(base)?,
+            http: http::agent(
+                Duration::from_secs(timeout_seconds),
+                Some(Duration::from_secs(8)),
+            ),
+            cookie: cookie.to_owned(),
+            panopto: panopto::Config::production()?,
         })
     }
 
@@ -114,43 +139,38 @@ impl KlmsClient {
         })
     }
 
-    pub fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
+    pub(crate) fn get_bytes(&self, path: &str, max_bytes: usize) -> Result<ByteResponse, AppError> {
         let mut response = self.send_get(path)?;
-        let final_url = response.url().clone();
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > max_bytes)
-        {
-            return Err(AppError::limit(format!(
-                "KLMS response exceeded the {max_bytes} byte limit"
-            )));
-        }
-        let content_type = content_type(&response);
-        let bytes = read_bounded(&mut response, max_bytes, false)?;
-        check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
+        let bytes = read_capped(&mut response, max_bytes)?;
+        check_logged_out(&response, &bytes)?;
         Ok(ByteResponse {
-            url: final_url,
+            url: response.url().clone(),
             bytes,
         })
     }
 
+    /// Like `get_bytes`, but a response that ends at a pluginfile URL yields
+    /// only that URL: its body is never read, so its size cannot fail the call.
+    pub(crate) fn get_bytes_unless_file(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<(Url, Option<Vec<u8>>), AppError> {
+        let mut response = self.send_get(path)?;
+        if policy::pluginfile(response.url()) {
+            check_logged_out(&response, &[])?;
+            return Ok((response.url().clone(), None));
+        }
+        let bytes = read_capped(&mut response, max_bytes)?;
+        check_logged_out(&response, &bytes)?;
+        Ok((response.url().clone(), Some(bytes)))
+    }
+
     pub fn head(&self, path: &str) -> Result<RemoteMetadata, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.head(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        let response = request.send().map_err(|error| {
-            AppError::network(format!("KLMS HEAD failed: {}", error.without_url()))
-        })?;
-        if !response.status().is_success() {
-            return Err(AppError::http(
-                response.status().as_u16(),
-                response.url().path(),
-            ));
+        let response = self.fetch(Method::HEAD, url, None, Vec::new(), "KLMS HEAD failed")?;
+        if !(200..300).contains(&response.status()) {
+            return Err(bad_status(&response));
         }
         Ok(remote_metadata(&response))
     }
@@ -163,55 +183,38 @@ impl KlmsClient {
         max_bytes: usize,
     ) -> Result<ConditionalResponse, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.get(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        if let Some(value) = etag {
-            request = request.header(
-                IF_NONE_MATCH,
-                HeaderValue::from_str(value)
-                    .map_err(|_| AppError::config("stored ETag is invalid for an HTTP header"))?,
-            );
-        }
-        if let Some(value) = last_modified {
-            request = request.header(
-                IF_MODIFIED_SINCE,
+        let mut extra = Vec::new();
+        for (name, value, label) in [
+            ("if-none-match", etag, "ETag"),
+            ("if-modified-since", last_modified, "Last-Modified"),
+        ] {
+            if let Some(value) = value {
                 HeaderValue::from_str(value).map_err(|_| {
-                    AppError::config("stored Last-Modified is invalid for an HTTP header")
-                })?,
-            );
+                    AppError::config(format!("stored {label} is invalid for an HTTP header"))
+                })?;
+                extra.push((name, value.to_owned()));
+            }
         }
-        let mut response = request.send().map_err(|error| {
-            AppError::network(format!(
-                "conditional KLMS request failed: {}",
-                error.without_url()
-            ))
-        })?;
+        let mut response = self.fetch(
+            Method::GET,
+            url,
+            None,
+            extra,
+            "conditional KLMS request failed",
+        )?;
         let metadata = remote_metadata(&response);
-        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        if metadata.status == 304 {
             return Ok(ConditionalResponse {
                 metadata,
                 bytes: None,
             });
         }
-        if !matches!(
-            response.status(),
-            reqwest::StatusCode::OK | reqwest::StatusCode::PARTIAL_CONTENT
-        ) {
-            return Err(AppError::http(metadata.status, metadata.url.path()));
+        if !matches!(metadata.status, 200 | 206) {
+            return Err(bad_status(&response));
         }
-        if metadata
-            .content_length
-            .is_some_and(|n| n > max_bytes as u64)
-        {
-            return Err(AppError::limit(format!(
-                "KLMS response exceeded the {max_bytes} byte limit"
-            )));
-        }
-        let bytes = read_bounded(&mut response, max_bytes, false)?;
+        let bytes = read_capped(&mut response, max_bytes)?;
         validate_complete_bytes(&metadata, bytes.len())?;
-        check_logged_out(&metadata.url, metadata.content_type.as_deref(), &bytes)?;
+        check_logged_out(&response, &bytes)?;
         Ok(ConditionalResponse {
             metadata,
             bytes: Some(bytes),
@@ -220,19 +223,13 @@ impl KlmsClient {
 
     pub fn get_preview(&self, path: &str, max_bytes: usize) -> Result<PreviewResponse, AppError> {
         let mut response = self.send_get(path)?;
-        let final_url = response.url().clone();
-        let content_type = content_type(&response);
-        let bytes = read_bounded(&mut response, max_bytes, true)?;
+        let mut bytes = read_prefix(&mut response, max_bytes)?;
         let truncated = bytes.len() > max_bytes;
-        let bytes = if truncated {
-            bytes[..max_bytes].to_vec()
-        } else {
-            bytes
-        };
-        check_logged_out(&final_url, content_type.as_deref(), &bytes)?;
+        bytes.truncate(max_bytes);
+        check_logged_out(&response, &bytes)?;
         Ok(PreviewResponse {
-            url: final_url,
-            content_type,
+            url: response.url().clone(),
+            content_type: response.header("content-type").map(str::to_owned),
             bytes,
             truncated,
         })
@@ -244,23 +241,17 @@ impl KlmsClient {
         max_bytes: usize,
         writer: &mut impl Write,
     ) -> Result<DownloadResponse, AppError> {
+        const SAMPLE: usize = 64 * 1024;
         let mut response = self.send_get(path)?;
         let metadata = remote_metadata(&response);
-        let final_url = response.url().clone();
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > max_bytes)
+        if metadata
+            .content_length
+            .is_some_and(|n| n > max_bytes as u64)
         {
-            return Err(AppError::limit(format!(
-                "KLMS download exceeded the {max_bytes} byte limit"
-            )));
+            return Err(too_big(max_bytes));
         }
-        let content_type = content_type(&response);
         let mut sample = Vec::new();
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = [0_u8; SAMPLE];
         let mut total = 0_usize;
         loop {
             let read = response
@@ -269,65 +260,166 @@ impl KlmsClient {
             if read == 0 {
                 break;
             }
-            total = total
-                .checked_add(read)
-                .ok_or_else(|| AppError::network("download size overflow"))?;
+            total += read;
             if total > max_bytes {
-                return Err(AppError::limit(format!(
-                    "KLMS download exceeded the {max_bytes} byte limit"
-                )));
+                return Err(too_big(max_bytes));
             }
-            if sample.len() < 64 * 1024 {
-                let keep = read.min(64 * 1024 - sample.len());
-                sample.extend_from_slice(&buffer[..keep]);
-            }
+            let keep = read.min(SAMPLE - sample.len());
+            sample.extend_from_slice(&buffer[..keep]);
             writer
                 .write_all(&buffer[..read])
                 .map_err(|error| AppError::config(format!("failed to write download: {error}")))?;
         }
         validate_complete_bytes(&metadata, total)?;
-        check_logged_out(&final_url, content_type.as_deref(), &sample)?;
+        check_logged_out(&response, &sample)?;
         Ok(DownloadResponse {
-            url: final_url,
-            content_type,
+            url: metadata.url,
+            content_type: metadata.content_type,
             bytes: total,
         })
     }
 
-    fn send_get(&self, path: &str) -> Result<reqwest::blocking::Response, AppError> {
+    fn send_get(&self, path: &str) -> Result<Response, AppError> {
         let url = self.resolve(path)?;
-        let mut request = self.http.get(url);
-        if !self.cookie.is_empty() {
-            request = request.header(COOKIE, self.cookie.clone());
-        }
-        let response = request.send().map_err(|error| {
-            AppError::network(format!("KLMS request failed: {}", error.without_url()))
-        })?;
-        let status = response.status();
-        let final_url = response.url().clone();
-        if !status.is_success() {
-            return Err(AppError::http(status.as_u16(), final_url.path()));
+        let response = self.fetch(Method::GET, url, None, Vec::new(), "KLMS request failed")?;
+        if !(200..300).contains(&response.status()) {
+            return Err(bad_status(&response));
         }
         Ok(response)
+    }
+
+    /// Native VOD bytes only. Video transfers get a separate, bounded time
+    /// budget without changing the shorter timeout used for ordinary reads.
+    pub fn download_video_to(
+        &self,
+        path: &str,
+        limits: stream::Limits,
+        writer: &mut impl Write,
+    ) -> Result<DownloadResponse, AppError> {
+        let url = self.resolve(path)?;
+        let mut policy = NativeVideoPolicy {
+            stall: limits.stall,
+            origin: self.base_url.origin(),
+            cookie: self.cookie.clone(),
+        };
+        http::Policy::allow(&mut policy, &url)?;
+        let agent = http::agent(limits.remaining()?, Some(Duration::from_secs(8)));
+        let response = http::follow(
+            &agent,
+            Follow {
+                method: Method::GET,
+                url,
+                payload: None,
+                max_redirects: MAX_REDIRECTS,
+                strict: false,
+            },
+            &mut policy,
+        )
+        .map_err(|failure| {
+            AppError::network(format!(
+                "native video request failed: {}",
+                describe(failure, "video redirect")
+            ))
+        })?;
+        if !matches!(response.status(), 200 | 206) {
+            return Err(bad_status(&response));
+        }
+        check_logged_out(&response, &[])?;
+        let metadata = remote_metadata(&response);
+        let total = stream::copy(response, writer, limits, stream::Expect::Mp4, &|| {
+            AppError::upstream("native video response is not an MP4")
+        })?;
+        validate_complete_bytes(&metadata, total)?;
+        Ok(DownloadResponse {
+            url: metadata.url,
+            content_type: metadata.content_type,
+            bytes: total,
+        })
+    }
+
+    /// One request with same-origin, userinfo-free redirect following. The
+    /// cookie header accompanies every hop because every hop is same-origin.
+    fn fetch(
+        &self,
+        method: Method,
+        url: Url,
+        payload: Option<Payload>,
+        mut headers: Vec<(&'static str, String)>,
+        context: &str,
+    ) -> Result<Response, AppError> {
+        if method != Method::POST {
+            policy::read_url(&url)?;
+        }
+        if !self.cookie.is_empty() {
+            headers.push(("cookie", self.cookie.clone()));
+        }
+        let mut policy = KlmsPolicy {
+            origin: self.base_url.origin(),
+            initial: url.clone(),
+            headers,
+        };
+        let request = Follow {
+            method,
+            url,
+            payload,
+            max_redirects: MAX_REDIRECTS,
+            strict: false,
+        };
+        http::follow(&self.http, request, &mut policy).map_err(|failure| match failure {
+            Failure::Refused(error) => error,
+            failure => AppError::network(format!("{context}: {}", describe(failure, "redirect"))),
+        })
+    }
+
+    /// Typed operands are user mistakes; discovered URLs use upstream errors.
+    pub fn validate_operand(&self, path: &str) -> Result<(), AppError> {
+        self.resolve(path)
+            .map(|_| ())
+            .map_err(|error| AppError::usage(error.message))
     }
 
     fn resolve(&self, path: &str) -> Result<Url, AppError> {
         let url = self
             .base_url
             .join(path)
-            .map_err(|error| AppError::config(format!("invalid KLMS path: {error}")))?;
-        if origin(&url) != origin(&self.base_url) {
-            return Err(AppError::config("cross-origin request path refused"));
+            .map_err(|error| AppError::shape(format!("invalid KLMS path: {error}")))?;
+        if url.origin() != self.base_url.origin() {
+            return Err(AppError::shape("cross-origin request path refused"));
         }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(AppError::config("request URL must not contain userinfo"));
+        if has_userinfo(&url) {
+            return Err(AppError::shape("request URL must not contain userinfo"));
         }
         Ok(url)
     }
 
     pub fn ajax(&self, sesskey: &str, method: &'static str) -> Result<serde_json::Value, AppError> {
-        const ALLOWED: &[&str] = &["core_session_time_remaining", "core_session_touch"];
-        if !ALLOWED.contains(&method) {
+        self.ajax_request(sesskey, method, serde_json::json!({}))
+    }
+
+    /// Fixed read-only Moodle operation, with bounded page arguments.
+    pub fn enrolled_courses(
+        &self,
+        sesskey: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<serde_json::Value, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AppError::internal("invalid enrolled-course page size"));
+        }
+        self.ajax_request(
+            sesskey,
+            "core_course_get_enrolled_courses_by_timeline_classification",
+            serde_json::json!({"classification":"allincludinghidden", "limit":limit, "offset":offset, "sort":"fullname"}),
+        )
+    }
+
+    fn ajax_request(
+        &self,
+        sesskey: &str,
+        method: &'static str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        if !AJAX_METHODS.contains(&method) {
             return Err(AppError::internal(
                 "attempted a non-allowlisted Moodle AJAX method",
             ));
@@ -339,52 +431,24 @@ impl KlmsClient {
         url.query_pairs_mut()
             .append_pair("sesskey", sesskey)
             .append_pair("info", method);
-        let payload = serde_json::json!([{"index": 0, "methodname": method, "args": {}}]);
-        let body = serde_json::to_vec(&payload).map_err(|error| {
-            AppError::internal(format!("failed to encode AJAX request: {error}"))
-        })?;
-        let mut response = self
-            .http
-            .post(url)
-            .header(COOKIE, self.cookie.clone())
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .map_err(|error| {
-                AppError::network(format!("KLMS AJAX request failed: {}", error.without_url()))
-            })?;
-        if !response.status().is_success() {
-            return Err(AppError::http(
-                response.status().as_u16(),
-                "/lib/ajax/service.php",
-            ));
+        let body = serde_json::json!([{"index": 0, "methodname": method, "args": args}]);
+        let payload = Payload {
+            content_type: "application/json",
+            bytes: body.to_string().into_bytes(),
+        };
+        let extra = vec![("x-requested-with", "XMLHttpRequest".to_owned())];
+        let mut response = self.fetch(
+            Method::POST,
+            url,
+            Some(payload),
+            extra,
+            "KLMS AJAX request failed",
+        )?;
+        if !(200..300).contains(&response.status()) {
+            return Err(AppError::http(response.status(), "/lib/ajax/service.php"));
         }
-        if response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > MAX_BODY_BYTES)
-        {
-            return Err(AppError::limit(
-                "KLMS AJAX response exceeded the 8 MiB limit",
-            ));
-        }
-        let mut response_body = Vec::with_capacity(64 * 1024);
-        response
-            .by_ref()
-            .take(MAX_BODY_BYTES as u64 + 1)
-            .read_to_end(&mut response_body)
-            .map_err(|error| {
-                AppError::network(format!("failed to read KLMS AJAX response: {error}"))
-            })?;
-        if response_body.len() > MAX_BODY_BYTES {
-            return Err(AppError::limit(
-                "KLMS AJAX response exceeded the 8 MiB limit",
-            ));
-        }
-        let value: serde_json::Value = serde_json::from_slice(&response_body)
+        let body = read_capped(&mut response, MAX_BODY_BYTES)?;
+        let value: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|error| AppError::shape(format!("invalid KLMS AJAX response: {error}")))?;
         let first = value
             .as_array()
@@ -397,7 +461,10 @@ impl KlmsClient {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("KLMS AJAX returned an error");
             let lower = message.to_ascii_lowercase();
-            if lower.contains("session") || lower.contains("sesskey") || lower.contains("login") {
+            if ["session", "sesskey", "login"]
+                .iter()
+                .any(|word| lower.contains(word))
+            {
                 return Err(expired_session());
             }
             return Err(AppError::upstream(message));
@@ -409,135 +476,102 @@ impl KlmsClient {
     }
 }
 
-fn remote_metadata(response: &reqwest::blocking::Response) -> RemoteMetadata {
-    let string_header = |name| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
+fn describe(failure: Failure, redirect: &str) -> String {
+    match failure {
+        Failure::Transport(message) => message,
+        Failure::Refused(error) => error.message,
+        Failure::TooManyRedirects => "too many redirects".into(),
+        Failure::MissingLocation | Failure::InvalidLocation => format!("invalid {redirect}"),
+    }
+}
+
+fn remote_metadata(response: &Response) -> RemoteMetadata {
+    let header = |name| response.header(name).map(str::to_owned);
     RemoteMetadata {
         url: response.url().clone(),
-        status: response.status().as_u16(),
-        etag: string_header(ETAG),
-        last_modified: string_header(LAST_MODIFIED),
-        content_length: response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok()),
-        content_type: content_type(response),
-        content_range: string_header(CONTENT_RANGE),
+        status: response.status(),
+        etag: header("etag"),
+        last_modified: header("last-modified"),
+        content_length: response.content_length(),
+        content_type: header("content-type"),
+        content_range: header("content-range"),
     }
 }
 
 fn validate_complete_bytes(metadata: &RemoteMetadata, body_length: usize) -> Result<(), AppError> {
-    if metadata
-        .content_length
-        .is_some_and(|length| length != body_length as u64)
-    {
+    let length = body_length as u64;
+    if metadata.content_length.is_some_and(|n| n != length) {
         return Err(AppError::upstream(
             "KLMS response Content-Length did not match the received bytes",
         ));
     }
-    if metadata.status != reqwest::StatusCode::PARTIAL_CONTENT.as_u16() {
+    if metadata.status != 206 {
         return Ok(());
     }
-    let Some(value) = metadata.content_range.as_deref() else {
-        return Err(AppError::upstream(
-            "KLMS returned partial content without a complete Content-Range",
-        ));
-    };
-    let Some(range) = value.strip_prefix("bytes ") else {
-        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
-    };
-    let Some((bounds, total)) = range.split_once('/') else {
-        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
-    };
-    let Some((start, end)) = bounds.split_once('-') else {
-        return Err(AppError::upstream("KLMS returned an invalid Content-Range"));
-    };
-    let parsed = start
-        .parse::<u64>()
-        .ok()
-        .zip(end.parse::<u64>().ok())
-        .zip(total.parse::<u64>().ok());
-    if !parsed.is_some_and(|((start, end), total)| {
-        start == 0 && end.checked_add(1) == Some(total) && total == body_length as u64
-    }) {
-        return Err(AppError::upstream(
+    let range = metadata.content_range.as_deref().and_then(|value| {
+        let (bounds, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+        let (start, end) = bounds.split_once('-')?;
+        Some((
+            start.parse::<u64>().ok()?,
+            end.parse::<u64>().ok()?,
+            total.parse::<u64>().ok()?,
+        ))
+    });
+    match range {
+        Some((0, end, total)) if end.checked_add(1) == Some(total) && total == length => Ok(()),
+        _ => Err(AppError::upstream(
             "KLMS returned a partial byte range, not a complete object",
-        ));
+        )),
     }
-    Ok(())
 }
 
-fn content_type(response: &reqwest::blocking::Response) -> Option<String> {
-    response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
+fn read_prefix(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+    http::read_prefix(response, max_bytes as u64)
+        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))
 }
 
-fn read_bounded(
-    response: &mut reqwest::blocking::Response,
-    max_bytes: usize,
-    allow_truncation: bool,
-) -> Result<Vec<u8>, AppError> {
-    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
-    response
-        .by_ref()
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|error| AppError::network(format!("failed to read KLMS response: {error}")))?;
-    if body.len() > max_bytes && !allow_truncation {
-        return Err(AppError::limit(format!(
-            "KLMS response exceeded the {max_bytes} byte limit"
-        )));
+/// The whole body, or a limit error when it is declared or turns out larger.
+fn read_capped(response: &mut Response, max_bytes: usize) -> Result<Vec<u8>, AppError> {
+    if response
+        .content_length()
+        .is_some_and(|n| n > max_bytes as u64)
+    {
+        return Err(too_big(max_bytes));
+    }
+    let body = read_prefix(response, max_bytes)?;
+    if body.len() > max_bytes {
+        return Err(too_big(max_bytes));
     }
     Ok(body)
 }
 
-fn check_logged_out(url: &Url, content_type: Option<&str>, bytes: &[u8]) -> Result<(), AppError> {
-    if url.path().to_ascii_lowercase().contains("/login/") {
-        return Err(expired_session());
-    }
+fn check_logged_out(response: &Response, bytes: &[u8]) -> Result<(), AppError> {
     let leading = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_ascii_lowercase();
-    let looks_html = content_type.is_some_and(|value| value.to_ascii_lowercase().contains("html"))
+    let looks_html = response
+        .header("content-type")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("html"))
         || leading.contains("<!doctype html")
         || leading.contains("<html");
-    if looks_html {
-        let text = String::from_utf8_lossy(bytes);
-        if looks_logged_out(url, &text) {
-            return Err(expired_session());
-        }
+    let text = if looks_html {
+        String::from_utf8_lossy(bytes)
+    } else {
+        Cow::Borrowed("")
+    };
+    if looks_logged_out(response.url(), &text) {
+        return Err(expired_session());
     }
     Ok(())
-}
-
-fn expired_session() -> AppError {
-    AppError::auth_required("the saved KLMS session is missing or expired")
 }
 
 pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
     let mut url = Url::parse(value)
         .map_err(|error| AppError::config(format!("invalid KLMS base URL: {error}")))?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    if has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
         return Err(AppError::config(
             "KLMS base URL must not contain credentials, query, or fragment",
         ));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| AppError::config("KLMS base URL has no host"))?;
-    let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+    if url.scheme() != "https" && !is_http_loopback(&url) {
         return Err(AppError::config(
             "KLMS base URL must use HTTPS (HTTP is loopback-only)",
         ));
@@ -546,57 +580,50 @@ pub fn validate_base_url(value: &str) -> Result<Url, AppError> {
     Ok(url)
 }
 
-fn origin(url: &Url) -> (String, Option<String>, Option<u16>) {
-    (
-        url.scheme().into(),
-        url.host_str().map(str::to_owned),
-        url.port_or_known_default(),
-    )
-}
-
 fn looks_logged_out(url: &Url, html: &str) -> bool {
-    let path = url.path().to_ascii_lowercase();
-    let lower = html.to_ascii_lowercase();
-    path.contains("/login/")
-        || lower.contains("name=\"username\"") && lower.contains("name=\"password\"")
-        || lower.contains("id=\"loginbtn\"")
+    url.path().to_ascii_lowercase().contains("/login/") || crate::parse::login_markup(html)
 }
 
 /// Separate unauthenticated transport for explicit release checks/downloads.
 /// KLMS cookies and origin policy never enter this client.
 pub fn release_client(timeout: u64) -> Result<Client, AppError> {
-    Client::builder()
-        .timeout(Duration::from_secs(timeout.clamp(1, 300)))
-        .user_agent(concat!("klms/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("too many release redirects")
-            } else if attempt.url().scheme() == "https" {
-                attempt.follow()
-            } else {
-                attempt.error("release download requires HTTPS")
-            }
-        }))
-        .build()
-        .map_err(|e| AppError::network(e.to_string()))
+    Ok(http::agent(
+        Duration::from_secs(timeout.clamp(1, 300)),
+        None,
+    ))
+}
+
+struct ReleasePolicy;
+
+impl http::Policy for ReleasePolicy {
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.scheme() == "https" {
+            Ok(())
+        } else {
+            Err(AppError::network("release download requires HTTPS"))
+        }
+    }
 }
 
 pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, AppError> {
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| AppError::network(e.to_string()))?;
-    if response.status() != reqwest::StatusCode::OK {
+    let url = Url::parse(url).map_err(|e| AppError::network(e.to_string()))?;
+    let request = Follow {
+        method: Method::GET,
+        url,
+        payload: None,
+        max_redirects: MAX_REDIRECTS,
+        strict: false,
+    };
+    let response = http::follow(client, request, &mut ReleasePolicy)
+        .map_err(|failure| AppError::network(describe(failure, "release redirect")))?;
+    if response.status() != 200 {
         return Err(AppError::network(format!(
             "release request returned HTTP {}",
             response.status()
         )));
     }
     let expected = response.content_length();
-    let mut bytes = Vec::new();
-    response
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
+    let bytes = http::read_prefix(response, limit)
         .map_err(|e| AppError::network(format!("release response read failed: {e}")))?;
     if bytes.len() as u64 > limit {
         return Err(AppError::limit("release response exceeds size limit"));
@@ -607,72 +634,414 @@ pub fn release_bytes(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
+struct KlmsPolicy {
+    origin: Origin,
+    initial: Url,
+    headers: Vec<(&'static str, String)>,
+}
+
+struct NativeVideoPolicy {
+    stall: Duration,
+    origin: Origin,
+    cookie: String,
+}
+
+impl http::Policy for NativeVideoPolicy {
+    fn response_timeout(&self) -> Option<Duration> {
+        Some(self.stall)
+    }
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        if self.cookie.is_empty() {
+            Vec::new()
+        } else {
+            vec![("cookie", self.cookie.clone())]
+        }
+    }
+
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.origin() != self.origin || has_userinfo(url) {
+            return Err(AppError::network("native video cross-origin URL refused"));
+        }
+        if !url.path().starts_with("/vod1/") || !url.path().ends_with(".mp4") {
+            return Err(AppError::network(
+                "native video requires a /vod1/...mp4 path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl http::Policy for KlmsPolicy {
+    fn headers(&mut self, _method: &Method, _url: &Url) -> Vec<(&'static str, String)> {
+        self.headers.clone()
+    }
+
+    fn allow(&mut self, url: &Url) -> Result<(), AppError> {
+        if url.origin() != self.origin {
+            return Err(AppError::shape("cross-origin redirect refused"));
+        }
+        if has_userinfo(url) {
+            return Err(AppError::shape("URL userinfo refused"));
+        }
+        policy::redirect(&self.initial, url)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read, Write},
-        net::TcpListener,
+        collections::VecDeque,
+        sync::Mutex,
         thread,
+        time::{Duration, Instant},
     };
 
-    use super::{KlmsClient, validate_base_url};
+    use super::{KlmsClient, stream::Limits, validate_base_url};
+    use crate::fixture_server::{Response, Server};
+
+    fn redirect(location: &str) -> Response {
+        Response::bytes("text/plain", "")
+            .status("302 Found")
+            .header("Location", location)
+    }
+
+    /// Answers each connection with the next response.
+    fn serve(responses: Vec<Response>) -> Server {
+        let queue = Mutex::new(VecDeque::from(responses));
+        Server::new(move |_| queue.lock().unwrap().pop_front().expect("extra request"))
+    }
+
+    /// The lowercased request line and headers of every request served.
+    fn seen(server: &Server) -> Vec<String> {
+        let recorded = server.recorded().into_iter();
+        recorded
+            .map(|r| format!("{}\r\n{}", r.line, r.headers.join("\r\n")).to_ascii_lowercase())
+            .collect()
+    }
+
+    fn client(server: &Server, cookie: Option<&str>, timeout: u64) -> KlmsClient {
+        KlmsClient::new(&server.url(), cookie, timeout).unwrap()
+    }
+
+    #[test]
+    fn ajax_refuses_methods_outside_the_allowlist_without_a_request() {
+        let server = serve(vec![]);
+        let client = client(&server, None, 5);
+        let error = client
+            .ajax_request("key", "core_user_update_users", serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert_eq!(
+            error.message,
+            "attempted a non-allowlisted Moodle AJAX method"
+        );
+        assert!(server.recorded().is_empty());
+    }
 
     #[test]
     fn accepts_https_and_loopback_http_only() {
         assert!(validate_base_url("https://klms.kaist.ac.kr").is_ok());
         assert!(validate_base_url("http://127.0.0.1:9999").is_ok());
+        assert!(validate_base_url("http://[::1]:9").is_ok());
+        assert!(validate_base_url("http://[::2]:9").is_err());
         assert!(validate_base_url("http://example.com").is_err());
         assert!(validate_base_url("https://user@example.com").is_err());
     }
 
     #[test]
-    fn conditional_get_handles_opaque_etags_and_rejects_prefix_206() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            for index in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 4096];
-                let length = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..length]);
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("if-none-match: w/\"opaque-value\"")
-                );
-                if index == 0 {
-                    write!(stream, "HTTP/1.1 304 Not Modified\r\nETag: W/\"opaque-value\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                } else {
-                    write!(stream, "HTTP/1.1 206 Partial Content\r\nETag: \"changed\"\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nContent-Range: bytes 0-2/8\r\nConnection: close\r\n\r\nnew").unwrap();
-                }
-            }
-        });
-        let client = KlmsClient::new(&format!("http://{address}"), None, 5).unwrap();
+    fn conditional_get_handles_opaque_etags_and_only_accepts_complete_206() {
+        let partial = |range: &str| {
+            Response::bytes("application/octet-stream", "new")
+                .status("206 Partial Content")
+                .header("ETag", "\"changed\"")
+                .header("Content-Range", range)
+        };
+        let server = serve(vec![
+            Response::bytes("text/plain", "")
+                .status("304 Not Modified")
+                .header("ETag", "W/\"opaque-value\""),
+            partial("bytes 0-2/8"),
+            partial("bytes 0-2/3"),
+        ]);
+        let client = client(&server, None, 5);
+        let etag = Some("W/\"opaque-value\"");
         let unchanged = client
-            .get_conditional("/file", Some("W/\"opaque-value\""), None, 8)
+            .get_conditional("/pluginfile.php/file", etag, None, 8)
             .unwrap();
         assert_eq!(unchanged.metadata.status, 304);
         assert!(unchanged.bytes.is_none());
-        let changed = client
-            .get_conditional("/file", Some("W/\"opaque-value\""), None, 8)
+        let prefix = client
+            .get_conditional("/pluginfile.php/file", etag, None, 8)
             .unwrap_err();
-        assert_eq!(changed.code, "UPSTREAM_ERROR");
-        server.join().unwrap();
+        assert_eq!(prefix.code, "UPSTREAM_ERROR");
+        let complete = client
+            .get_conditional("/pluginfile.php/file", None, None, 8)
+            .unwrap();
+        assert_eq!(complete.bytes.as_deref(), Some(&b"new"[..]));
+        assert!(
+            seen(&server)[..2]
+                .iter()
+                .all(|r| r.contains("if-none-match: w/\"opaque-value\""))
+        );
     }
 
     #[test]
-    fn conditional_get_accepts_206_only_when_it_covers_the_complete_object() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).unwrap();
-            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nContent-Range: bytes 0-2/3\r\nConnection: close\r\n\r\nnew").unwrap();
+    fn follows_same_origin_redirects_with_the_cookie_and_reports_the_final_url() {
+        let server = serve(vec![
+            redirect("/pluginfile.php/final?forcedownload=1"),
+            Response::bytes("text/plain", "ok"),
+        ]);
+        let response = client(&server, Some("MoodleSession=a"), 5)
+            .get_bytes("/pluginfile.php/start", 16)
+            .unwrap();
+        assert_eq!(response.bytes, b"ok");
+        assert_eq!(response.url.path(), "/pluginfile.php/final");
+        let seen = seen(&server);
+        assert!(seen.iter().all(|r| r.contains("cookie: moodlesession=a")));
+        assert!(seen[1].starts_with("get /pluginfile.php/final?forcedownload=1 "));
+    }
+
+    #[test]
+    fn server_provided_invalid_links_fail_as_shape_before_transport() {
+        let server = serve(Vec::new());
+        for target in [
+            "/mod/resource/view.php?id=7&action=delete".to_owned(),
+            "https://foreign.invalid/mod/resource/view.php?id=7".into(),
+            server.url().replace("http://", "http://user@") + "/pluginfile.php/1/file",
+        ] {
+            let error = client(&server, None, 5).get(&target).err().unwrap();
+            assert_eq!(error.code, "UPSTREAM_SHAPE_CHANGED");
+        }
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn redirect_to_the_enrolment_page_is_permission_denied_without_following() {
+        let server = serve(vec![redirect("/enrol/index.php?id=7")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
+            .get("/course/view.php?id=7")
+            .err()
+            .unwrap();
+        assert_eq!((error.code, error.exit_code()), ("PERMISSION_DENIED", 13));
+        assert!(!error.retryable);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn redirect_to_the_login_page_is_still_auth_required() {
+        let server = serve(vec![redirect("/login/index.php")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
+            .get("/course/view.php?id=7")
+            .err()
+            .unwrap();
+        assert_eq!((error.code, error.exit_code()), ("AUTH_REQUIRED", 10));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn refuses_cross_origin_redirects_before_sending_the_cookie() {
+        let server = serve(vec![redirect("http://127.0.0.2:1/steal")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
+            .get_bytes("/pluginfile.php/start", 16)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "UPSTREAM_SHAPE_CHANGED");
+        assert!(error.message.contains("cross-origin redirect refused"));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn the_timeout_bounds_the_whole_redirect_chain_not_each_hop() {
+        // Each hop answers well inside the 1s timeout; together they exceed it.
+        let server = Server::new(|_| {
+            thread::sleep(Duration::from_millis(450));
+            redirect("/pluginfile.php/again")
         });
-        let client = KlmsClient::new(&format!("http://{address}"), None, 5).unwrap();
-        let response = client.get_conditional("/file", None, None, 8).unwrap();
-        assert_eq!(response.bytes.as_deref(), Some(&b"new"[..]));
-        server.join().unwrap();
+        let started = Instant::now();
+        let error = client(&server, None, 1)
+            .get_bytes("/pluginfile.php/slow", 16)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        // Per-hop timeouts would follow every hop until the redirect cap (~4.5s).
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn head_stops_after_the_cap_on_endless_redirects() {
+        let server = serve((0..6).map(|_| redirect("/pluginfile.php/again")).collect());
+        let error = client(&server, None, 5)
+            .head("/pluginfile.php/loop")
+            .unwrap_err();
+        assert!(error.message.contains("too many redirects"));
+        assert_eq!(server.requests().len(), 6);
+    }
+
+    fn mp4() -> Vec<u8> {
+        b"\0\0\0\x18ftypisom\0\0\0\0isommp42payload".to_vec()
+    }
+
+    #[test]
+    fn native_video_streams_mp4_with_its_own_budget_and_cookie() {
+        let body = mp4();
+        let server = serve(vec![
+            redirect("/vod1/final.mp4"),
+            Response::bytes("video/mp4", body.clone()),
+        ]);
+        let mut output = Vec::new();
+        let result = client(&server, Some("MoodleSession=fixture"), 1)
+            .download_video_to("/vod1/start.mp4", Limits::new(1024, 5, 30), &mut output)
+            .unwrap();
+        assert_eq!(output, body);
+        assert_eq!(result.bytes, body.len());
+        assert_eq!(result.url.path(), "/vod1/final.mp4");
+        assert!(
+            seen(&server)
+                .iter()
+                .all(|r| r.contains("cookie: moodlesession=fixture"))
+        );
+    }
+
+    #[test]
+    fn native_video_rejects_html_and_invalid_mp4_before_writing() {
+        let server = serve(vec![
+            Response::html("<!doctype html><html>permission denied</html>"),
+            Response::bytes("video/mp4", "<!doctype html><html>login</html>"),
+            Response::bytes("text/html", mp4()),
+        ]);
+        let client = client(&server, None, 5);
+        for _ in 0..3 {
+            let mut output = Vec::new();
+            let error = client
+                .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut output)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "UPSTREAM_ERROR");
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn native_video_rejects_unrelated_paths_and_origins_without_requests() {
+        let server = serve(Vec::new());
+        let client = client(&server, Some("MoodleSession=fixture"), 5);
+        for path in [
+            "/pluginfile.php/7",
+            "/vod1/file.m3u8",
+            "http://127.0.0.2:1/vod1/file.mp4",
+        ] {
+            assert!(
+                client
+                    .download_video_to(path, Limits::new(1024, 5, 30), &mut Vec::new())
+                    .is_err()
+            );
+        }
+        assert!(server.requests().is_empty());
+        let server = serve(vec![redirect("http://127.0.0.2:1/vod1/file.mp4")]);
+        let error = super::KlmsClient::new(&server.url(), Some("MoodleSession=fixture"), 5)
+            .unwrap()
+            .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut Vec::new())
+            .err()
+            .unwrap();
+        assert!(error.message.contains("cross-origin"));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn native_video_caps_declared_and_streamed_bytes_and_rejects_partial_ranges() {
+        // One server per case: a refused open-ended body keeps its
+        // connection until the request deadline.
+        let body = mp4();
+        let cases = [
+            (
+                Response::bytes("video/mp4", body.clone()),
+                16,
+                "LIMIT_EXCEEDED",
+            ),
+            (Response::open_ended(body.clone()), 16, "LIMIT_EXCEEDED"),
+            (
+                Response::bytes("video/mp4", body)
+                    .status("206 Partial Content")
+                    .header("Content-Range", "bytes 0-30/100"),
+                1024,
+                "UPSTREAM_ERROR",
+            ),
+        ];
+        for (response, max, code) in cases {
+            let server = serve(vec![response]);
+            let mut output = Vec::new();
+            let error = client(&server, None, 5)
+                .download_video_to("/vod1/file.mp4", Limits::new(max, 5, 30), &mut output)
+                .err()
+                .unwrap();
+            assert_eq!(error.code, code);
+            if code == "LIMIT_EXCEEDED" {
+                assert!(output.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn native_video_deadline_and_stall_timeout_interrupt_a_silent_stream() {
+        // The fixture holds the connection open for 5s after the first bytes,
+        // so finishing well before that proves the client gave up on its own.
+        for (limits, message) in [
+            (Limits::new(1024, 1, 30), "time limit"),
+            (Limits::new(1024, 30, 1), "stalled: no data for 1 seconds"),
+        ] {
+            let server = serve(vec![Response::open_ended(mp4())]);
+            let started = Instant::now();
+            let error = client(&server, None, 5)
+                .download_video_to("/vod1/file.mp4", limits, &mut Vec::new())
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "NETWORK_ERROR");
+            assert!(error.message.contains(message), "{}", error.message);
+            assert!(started.elapsed() < Duration::from_secs(4));
+        }
+    }
+
+    #[test]
+    fn native_video_stall_timeout_bounds_response_headers() {
+        let server = Server::new(|_| {
+            thread::sleep(Duration::from_secs(2));
+            Response::bytes("video/mp4", mp4())
+        });
+        let limits = Limits {
+            stall: Duration::from_millis(100),
+            ..Limits::new(1024, 5, 5)
+        };
+        let started = Instant::now();
+        let mut output = Vec::new();
+        let error = client(&server, None, 5)
+            .download_video_to("/vod1/file.mp4", limits, &mut output)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn native_video_rejects_a_premature_eof() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(stream.read(&mut [0_u8; 4096]).unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\nContent-Type: video/mp4\r\nConnection: close\r\n\r\n").unwrap();
+            stream.write_all(&mp4()).unwrap();
+        });
+        let error = KlmsClient::new(&base, None, 5)
+            .unwrap()
+            .download_video_to("/vod1/file.mp4", Limits::new(1024, 5, 30), &mut Vec::new())
+            .err()
+            .unwrap();
+        handle.join().unwrap();
+        assert_eq!(error.code, "NETWORK_ERROR");
     }
 }

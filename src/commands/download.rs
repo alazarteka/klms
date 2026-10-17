@@ -1,16 +1,14 @@
-use std::{
-    fs::{File, OpenOptions},
-    path::{Path, PathBuf},
-};
-
+use super::resources::module_path;
 use crate::{
-    client::KlmsClient,
+    client::{DownloadResponse, KlmsClient},
     error::AppError,
     models::DownloadResult,
     output::{self, CommandResult},
+    private_fs::{self, PublishError, out_parent, temporary_name},
     safe_url,
+    url::Url,
 };
-
+use std::path::Path;
 const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
 
 pub(super) fn download(
@@ -18,134 +16,97 @@ pub(super) fn download(
     source: &str,
     out: &Path,
 ) -> Result<CommandResult, AppError> {
-    if out.exists() {
+    let base = Url::parse("https://klms.invalid/").expect("fixed URL");
+    let url = base.join(source).ok();
+    let source = if let Some(url) = url.filter(crate::client::policy::pluginfile) {
+        crate::client::policy::read_url(&url).map_err(|error| AppError::usage(error.message))?;
+        source.to_owned()
+    } else {
+        module_path(source, &["resource", "coursefile"])?
+    };
+    client.validate_operand(&source)?;
+    validate_out(out, false)?;
+    publish("files.download", out, |file| {
+        client.download_to(&source, MAX_DOWNLOAD_BYTES, file)
+    })
+}
+
+pub(super) fn validate_out(out: &Path, video: bool) -> Result<(), AppError> {
+    let parent = out_parent(out);
+    let (occupied, parent_exists) = match video {
+        true => (out.symlink_metadata().is_ok(), parent.is_dir()),
+        false => (out.exists(), parent.exists()),
+    };
+    if occupied {
         return Err(AppError::config(format!(
             "destination already exists: {}",
             out.display()
         )));
     }
-    let parent = out
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if !parent.exists() {
+    if !parent_exists {
         return Err(AppError::config(format!(
             "destination directory does not exist: {}",
             parent.display()
         )));
     }
-    let (temp, mut file) = create_temp(parent)?;
-    let response = match client.download_to(source, MAX_DOWNLOAD_BYTES, &mut file) {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = std::fs::remove_file(&temp);
-            return Err(error);
-        }
-    };
-    if let Err(error) = file.sync_all() {
-        let _ = std::fs::remove_file(&temp);
-        return Err(AppError::config(format!(
-            "failed to write download: {error}"
-        )));
+    Ok(())
+}
+
+pub(super) fn publish(
+    command: &'static str,
+    out: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> Result<DownloadResponse, AppError>,
+) -> Result<CommandResult, AppError> {
+    let video = command == "videos.download";
+    let temp = out_parent(out).join(temporary_name("part"));
+    let (response, linked) = private_fs::publish_download(&temp, out, fill).map_err(|error| {
+        let (context, error) = match error {
+            PublishError::Fill(error) => return error,
+            PublishError::Create(error) => ("cannot create temporary download", error),
+            PublishError::Sync(error) => ("failed to write download", error),
+            PublishError::Link(error) => ("failed to finalize download", error),
+        };
+        let context = if video {
+            "could not publish video"
+        } else {
+            context
+        };
+        AppError::config(format!("{context}: {error}"))
+    })?;
+    if linked.existed {
+        return Err(AppError::config(if video {
+            "destination already exists".into()
+        } else {
+            format!("destination already exists: {}", out.display())
+        }));
     }
-    drop(file);
-    let cleanup_warning = publish_new(&temp, out)?;
-    let final_path = out.canonicalize().unwrap_or_else(|_| out.to_path_buf());
+    let path = out.canonicalize().unwrap_or_else(|_| out.to_path_buf());
     let model = DownloadResult {
-        path: final_path.display().to_string(),
+        path: path.display().to_string(),
         bytes: response.bytes,
         source_url: safe_url::display(&response.url),
         content_type: response.content_type,
     };
-    let mut result = output::result(
-        "files.download",
-        &model,
-        format!("Downloaded {} bytes to {}", model.bytes, model.path),
-    )?;
-    if let Some(warning) = cleanup_warning {
-        result.warnings.push(warning);
+    let human = format!("Downloaded {} bytes to {}", model.bytes, model.path);
+    let mut result = output::result(command, &model, human)?;
+    let cleanup = linked.leftover.map(|error| {
+        if video {
+            "download published; temporary link cleanup failed".into()
+        } else {
+            format!(
+                "download completed, but temporary link cleanup failed for {}: {error}",
+                linked.temporary.display()
+            )
+        }
+    });
+    let copied = linked
+        .copied
+        .then(|| "download published by non-atomic copy because hard linking failed".to_owned());
+    result
+        .warnings
+        .extend([cleanup, copied].into_iter().flatten());
+    if video {
+        result.warnings.reverse();
     }
     Ok(result)
-}
-
-fn create_temp(parent: &Path) -> Result<(PathBuf, File), AppError> {
-    for attempt in 0..100 {
-        let path = parent.join(format!(
-            ".klms-download-{}-{attempt}.part",
-            std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(AppError::config(format!(
-                    "cannot create temporary download: {error}"
-                )));
-            }
-        }
-    }
-    Err(AppError::config(
-        "cannot create a unique temporary download file",
-    ))
-}
-
-fn publish_new(temp: &Path, out: &Path) -> Result<Option<String>, AppError> {
-    std::fs::hard_link(temp, out).map_err(|error| {
-        let _ = std::fs::remove_file(temp);
-        if out.exists() {
-            AppError::config(format!("destination already exists: {}", out.display()))
-        } else {
-            AppError::config(format!("failed to finalize download: {error}"))
-        }
-    })?;
-    Ok(std::fs::remove_file(temp).err().map(|error| {
-        format!(
-            "download completed, but temporary link cleanup failed for {}: {error}",
-            temp.display()
-        )
-    }))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tempfile::TempDir;
-
-    use super::{create_temp, publish_new};
-
-    #[test]
-    fn publish_new_never_replaces_an_existing_destination() {
-        let directory = TempDir::new().unwrap();
-        let temp = directory.path().join("download.part");
-        let out = directory.path().join("notes.pdf");
-        fs::write(&temp, b"new bytes").unwrap();
-        fs::write(&out, b"existing bytes").unwrap();
-
-        let error = publish_new(&temp, &out).unwrap_err();
-
-        assert_eq!(error.code, "CONFIG_ERROR");
-        assert_eq!(fs::read(&out).unwrap(), b"existing bytes");
-        assert!(!temp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn temporary_download_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = TempDir::new().unwrap();
-        let (path, _) = create_temp(directory.path()).unwrap();
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
 }
