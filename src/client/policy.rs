@@ -131,6 +131,11 @@ pub(super) fn redirect(initial: &Url, next: &Url) -> Result<(), AppError> {
             "the saved KLMS session is missing or expired",
         ));
     }
+    // Moodle sends a course or activity the account cannot open to the
+    // course's enrolment page; that is an access answer, not a markup change.
+    if next.path() == "/enrol/index.php" {
+        return Err(AppError::http(403, initial.path()));
+    }
     read_url(next)?;
     let same_id = |key| match (query_value(initial, key), query_value(next, key)) {
         (Some(a), Some(b)) => {

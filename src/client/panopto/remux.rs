@@ -14,6 +14,8 @@ fn ffmpeg_error(e: &std::io::Error) -> AppError {
         AppError::config("could not start local ffmpeg")
     }
 }
+const FFMPEG_PROBE_LIMIT: Duration = Duration::from_secs(10);
+
 /// Fails before any media is fetched when the remux step could not run.
 pub(super) fn require_ffmpeg(ffmpeg: &std::ffi::OsStr, limits: Limits) -> Result<(), AppError> {
     let mut child = ChildGuard(
@@ -24,11 +26,19 @@ pub(super) fn require_ffmpeg(ffmpeg: &std::ffi::OsStr, limits: Limits) -> Result
             .spawn()
             .map_err(|e| ffmpeg_error(&e))?,
     );
-    let deadline = limits.deadline.min(Instant::now() + Duration::from_secs(2));
+    // Generous enough for a cold start on a loaded machine; a hang here is a
+    // local install problem, so it is not reported as a retryable network error.
+    let deadline = limits.deadline.min(Instant::now() + FFMPEG_PROBE_LIMIT);
     loop {
         limits.remaining()?;
         if Instant::now() >= deadline {
-            return Err(AppError::network("ffmpeg -version exceeded its time limit"));
+            return Err(AppError::config(format!(
+                "ffmpeg -version did not finish within {} seconds",
+                FFMPEG_PROBE_LIMIT.as_secs()
+            ))
+            .with_hint(
+                "Check that `ffmpeg -version` runs promptly on this machine, or reinstall ffmpeg.",
+            ));
         }
         if let Some(status) = child
             .0
