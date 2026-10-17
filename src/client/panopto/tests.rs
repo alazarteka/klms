@@ -411,24 +411,45 @@ fn ffmpeg_version_has_a_short_deadline_and_is_reaped() {
         dir.path(),
         &format!("echo $$ > '{}'\nexec sleep 30", pid.display()),
     );
-    for limits in [
-        Limits {
-            deadline: Instant::now() + Duration::from_millis(100),
-            ..limits(10)
-        },
-        limits(10),
-    ] {
-        let start = Instant::now();
-        let error = require_ffmpeg(exe.as_os_str(), limits).unwrap_err();
-        assert_eq!(error.code, "NETWORK_ERROR");
-        assert!(start.elapsed() < Duration::from_secs(3));
-        #[cfg(target_os = "linux")]
-        assert!(
-            !Path::new("/proc")
-                .join(std::fs::read_to_string(&pid).unwrap().trim())
-                .exists()
-        );
-    }
+    let limits = Limits {
+        deadline: Instant::now() + Duration::from_millis(100),
+        ..limits(10)
+    };
+    let start = Instant::now();
+    let error = require_ffmpeg(exe.as_os_str(), limits).unwrap_err();
+    // The caller's --max-seconds budget ran out, as for any transfer.
+    assert_eq!(error.code, "NETWORK_ERROR");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    #[cfg(target_os = "linux")]
+    assert!(
+        !Path::new("/proc")
+            .join(std::fs::read_to_string(&pid).unwrap().trim())
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ffmpeg_version_probe_timeout_is_a_local_non_retryable_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = dir.path().join("pid");
+    let exe = fake_ffmpeg(
+        dir.path(),
+        &format!("echo $$ > '{}'\nexec sleep 60", pid.display()),
+    );
+    let start = Instant::now();
+    let error = require_ffmpeg(exe.as_os_str(), limits(120)).unwrap_err();
+    assert_eq!((error.code, error.exit_code()), ("CONFIG_ERROR", 40));
+    assert!(!error.retryable);
+    assert!(error.hint.as_deref().is_some_and(|h| h.contains("ffmpeg")));
+    // Bounded well below the caller's own --max-seconds budget.
+    assert!(start.elapsed() < Duration::from_secs(15));
+    #[cfg(target_os = "linux")]
+    assert!(
+        !Path::new("/proc")
+            .join(std::fs::read_to_string(&pid).unwrap().trim())
+            .exists()
+    );
 }
 
 #[cfg(unix)]

@@ -799,6 +799,29 @@ mod tests {
     }
 
     #[test]
+    fn redirect_to_the_enrolment_page_is_permission_denied_without_following() {
+        let server = serve(vec![redirect("/enrol/index.php?id=7")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
+            .get("/course/view.php?id=7")
+            .err()
+            .unwrap();
+        assert_eq!((error.code, error.exit_code()), ("PERMISSION_DENIED", 13));
+        assert!(!error.retryable);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn redirect_to_the_login_page_is_still_auth_required() {
+        let server = serve(vec![redirect("/login/index.php")]);
+        let error = client(&server, Some("MoodleSession=a"), 5)
+            .get("/course/view.php?id=7")
+            .err()
+            .unwrap();
+        assert_eq!((error.code, error.exit_code()), ("AUTH_REQUIRED", 10));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
     fn refuses_cross_origin_redirects_before_sending_the_cookie() {
         let server = serve(vec![redirect("http://127.0.0.2:1/steal")]);
         let error = client(&server, Some("MoodleSession=a"), 5)
