@@ -54,8 +54,10 @@ must match it. Exit 0 covers a partial sync too: read `data.status`,
 `failures`, `truncated` and `warnings`. Retryable codes are NETWORK_ERROR (20)
 and CORPUS_BUSY (52).
 
-Exit 10 carries three error codes: AUTH_REQUIRED (no session, or KAIST rejected
-the sign-in), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
+Exit 10 carries four error codes: AUTH_REQUIRED (no session, or KAIST refused
+the sign-in for another reason such as a lockout), CREDENTIALS_REJECTED (KAIST
+rejected the ID or password; a stored password is removed so later
+non-interactive logins cannot trigger KAIST's lockout), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
 `auth login --code`; with `--code` the pending login is consumed) and
 CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or it
 expired; run `auth login` again). Branch on `error.code`, not the exit status.

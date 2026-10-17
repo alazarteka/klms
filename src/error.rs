@@ -31,6 +31,7 @@ impl AppError {
         auth_required "AUTH_REQUIRED" 10 Some(AUTH_RECOVERY_HINT);
         code_expired "CODE_EXPIRED" 10 Some("Run `klms auth login` to request a new verification code.");
         code_incorrect "CODE_INCORRECT" 10 Some("Run `klms auth login` and enter the newest six-digit code.");
+        credentials_rejected "CREDENTIALS_REJECTED" 10 Some("Check the credentials and retry `klms auth login --method password`.");
         auth_protocol "AUTH_PROTOCOL_CHANGED" 11 Some("KAIST SSO may have changed; update klms and retry.");
         network "NETWORK_ERROR" 20 None;
         shape "UPSTREAM_SHAPE_CHANGED" 30 Some("KLMS may have changed its markup; rerun with the latest klms release.");
