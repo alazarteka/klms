@@ -72,6 +72,7 @@ fn redirect(location: &str) -> Response {
 fn sso_route(
     klms: String,
     otp: Arc<Mutex<&'static str>>,
+    password_result: Arc<Mutex<Option<&'static str>>>,
     device: bool,
 ) -> impl Fn(&Request) -> Response + Send + Sync {
     move |request| {
@@ -83,7 +84,11 @@ fn sso_route(
             }
             (_, "/auth/user/login/init") => json("result_data", &"00".repeat(48)),
             (_, "/auth/user/login/auth") => {
-                json("result_code", if device { "SS0099" } else { "SS0098" })
+                let accepted = if device { "SS0099" } else { "SS0098" };
+                json(
+                    "result_code",
+                    password_result.lock().unwrap().unwrap_or(accepted),
+                )
             }
             (_, SEND_MAIL) => json("errorCode", "SS0001"),
             (_, VALIDATE) => json("result_code", *otp.lock().unwrap()),
@@ -140,6 +145,8 @@ struct Fixture {
     sso: Site,
     klms: Site,
     otp: Arc<Mutex<&'static str>>,
+    /// KAIST's answer to the password step; `None` accepts it.
+    password_result: Arc<Mutex<Option<&'static str>>>,
     dirs: Dirs,
     secrets: Secrets,
     asked: Rc<RefCell<Vec<&'static str>>>,
@@ -186,12 +193,19 @@ impl Fixture {
             file: dirs.credentials(),
         };
         let otp = Arc::new(Mutex::new("SS0001"));
+        let password_result = Arc::new(Mutex::new(None));
         let klms = Site::start(klms_route);
-        let sso = Site::start(sso_route(klms.url.to_string(), otp.clone(), device));
+        let sso = Site::start(sso_route(
+            klms.url.to_string(),
+            otp.clone(),
+            password_result.clone(),
+            device,
+        ));
         Self {
             sso,
             klms,
             otp,
+            password_result,
             dirs,
             secrets,
             asked: Rc::default(),
@@ -293,6 +307,47 @@ fn remember_password_stores_identity_and_secret_after_success() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn a_stored_password_kaist_rejects_is_removed_so_it_is_not_retried() {
+    let fx = Fixture::new();
+    fx.seed_remembered_password();
+    *fx.password_result.lock().unwrap() = Some("EAU001");
+    let error = failure(fx.login(false, true, &LoginOptions::default()));
+    assert_eq!(error.code, "CREDENTIALS_REJECTED");
+    assert!(error.hint.unwrap().contains("--remember-password"));
+    assert_eq!(fx.password("student"), None);
+    let identity = fx.identity().unwrap();
+    assert_eq!(identity.username, "student");
+    assert_eq!(identity.password_backend, None);
+
+    let attempts = fx.sso.count("/auth/user/login/auth");
+    let again = failure(fx.login(false, true, &LoginOptions::default()));
+    assert_eq!(again.code, "AUTH_REQUIRED");
+    assert_eq!(fx.sso.count("/auth/user/login/auth"), attempts);
+}
+
+#[test]
+fn a_lockout_or_a_rejected_typed_password_keeps_what_is_stored() {
+    let fx = Fixture::new();
+    fx.seed_remembered_password();
+    *fx.password_result.lock().unwrap() = Some("EAU005");
+    let locked = failure(fx.login(false, true, &LoginOptions::default()));
+    assert_eq!(locked.code, "AUTH_REQUIRED");
+    assert_eq!(fx.password("student").as_deref(), Some("s3cret"));
+
+    let typed = LoginOptions {
+        user: Some("other".into()),
+        ..LoginOptions::default()
+    };
+    *fx.password_result.lock().unwrap() = Some("EAU001");
+    let rejected = failure(fx.login(true, false, &typed));
+    assert_eq!(rejected.code, "CREDENTIALS_REJECTED");
+    assert_eq!(fx.asked(), ["password"]);
+    assert_eq!(fx.password("student").as_deref(), Some("s3cret"));
+    let identity = fx.identity().unwrap();
+    assert_eq!(identity.password_backend.as_deref(), Some("plaintext-file"));
 }
 
 #[test]
