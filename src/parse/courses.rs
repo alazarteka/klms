@@ -535,6 +535,70 @@ mod tests {
     }
 
     #[test]
+    fn course_completeness_ignores_off_origin_links_and_extra_params_on_parsed_activities() {
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3>
+          <div class="summary"><a href="https://other-moodle.example/mod/page/view.php?id=99">Elsewhere</a>
+          <a href="/mod/quiz/view.php?id=7&amp;forceview=1#top">Take the quiz</a></div><ul>
+          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
+          </ul></li>"#;
+        let rows = activities(html, &base(), None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn course_completeness_still_fails_for_unknown_same_origin_module_ids() {
+        let html = r#"<body id="page-course-view-topics" class="course-42"><main class="course-content"><li class="section"><h3>Week 3</h3>
+          <div class="summary"><a href="/mod/page/view.php?id=99&amp;forceview=1">Unparsed</a></div><ul>
+          <li class="activity modtype_quiz" id="module-7"><a class="aalink" href="/mod/quiz/view.php?id=7"><span class="instancename">Quiz</span></a></li>
+          </ul></li>"#;
+        assert_eq!(
+            activities(html, &base(), None).unwrap_err().code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
+    }
+
+    #[test]
+    fn board_icon_link_before_titled_link_still_yields_the_post() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'><img alt=''></a></td>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        let rows = board_posts(html, &base(), Some("8".into())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].id.as_deref(), rows[0].title.as_str()),
+            (Some("9"), "Notice")
+        );
+    }
+
+    #[test]
+    fn board_completeness_accepts_other_links_to_parsed_posts() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a>\
+          <a href='/mod/courseboard/article.php?id=8&bwid=9&page=2'>Notice (page 2)</a>\
+          <a href='/mod/courseboard/comment.php?id=8&bwid=9'>3 comments</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        let rows = board_posts(html, &base(), Some("8".into())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn board_completeness_still_fails_for_unknown_post_ids() {
+        let html = "<table class='generaltable'><tr>\
+          <td><a href='/mod/courseboard/article.php?id=8&bwid=9'>Notice</a>\
+          <a href='/mod/courseboard/comment.php?id=8&bwid=10'>3 comments</a></td>\
+          <td>2026-08-29</td></tr></table>";
+        assert_eq!(
+            board_posts(html, &base(), Some("8".into()))
+                .unwrap_err()
+                .code,
+            "UPSTREAM_SHAPE_CHANGED"
+        );
+    }
+
+    #[test]
     fn recognizes_the_all_weeks_choice_for_this_course_only() {
         let picker = r#"<div class="week-slider"><a href="javascript:M.course.format.dayselect(0,42,0)">All</a>
           <a href="javascript:M.course.format.dayselect(6,42,0)">week 6</a></div>"#;
