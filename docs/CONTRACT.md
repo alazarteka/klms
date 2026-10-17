@@ -52,21 +52,28 @@ The exit code is the `exit_code` of the `AppError` that carries the error
 code (`src/error.rs`); `klms --help` lists the same table, and `src/cli.rs`
 must match it. Exit 0 covers a partial sync too: read `data.status`,
 `failures`, `truncated` and `warnings`. Retryable codes are NETWORK_ERROR (20)
-and CORPUS_BUSY (52).
+and CORPUS_BUSY (52). PERMISSION_DENIED (13) covers HTTP 403 and a KLMS
+redirect to the course enrolment page (`/enrol/index.php`), which Moodle sends
+for a course or activity the account can no longer open; the redirect is not
+followed, and sync treats it as lost access.
 
 Exit 10 carries four error codes: AUTH_REQUIRED (no session, or KAIST refused
 the sign-in for another reason such as a lockout), CREDENTIALS_REJECTED (KAIST
 rejected the ID or password; a stored password is removed so later
-non-interactive logins cannot trigger KAIST's lockout), CODE_INCORRECT (a wrong code, from an interactive `auth login` or
-`auth login --code`; with `--code` the pending login is consumed) and
+non-interactive logins cannot trigger KAIST's lockout), CODE_INCORRECT (a wrong
+code, from an interactive `auth login` or `auth login --code`; with `--code` the
+pending login is consumed) and
 CODE_EXPIRED (the code expired, or for `--code` no pending login is waiting or it
 expired; run `auth login` again). Branch on `error.code`, not the exit status.
 A NETWORK_ERROR during `auth login --code` keeps the pending login, so the same
 code can be retried. `auth forget` purges every account in klms's dedicated
 keyring service namespace across available backends, independently of login.json.
 It removes the plaintext credentials file and pending login, but keeps login.json
-until its named password backend confirms a purge. Retry after restoring or
-unlocking that backend. Unreadable identity metadata or unconfirmed deletions
+until its named password backend confirms a purge; retry after unlocking or
+reconnecting that backend. A backend that can never be opened on this machine
+(an unknown name, or its helper program is absent) does not keep login.json:
+forget removes it and warns that passwords may remain there, with how to remove
+them. Unreadable identity metadata or unconfirmed deletions
 produce warnings; nothing to purge produces no cleanup warning, even without
 keyring helpers.
 `password_removed` is true only if a password was removed and password cleanup
@@ -104,14 +111,19 @@ redirect to another allowed same-origin read endpoint. Refused server links or
 redirects are `UPSTREAM_SHAPE_CHANGED`; invalid typed operands are `USAGE`. A valid `request get` whose response is not
 HTML or JSON returns `CONTENT_UNAVAILABLE`.
 
-Collection parsers require a known region. Unrepresented module-view links in
-course content or courseboard links with `bwid` in board regions are shape errors;
-localized empty rows are valid. Calendar identity comes only from header/footer
+Collection parsers require a known region. Same-origin module-view links in
+course content whose `id` matches no parsed activity, and courseboard links in
+board regions whose `bwid` matches no parsed post, are shape errors; off-origin
+links and extra query parameters are ignored, and localized empty rows are valid. Calendar identity comes only from header/footer
 actions; recognizable events without usable identities are skipped with a warning
 and `complete:false`. Description cross-links do not identify events.
 Detail pages require Moodle body attributes identifying their kind and ID.
-Sync requests resource pages with `forceview=1`; pluginfile redirects are file
-representations, while inline folders are isolated by module ID on the course page.
+Sync requests resource pages with `forceview=1`. When a resource redirects to
+pluginfile, sync records the final URL as a file representation without reading
+its body, so file size never fails the observation; `--files` validates it and
+`--download` fetches it. Only pluginfile URLs are file representations; other
+links, including `/mod/resource/` pages, are links. Inline folders are isolated
+by module ID on the course page.
 
 ## Library invariants
 
@@ -223,7 +235,8 @@ receive neither KLMS nor Panopto credentials. Temporary signed media URLs are
 never returned in JSON; Panopto `source_url` is the KLMS launch locator. HLS,
 multi-track and offset recordings are retrieved under bounded transport
 policies and remuxed locally with ffmpeg, whose presence is checked before any
-media is fetched under a two-second check deadline; ffmpeg receives only local
+media is fetched under a ten-second check deadline (a hang or failure is
+CONFIG_ERROR, not retryable); ffmpeg receives only local
 paths. Remux errors include at most 4 KiB of stderr, and failed downloads kill
 and reap ffmpeg. No player scripts or playback/progress telemetry run.
 Multiple native Panopto streams are preserved as separate video/audio tracks

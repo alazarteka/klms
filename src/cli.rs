@@ -470,7 +470,7 @@ pub enum AuthCommand {
     Logout,
     /// Delete the remembered login and any stored password.
     #[command(
-        long_about = "Purge every klms password entry from available backends (macOS keychain, Linux Secret Service, and plaintext credentials file), even without login.json. Discard the pending verification code. Keep login.json until its named password backend confirms a purge; if that backend is unavailable or locked, warn that passwords may remain and retry after restoring access. Unreadable identity metadata and cleanup failures also produce warnings. Safe to repeat; nothing to purge produces no cleanup warning. The saved KLMS session stays; `klms auth logout` removes it.",
+        long_about = "Purge every klms password entry from available backends (macOS keychain, Linux Secret Service, and plaintext credentials file), even without login.json. Discard the pending verification code. Keep login.json until its named password backend confirms a purge; if that backend fails or is locked, warn that passwords may remain and retry after restoring access. If it can never be opened here (unknown, or its helper is not installed), remove login.json anyway and warn how to remove any remaining passwords. Unreadable identity metadata and cleanup failures also produce warnings. Safe to repeat; nothing to purge produces no cleanup warning. The saved KLMS session stays; `klms auth logout` removes it.",
         after_help = "Example:\n  klms auth forget"
     )]
     Forget,
@@ -662,7 +662,7 @@ pub enum VideosCommand {
     },
     /// Download MP4 or locally remux HLS to a new private file; never overwrites.
     #[command(
-        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-download-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. The next download removes generated temporaries older than 48 hours, restricted to the same owner on Unix. An interrupted download may leave ffmpeg running until it finishes or fails. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched. Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
+        after_help = "--out is an exact new path; its parent must exist. Remux scratch space (a private .klms-download-<pid>-<nonce>.scratch directory) and the temporary .part file live beside --out; direct MP4 needs no scratch directory. The next download removes generated temporaries older than 48 hours, restricted to the same owner on Unix. An interrupted download may leave ffmpeg running until it finishes or fails. Hard-link failures may use a non-atomic copy, reported with a warning. HLS, multi-track and offset recordings require ffmpeg, checked before any media is fetched (a missing, failing or hung `ffmpeg -version` is CONFIG_ERROR). Like `videos show`, this opens the activity in KLMS/Panopto, which Moodle logs as an activity view. No playback/progress endpoints are called. Cookies and temporary media URLs are never printed or passed to ffmpeg."
     )]
     Download {
         /// Recording reference printed by videos list; collections cannot be downloaded.
