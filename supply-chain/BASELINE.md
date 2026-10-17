@@ -172,3 +172,21 @@ notes, but it was not independently resolved against the release repository
 here. The uv version (0.12.10) and Python version are unchanged, no Rust
 dependencies or cargo-vet exemptions change, and the action remains pinned to a
 full commit SHA. Reviewer: pending `@alazarteka` (prepared by Claude Code).
+
+## 2026-10-17 rustls security patch
+
+`cargo-deny` fails on `main` for RUSTSEC-2026-0346 (`Debug` impls for client
+session values expose TLS secrets), RUSTSEC-2026-0347 (buffered application
+data sent to the outer server after ECH rejection), RUSTSEC-2026-0348 (Brotli
+certificate decompression can allocate up to 1 GiB before authentication), and
+RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+connections to classical key exchange). All four are fixed in `rustls` >=
+0.23.46. `Cargo.lock` moves `rustls` 0.23.45 -> 0.23.46 and no other crate
+changes. `Cargo.toml` is untouched because `rustls` is a transitive dependency
+of `reqwest`.
+
+The baseline `rustls` exemption moves from 0.23.45 to 0.23.46, so the exemption
+count does not change. This is a baseline carry-over, not an audit: the
+0.23.45..0.23.46 source diff was not inspected. Reviewer: pending `@alazarteka`
+(prepared by Claude Code). Follow-up: the same as the 2026-10-01 entry, a delta
+certification or a full audit when the baseline ratchet reaches `rustls`.
