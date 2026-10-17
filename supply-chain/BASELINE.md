@@ -6,13 +6,16 @@ not correctness, memory safety, or independent cryptographic validation.
 
 The store retains 139 exact-version exemptions from the existing baseline and
 2 older clap/clap_builder exemptions that anchor the retained delta audits.
-The 26 audit records retain their original authors and scope. Exemptions are
+The 27 audit records retain their original authors and scope; the 27th is the
+2026-10-17 `clap_complete` 4.6.9 -> 4.6.11 delta audit, which replaces
+Dependabot's #22. Exemptions are
 trust debt, not audits. Do not advance or add one without recording the decision
 here; prefer a full or delta audit and remove unused exemptions.
 
 Run `scripts/supply-chain.sh deny` and `scripts/supply-chain.sh vet` before
 compiling a changed dependency graph. Both tools are pinned and checksum-verified.
-`make supply-chain` runs both; `make check` remains offline-capable.
+`make supply-chain` runs both, and `make check` runs them first, so it needs
+network access and a platform with pinned tool hashes.
 
 ## Pending owner review
 
