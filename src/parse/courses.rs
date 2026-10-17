@@ -137,13 +137,26 @@ pub fn activities(
     let document = Html::parse_document(html);
     page_identity(&document, "course", query_id(base_url, &["id"]).as_deref())?;
     let mut rows = activities_from_document(&document, base_url);
-    // Every module view link in course content must have become an activity.
-    let represented: HashSet<_> = rows.iter().filter_map(|row| row.url.as_deref()).collect();
+    // Every same-origin module view link in course content must name the module
+    // id of a parsed activity; extra query params or fragments do not matter.
+    let represented: HashSet<String> = rows
+        .iter()
+        .flat_map(|row| {
+            let linked = row
+                .url
+                .as_deref()
+                .and_then(|url| Url::parse(url).ok())
+                .filter(module_view)
+                .and_then(|url| query_id(&url, &["id"]));
+            row.id.clone().into_iter().chain(linked)
+        })
+        .collect();
     if !has_any(&document, &[".course-content"])
         || document
             .select(&sel(".course-content a[href]"))
             .filter_map(|a| href_url(a, base_url))
-            .any(|url| module_view(&url) && !represented.contains(safe_url::display(&url).as_str()))
+            .filter(|url| url.origin() == base_url.origin() && module_view(url))
+            .any(|url| query_id(&url, &["id"]).is_none_or(|id| !represented.contains(&id)))
     {
         return Err(AppError::shape(
             "course content is missing or has unrecognized activity links",
@@ -391,14 +404,15 @@ pub fn board_posts(
         if url.path() != "/mod/courseboard/article.php" {
             continue;
         }
-        let id = query_id(url, &["bwid"]);
-        if id.is_none() || query_id(url, &["id"]).is_none() {
+        let (Some(id), Some(_)) = (query_id(url, &["bwid"]), query_id(url, &["id"])) else {
             continue;
-        }
+        };
+        // Untitled (icon) links must not claim the post before its titled link.
         let title = text(*anchor);
-        if !seen.insert(id.clone().unwrap_or_else(|| url.to_string())) || title.is_empty() {
+        if title.is_empty() || !seen.insert(id.clone()) {
             continue;
         }
+        let id = Some(id);
         let posted = anchor
             .ancestors()
             .filter_map(ElementRef::wrap)
@@ -421,10 +435,11 @@ pub fn board_posts(
             url: safe_url::display(url),
         });
     }
+    // Any courseboard link (article, comment, paging) must name a parsed post's bwid.
     if !has_any(&document, &[regions])
         || links
             .iter()
-            .any(|(_, url)| !posts.iter().any(|post| post.url == safe_url::display(url)))
+            .any(|(_, url)| query_id(url, &["bwid"]).is_none_or(|bwid| !seen.contains(&bwid)))
     {
         return Err(AppError::shape(
             "board region is missing or has unrecognized post links",
