@@ -30,6 +30,8 @@ const PROBE_ACCOUNT: &str = "klms-availability-probe";
 const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest password (in bytes) any backend will remember.
 const MAX_SECRET: usize = 1024;
+const UNREACHABLE: &str =
+    "`secret-tool` cannot reach a Secret Service (no D-Bus session or unlocked keyring)";
 
 /// Chooses and reopens backends. Tests point it at fake helpers.
 pub struct Secrets {
@@ -78,7 +80,7 @@ impl Secrets {
             if service.lookup(PROBE_ACCOUNT).is_ok() {
                 return Ok(service);
             }
-            reason = "`secret-tool` cannot reach a Secret Service (no D-Bus session or unlocked keyring)";
+            reason = UNREACHABLE;
         }
         if allow_plaintext {
             return Ok(Backend::File(self.file.clone()));
@@ -105,7 +107,23 @@ impl Secrets {
             other => Err(AppError::config(format!(
                 "unknown password backend {other:?} in remembered login"
             ))
-            .with_hint("Check the password backend recorded in login.json.")),
+            .with_hint("Run `klms auth forget` to discard the remembered login, then sign in again.")),
+        }
+    }
+
+    /// How to remove a backend's passwords by hand when klms can never open it
+    /// on this machine (an unknown name, or its helper program is absent);
+    /// `None` when it can be opened, even if it fails for now.
+    pub(super) fn unopenable(&self, kind: &str) -> Option<&'static str> {
+        match kind {
+            KEYCHAIN if !self.security.is_file() => {
+                Some("delete the `klms` items in Keychain Access on the Mac that stored them")
+            }
+            SECRET_SERVICE if self.secret_tool().is_none() => Some(
+                "install `secret-tool` (libsecret) and rerun `klms auth forget`, or delete the `klms` items with a keyring manager",
+            ),
+            KEYCHAIN | SECRET_SERVICE | PLAINTEXT_FILE => None,
+            _ => Some("delete any `klms` entries from that password store by hand"),
         }
     }
 }
@@ -279,7 +297,14 @@ impl Backend {
                     "macOS keychain purge reached the limit of 256 deletions; passwords may remain",
                 ))
             }
-            Self::SecretService(program) => clear_secret_service(program, None),
+            // A service that cannot even answer a lookup was never reached.
+            Self::SecretService(program) => clear_secret_service(program, None).map_err(|error| {
+                if self.lookup(PROBE_ACCOUNT).is_err() {
+                    AppError::config(UNREACHABLE)
+                } else {
+                    error
+                }
+            }),
             Self::File(path) => remove_file(path, "credentials file"),
         }
     }

@@ -568,6 +568,8 @@ fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError
     if let Some(kind) = backend {
         password_backends.insert(kind, None);
     }
+    // Set when the recorded backend can never be opened here.
+    let mut abandoned = false;
     for (kind, removed) in &mut password_backends {
         if *kind == secret::PLAINTEXT_FILE {
             let before = warnings.len();
@@ -578,18 +580,30 @@ fn forget_with(dirs: &Dirs, secrets: &Secrets) -> Result<CommandResult, AppError
         }
         match secrets.open(kind).and_then(|target| target.clear_all()) {
             Ok(deleted) => *removed = Some(deleted),
-            Err(error) => warnings.push(format!(
-                "could not purge {kind} passwords: {}; passwords may remain there; retry `klms auth forget` when the backend is available",
-                error.message
-            )),
+            Err(error) => match secrets.unopenable(kind) {
+                Some(advice) => {
+                    abandoned |= backend == Some(*kind);
+                    warnings.push(format!(
+                        "cannot purge {kind} passwords on this machine: {}; passwords may remain there; {advice}",
+                        error.message
+                    ));
+                }
+                None => warnings.push(format!(
+                    "could not purge {kind} passwords: {}; passwords may remain there; retry `klms auth forget` when the backend is available",
+                    error.message
+                )),
+            },
         }
     }
     let password_complete = password_backends.values().all(Option::is_some);
     let password_removed =
         password_complete && password_backends.values().any(|v| *v == Some(true));
-    // Retain the backend pointer until that backend confirms its purge, so a
-    // later forget retries even when its helper is currently unavailable.
-    let login_removed = if backend.is_none_or(|kind| password_backends[kind].is_some()) {
+    // Retain the backend pointer while that backend fails for now, so a later
+    // forget retries it. One that can never be opened here would pin
+    // login.json forever, and any forget purges every reachable keyring
+    // without metadata anyway.
+    let login_removed = if abandoned || backend.is_none_or(|kind| password_backends[kind].is_some())
+    {
         store::remove_owned(&dirs.identity(), "remembered login", &mut warnings)
     } else {
         store::remove_temporaries(&dirs.identity(), "remembered login", &mut warnings);
