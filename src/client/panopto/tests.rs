@@ -438,8 +438,7 @@ fn ffmpeg_version_probe_timeout_is_a_local_non_retryable_error() {
         &format!("echo $$ > '{}'\nexec sleep 60", pid.display()),
     );
     let start = Instant::now();
-    let error =
-        probe_ffmpeg(exe.as_os_str(), limits(120), Duration::from_millis(200)).unwrap_err();
+    let error = probe_ffmpeg(exe.as_os_str(), limits(120), Duration::from_millis(200)).unwrap_err();
     assert_eq!((error.code, error.exit_code()), ("CONFIG_ERROR", 40));
     assert!(!error.retryable);
     assert!(error.hint.as_deref().is_some_and(|h| h.contains("ffmpeg")));
