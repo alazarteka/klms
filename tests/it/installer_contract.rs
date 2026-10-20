@@ -3,7 +3,7 @@
 
 use std::{fs, path::PathBuf, process::Command};
 
-#[path = "fixture/executable.rs"]
+#[path = "../fixture/executable.rs"]
 mod fixture_executable;
 
 use sha2::{Digest, Sha256};
@@ -51,8 +51,15 @@ impl InstallFixture {
         let archive = format!("{package}.tar.gz");
         fs::create_dir(root.path().join(&package)).unwrap();
         fs::copy(BINARY, root.path().join(&package).join("klms")).unwrap();
-        let tar = Command::new("tar")
-            .args(["-czf", &archive, &package])
+        // gzip -1: the debug binary is ~75 MiB and the default level took ~4 s.
+        let tar = Command::new("bash")
+            .args([
+                "-c",
+                r#"set -o pipefail; tar -cf - "$1" | gzip -1 > "$2""#,
+                "bash",
+                &package,
+                &archive,
+            ])
             .current_dir(root.path())
             .status()
             .unwrap();

@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-mod fixture;
+use crate::fixture;
 use fixture::server::{Response, Server};
 use fixture::{
     BYTES, Counter, Env, FILE_TEXT, NOTICE_LIST, article, course, lib_server, notice_manifest,

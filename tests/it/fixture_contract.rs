@@ -1,4 +1,4 @@
-mod fixture;
+use crate::fixture;
 
 use std::{
     io::{Read, Write},

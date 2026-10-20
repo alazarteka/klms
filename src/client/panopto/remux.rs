@@ -18,6 +18,14 @@ const FFMPEG_PROBE_LIMIT: Duration = Duration::from_secs(10);
 
 /// Fails before any media is fetched when the remux step could not run.
 pub(super) fn require_ffmpeg(ffmpeg: &std::ffi::OsStr, limits: Limits) -> Result<(), AppError> {
+    probe_ffmpeg(ffmpeg, limits, FFMPEG_PROBE_LIMIT)
+}
+
+pub(super) fn probe_ffmpeg(
+    ffmpeg: &std::ffi::OsStr,
+    limits: Limits,
+    probe_limit: Duration,
+) -> Result<(), AppError> {
     let mut child = ChildGuard(
         Command::new(ffmpeg)
             .arg("-version")
@@ -28,13 +36,13 @@ pub(super) fn require_ffmpeg(ffmpeg: &std::ffi::OsStr, limits: Limits) -> Result
     );
     // Generous enough for a cold start on a loaded machine; a hang here is a
     // local install problem, so it is not reported as a retryable network error.
-    let deadline = limits.deadline.min(Instant::now() + FFMPEG_PROBE_LIMIT);
+    let deadline = limits.deadline.min(Instant::now() + probe_limit);
     loop {
         limits.remaining()?;
         if Instant::now() >= deadline {
             return Err(AppError::config(format!(
                 "ffmpeg -version did not finish within {} seconds",
-                FFMPEG_PROBE_LIMIT.as_secs()
+                probe_limit.as_secs_f64()
             ))
             .with_hint(
                 "Check that `ffmpeg -version` runs promptly on this machine, or reinstall ffmpeg.",
