@@ -116,3 +116,15 @@ Login uses a short-lived transport limited to `sso.kaist.ac.kr` and
 `klms.kaist.ac.kr` (HTTP loopback exists only for tests). Moodle AJAX methods
 are an allowlist; there is no arbitrary POST. Nothing checks for updates or
 sends analytics at startup.
+
+These are the only hosts klms contacts, all over HTTPS:
+
+| Host | Used by | Credentials |
+|---|---|---|
+| `klms.kaist.ac.kr` | every course read, sync and download | KLMS session cookie |
+| `sso.kaist.ac.kr` | `auth login` only | SSO cookies, held for one login |
+| `kaist.ap.panopto.com` | `videos show` and `videos download`: LTI handoff and delivery metadata | Panopto cookies and the embed's access token, never KLMS cookies |
+| `s-cloudfront.cdn.ap.panopto.com` | `videos download` media | none |
+| `api.github.com`, `github.com` | `update` only | none |
+
+The Panopto origins are fixed in `src/client/panopto/mod.rs` (`Config::production`).

@@ -29,10 +29,6 @@ criteria = "safe-to-run"
 version = "3.0.11"
 criteria = "safe-to-run"
 
-[[exemptions.base64]]
-version = "0.23.1"
-criteria = "safe-to-run"
-
 [[exemptions.bitflags]]
 version = "2.13.1"
 criteria = "safe-to-run"
@@ -369,10 +365,6 @@ criteria = "safe-to-run"
 version = "1.15.1"
 criteria = "safe-to-run"
 
-[[exemptions.rustls-platform-verifier]]
-version = "0.7.1"
-criteria = "safe-to-run"
-
 [[exemptions.rustls-platform-verifier-android]]
 version = "0.2.0"
 criteria = "safe-to-run"
@@ -517,24 +509,12 @@ criteria = "safe-to-run"
 version = "0.9.0"
 criteria = "safe-to-run"
 
-[[exemptions.ureq]]
-version = "3.4.2"
-criteria = "safe-to-run"
-
-[[exemptions.ureq-proto]]
-version = "0.6.4"
-criteria = "safe-to-run"
-
 [[exemptions.url]]
 version = "2.5.8"
 criteria = "safe-to-run"
 
 [[exemptions.utf-8]]
 version = "0.7.6"
-criteria = "safe-to-run"
-
-[[exemptions.utf8-zero]]
-version = "0.8.1"
 criteria = "safe-to-run"
 
 [[exemptions.utf8_iter]]
