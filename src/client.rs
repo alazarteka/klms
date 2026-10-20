@@ -983,11 +983,24 @@ mod tests {
 
     #[test]
     fn native_video_deadline_and_stall_timeout_interrupt_a_silent_stream() {
-        // The fixture holds the connection open for 5s after the first bytes,
+        // The fixture holds the connection open for 1s after the first bytes,
         // so finishing well before that proves the client gave up on its own.
+        let short = Duration::from_millis(200);
         for (limits, message) in [
-            (Limits::new(1024, 1, 30), "time limit"),
-            (Limits::new(1024, 30, 1), "stalled: no data for 1 seconds"),
+            (
+                Limits {
+                    deadline: Instant::now() + short,
+                    ..Limits::new(1024, 30, 30)
+                },
+                "time limit",
+            ),
+            (
+                Limits {
+                    stall: short,
+                    ..Limits::new(1024, 30, 30)
+                },
+                "stalled: no data for",
+            ),
         ] {
             let server = serve(vec![Response::open_ended(mp4())]);
             let started = Instant::now();
@@ -997,7 +1010,7 @@ mod tests {
                 .unwrap();
             assert_eq!(error.code, "NETWORK_ERROR");
             assert!(error.message.contains(message), "{}", error.message);
-            assert!(started.elapsed() < Duration::from_secs(4));
+            assert!(started.elapsed() < Duration::from_millis(900));
         }
     }
 

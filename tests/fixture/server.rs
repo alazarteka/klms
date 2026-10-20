@@ -171,7 +171,7 @@ impl Server {
                 });
                 if response.open_ended {
                     // Hold the connection open until the client gives up.
-                    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
                     let _ = stream.read(&mut [0_u8; 64]);
                 }
                 if let Err(error) = written {
