@@ -14,6 +14,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # dtolnay/rust-toolchain exports CARGO_INCREMENTAL=0 unless it is already set.
+  CARGO_INCREMENTAL: 1
 
 jobs:
   test:
@@ -50,7 +52,7 @@ jobs:
             ~/.cargo/git/db
             target
             !target/supply-chain-tools
-          key: cargo-${{ runner.os }}-incremental-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-${{ runner.os }}-incremental-on-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       - name: Check
         run: make check
