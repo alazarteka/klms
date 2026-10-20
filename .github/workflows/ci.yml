@@ -14,8 +14,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Incremental artifacts only bloat the cached target/ in CI.
-  CARGO_INCREMENTAL: 0
 
 jobs:
   test:
@@ -30,8 +28,10 @@ jobs:
         with:
           components: clippy,rustfmt
       # The release workflow builds from scratch; only CI reuses compiled
-      # dependencies. The advisory database is excluded so deny always checks
-      # a fresh copy.
+      # dependencies. A fresh checkout gives every source file a new mtime, so
+      # klms itself always recompiles; the cached incremental state is what
+      # makes that fast. The advisory database is excluded so deny always
+      # checks a fresh copy.
       - name: Cache Cargo registry and build output
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -41,7 +41,7 @@ jobs:
             ~/.cargo/git/db
             target
             !target/supply-chain-tools
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-${{ runner.os }}-incremental-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       - name: Check
         run: make check
