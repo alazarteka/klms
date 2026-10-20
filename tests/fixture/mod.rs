@@ -1,4 +1,4 @@
-// Each integration target uses a different subset of this shared harness.
+// The integration tests and the unit tests use different subsets of this harness.
 #![allow(dead_code)]
 
 use std::{

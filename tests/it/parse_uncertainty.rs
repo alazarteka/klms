@@ -1,4 +1,4 @@
-mod fixture;
+use crate::fixture;
 use fixture::{
     Env,
     server::{Response, Server},
@@ -205,7 +205,7 @@ fn calendar_skips_unidentified_events_and_ignores_description_crosslinks() {
         );
         assert_eq!(env.fail("today").1["code"], "UPSTREAM_SHAPE_CHANGED");
     }
-    let page = include_str!("fixtures/localized/calendar.html").replace(
+    let page = include_str!("../fixtures/localized/calendar.html").replace(
         "An unrelated date in body prose: 2099-01-01.",
         "<a href='/mod/page/view.php?id=9'>Read the rubric</a>",
     );

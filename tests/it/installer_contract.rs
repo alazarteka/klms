@@ -3,7 +3,7 @@
 
 use std::{fs, path::PathBuf, process::Command};
 
-#[path = "fixture/executable.rs"]
+#[path = "../fixture/executable.rs"]
 mod fixture_executable;
 
 use sha2::{Digest, Sha256};

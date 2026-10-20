@@ -12,7 +12,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-mod fixture;
+use crate::fixture;
 use fixture::server::{Response, Server};
 
 struct Home(TempDir);

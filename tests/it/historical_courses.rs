@@ -1,12 +1,12 @@
+use crate::fixture;
+use fixture::{
+    Env,
+    server::{Response, Server},
+};
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
-};
-mod fixture;
-use fixture::{
-    Env,
-    server::{Response, Server},
 };
 
 const DASHBOARD: &str = r#"<script>M.cfg={"sesskey":"synthetic-key"};</script><a href="/course/view.php?id=99">Current(CS100_2026_3)</a>"#;

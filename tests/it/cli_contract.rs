@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-mod fixture;
+use crate::fixture;
 use fixture::Env;
 use fixture::server::{Response, Server};
 
@@ -210,7 +210,7 @@ fn read_commands_parse_fixture_pages_over_the_cookie_transport() {
 
 #[test]
 fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
-    let page = include_str!("fixtures/localized/calendar.html")
+    let page = include_str!("../fixtures/localized/calendar.html")
         .replace("&amp;time=1899989400", "")
         .replace("내일", "오늘");
     let server = Server::new(move |request| {
@@ -248,7 +248,7 @@ fn localized_calendar_cards_survive_calendar_and_agenda_commands() {
 #[test]
 fn agenda_kind_filter_selects_rows_and_warns_when_a_kind_matches_nothing() {
     // The assignment card plus a site event (no module link) on the same day.
-    let page = include_str!("fixtures/localized/calendar.html")
+    let page = include_str!("../fixtures/localized/calendar.html")
         .replace("&amp;time=1899989400", "")
         .replace("내일", "오늘");
     let card = &page[page.find("<div class=\"event").unwrap()..page.find("</main>").unwrap()];
@@ -981,7 +981,7 @@ fn agenda_skips_undated_events_with_a_warning_instead_of_failing() {
     // An event KLMS lists without any time (e.g. a quiz with no close date) is not an error:
     // the dated events are returned, the undated one is counted in a warning, and `calendar list`
     // still shows it.
-    let dated = include_str!("fixtures/localized/calendar.html")
+    let dated = include_str!("../fixtures/localized/calendar.html")
         .replace("&amp;time=1899989400", "")
         .replace("내일", "오늘");
     let page = dated.replace(

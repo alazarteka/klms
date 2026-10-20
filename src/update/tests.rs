@@ -88,7 +88,7 @@ fn check_and_no_downgrade_only_fetch_metadata() {
 }
 
 // This candidate records the subprocess protocol; actual binary installation
-// is exercised by tests/update_contract.rs using Cargo's real CLI executable.
+// is exercised by tests/it/update_contract.rs using Cargo's real CLI executable.
 fn protocol_archive(root: &Path, args_file: &Path, candidate_version: &str, fail: bool) -> Vec<u8> {
     let package = format!(
         "klms-v{}-{}",
