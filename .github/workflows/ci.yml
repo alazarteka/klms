@@ -23,6 +23,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      # Restored before the install step, which then finds 1.86.0 and its
+      # components already present instead of downloading them.
+      - name: Cache Rust toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu
+            ~/.rustup/update-hashes/1.86.0-x86_64-unknown-linux-gnu
+          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@52699249a776424c51ebc9ee197baf0f9dbf0d8a # 1.86.0
         with:
