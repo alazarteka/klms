@@ -67,7 +67,10 @@ On 2026-10-20 CI added `actions/cache` v6.1.0 at commit
 `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (tag resolved against
 github.com/actions/cache; released 2026-06-23). It is a first-party GitHub
 action, like the `actions/checkout`, `upload-artifact` and `download-artifact`
-pins already in use. Only `ci.yml` uses it: the cache holds the Cargo registry
-and `target/`, minus cargo-deny's advisory database, and `release.yml` stays
-uncached so published binaries always come from a clean build. Reviewer:
+pins already in use. Only `ci.yml` uses it, through the top-level action (the
+toolchain cache) and its `restore` and `save` sub-actions from the same
+commit (the build cache, saved only on pushes to `main`). The build cache
+holds the Cargo registry and `target/`, minus cargo-deny's advisory
+database, and `release.yml` stays uncached so published binaries always come
+from a clean build. Reviewer:
 `@alazarteka` (prepared by Claude Code).
