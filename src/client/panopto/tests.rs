@@ -576,7 +576,7 @@ fn remux_byte_cap_is_limit_error_and_stderr_tail_is_bounded() {
 fn panopto_media_stall_timeout_bounds_response_headers() {
     use crate::fixture_server::{Response, Server};
     let server = Server::new(|_| {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(1));
         Response::bytes("video/mp4", b"\0\0\0\x18ftypisommedia")
     });
     let config = Config::fixture("https://kaist.ap.panopto.com/", &server.url());
@@ -591,7 +591,7 @@ fn panopto_media_stall_timeout_bounds_response_headers() {
         .err()
         .unwrap();
     assert_eq!(error.code, "NETWORK_ERROR");
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_millis(700));
     assert!(output.is_empty());
 }
 

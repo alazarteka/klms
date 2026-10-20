@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn native_video_stall_timeout_bounds_response_headers() {
         let server = Server::new(|_| {
-            thread::sleep(Duration::from_secs(2));
+            thread::sleep(Duration::from_secs(1));
             Response::bytes("video/mp4", mp4())
         });
         let limits = Limits {
@@ -1031,7 +1031,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, "NETWORK_ERROR");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_millis(700));
         assert!(output.is_empty());
     }
 
