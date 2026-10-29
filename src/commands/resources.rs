@@ -69,21 +69,12 @@ impl Ctx<'_> {
                 BoardsCommand::Posts { board, list } => {
                     let path = module_path(board, &["courseboard"])?;
                     client.validate_operand(&path)?;
-                    let response = client.get(&path)?;
-                    let board_id = query_value(&response.url, "id");
-                    let posts = parse::board_posts(&response.text, &response.url, board_id)?;
-                    let complete = !parse::has_next_page(&response.text);
-                    listing(
-                        "boards.posts",
-                        posts,
-                        list.limit,
-                        complete,
-                        |rows, avail| {
-                            table(rows, avail, "Board posts", "REF\tPOSTED\tTITLE", |r| {
-                                row(&[cell(&r.reference, "-"), cell(&r.posted, "-"), &r.title])
-                            })
-                        },
-                    )
+                    let posts = crate::board_pages::posts(client, &path)?;
+                    listing("boards.posts", posts, list.limit, true, |rows, avail| {
+                        table(rows, avail, "Board posts", "REF\tPOSTED\tTITLE", |r| {
+                            row(&[cell(&r.reference, "-"), cell(&r.posted, "-"), &r.title])
+                        })
+                    })
                 }
                 BoardsCommand::Show { post } => self.show_board_post(post, "boards.show"),
             },
@@ -200,17 +191,15 @@ impl Ctx<'_> {
         let resolved = self.resolve_course(course)?;
         let activities = course_pages::activities(self.client, &resolved.id)?;
         let mut rows = Vec::new();
-        let mut source_complete = true;
         for board in activities.into_iter().filter(parse::is_notice_board) {
             let Some(board_ref) = board.reference else {
                 return Err(AppError::shape(
                     "notice board contained no canonical module reference",
                 ));
             };
-            let response = self.client.get(&ResourceRef::parse(&board_ref)?.path())?;
-            source_complete &= !parse::has_next_page(&response.text);
-            let board_id = query_value(&response.url, "id");
-            for post in parse::board_posts(&response.text, &response.url, board_id)? {
+            for post in
+                crate::board_pages::posts(self.client, &ResourceRef::parse(&board_ref)?.path())?
+            {
                 let Some(reference) = post.reference else {
                     return Err(AppError::shape(
                         "notice post contained no canonical post reference",
@@ -228,22 +217,16 @@ impl Ctx<'_> {
                 });
             }
         }
-        listing(
-            "notices.list",
-            rows,
-            limit,
-            source_complete,
-            |rows, avail| {
-                table(rows, avail, "Notices", "POSTED\tREF\tTITLE", |r| {
-                    let posted = r.posted_at.as_ref().or(r.posted_text.as_ref());
-                    row(&[
-                        posted.map_or("unknown", |p| p.as_str()),
-                        &r.reference,
-                        &r.title,
-                    ])
-                })
-            },
-        )
+        listing("notices.list", rows, limit, true, |rows, avail| {
+            table(rows, avail, "Notices", "POSTED\tREF\tTITLE", |r| {
+                let posted = r.posted_at.as_ref().or(r.posted_text.as_ref());
+                row(&[
+                    posted.map_or("unknown", |p| p.as_str()),
+                    &r.reference,
+                    &r.title,
+                ])
+            })
+        })
     }
 
     fn show_board_post(

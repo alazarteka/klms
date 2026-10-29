@@ -65,8 +65,11 @@ pub(super) fn has_any(document: &Html, selectors: &[&str]) -> bool {
 }
 
 pub(super) const NEXT_PAGE_SELECTORS: &[&str] = &[
-    "a[rel=next]",
+    "a[rel~=next]",
     ".pagination .next a",
+    ".pagination a.next",
+    ".paging .next a",
+    ".paging a.next",
     "a[data-page-number][aria-label*=Next]",
 ];
 
