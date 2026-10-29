@@ -33,11 +33,23 @@ criteria = "safe-to-run"
 delta = "4.6.4 -> 4.6.6"
 notes = "Reviewed the complete exact-version crate delta, verifying archive SHA-256 against both project lockfiles and extracted-source equality. No build script. Runtime library source is unchanged apart from documentation; the builder pin advances to the separately reviewed 4.6.6. Other changes are examples, snapshots, documentation, and the crate's own unused development lockfile."
 
+[[audits.clap]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+delta = "4.6.6 -> 4.6.7"
+notes = "Full diff of the exact crates.io archives (4.6.6 vs 4.6.7) read; the 4.6.7 archive checksum matches the branch Cargo.lock. No source code change in the crate: edits are the version-string link in lib.rs, new documentation for the derive `defer` attribute, the manifest (clap_builder and clap_derive pins now =4.6.7, rooted include paths, lint tables, a doc-scrape-examples example entry, removed bench/test profiles) and Self-style refactors in bundled examples that are not compiled into dependents. Build script entry unchanged and absent from the archive; no dependency, feature, I/O, process or environment change. Runtime behavior of clap_builder and clap_derive is covered by their own audit records."
+
 [[audits.clap_builder]]
 who = "Codex agent (klms PR #3, /root/clap_upgrade)"
 criteria = "safe-to-run"
 delta = "4.6.2 -> 4.6.6"
 notes = "Reviewed the complete exact-version crate delta, verifying archive SHA-256 against both project lockfiles and extracted-source equality. No build script or dependency/feature changes. Runtime changes are in-memory optional-value help formatting, a private conflict-field rename, and exposing the existing usage getter; the remaining changes are documentation, tests, and the crate's unused development lockfile. No new filesystem, network, process, or environment side effects."
+
+[[audits.clap_builder]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+delta = "4.6.6 -> 4.6.7"
+notes = "Full diff of the exact crates.io archives read (24 changed files; 4.6.7 checksum matches the branch Cargo.lock). Every source change is a mechanical refactor replacing a type's own name with Self (use_self lint) or reformatting; no logic, signature, visibility or behavior change found, so the Command::defer API is unchanged. Manifest changes are version, rooted include paths, lint tables and Cargo.lock added to the include list; dependencies and features unchanged. No build script; no unsafe, filesystem, network, process or environment access added. The unchanged remainder of 4.6.6 relies on the earlier audit chain and was not re-read."
 
 [[audits.clap_complete]]
 who = "Claude Fable 5.1 (review recorded for @alazarteka)"
@@ -50,6 +62,12 @@ who = "Claude Code (review recorded for @alazarteka)"
 criteria = "safe-to-run"
 delta = "4.6.9 -> 4.6.11"
 notes = "Full source diff read: Shell:: to Self:: renames, zsh subcommand names now passed through escape_value, three debug! lines in the feature-gated dynamic engine, and manifest metadata (lints, rooted include paths, clap dev-dependency 4.6.6). No build script, no new dependencies, no process, network, filesystem or environment access added."
+
+[[audits.clap_derive]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+delta = "4.6.4 -> 4.6.7"
+notes = "Full diff of the exact crates.io archives read (4.6.4 vs 4.6.7; the 4.6.7 checksum matches the branch Cargo.lock; this spans three upstream releases). Proc macro with no build script and no I/O, process, network or environment access; dependencies (proc-macro2, quote, syn, heck) and features unchanged. Behavioral changes are limited to generated code: a new opt-in `#[command(defer = <bool literal>)]` attribute for Parser/Subcommand enums (rejected with a compile error on other items; defaults to false unless the unstable-v5 feature is on) that wraps variant augmentation in Command::defer, and a reordering so initial/final top-level methods are applied around augment_args/augment_subcommands rather than inside them, which only changes which expressions the macro emits and when. Remainder is Self-style refactors, lint tables and manifest metadata. The generated-code semantics were read, not compiled against other consumers; klms's own test suite exercises its derive use. The unchanged remainder of 4.6.4 was not re-audited and stays an exemption-anchored base."
 
 [[audits.const-oid]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"

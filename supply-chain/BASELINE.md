@@ -6,7 +6,7 @@ not correctness, memory safety, or independent cryptographic validation.
 
 The store retains 139 exact-version exemptions from the existing baseline and
 3 older clap/clap_builder/rustls-webpki exemptions that anchor the retained delta audits.
-The 33 audit records retain their original authors and scope. Added on
+The 36 audit records retain their original authors and scope. Added on
 2026-10-17: the `clap_complete` 4.6.9 -> 4.6.11 delta audit, which replaces
 Dependabot's #22, and full audits of the five shipping crates that had been
 pending (see below). Exemptions are
@@ -26,6 +26,17 @@ The full diff was read: a built-in SPKI distrust list and `CertDistrusted`
 error, an aws-lc-rs-only FIPS flag removal, and manifest metadata. No build
 script and no new I/O. The 0.103.14 base itself remains an unaudited
 carry-over. Reviewer: `@alazarteka` (prepared by Claude Code).
+
+On 2026-10-29 Dependabot's clap 4.6.7 bump (#34) is covered by three
+`safe-to-run` delta audits: `clap` 4.6.6 -> 4.6.7, `clap_builder` 4.6.6 ->
+4.6.7 and `clap_derive` 4.6.4 -> 4.6.7. The full source diffs were read and the
+archive checksums match `Cargo.lock`. `clap` and `clap_builder` changed only by
+Self-style refactors, docs and manifest metadata; `clap_derive` adds an opt-in
+`defer` attribute and reorders emitted builder calls. No build script, new
+dependency, feature, or I/O in any of them. The existing `clap_derive` 4.6.4
+exemption is retained unchanged as the delta anchor; no exemption was added or
+advanced. The unchanged bases remain earlier carry-overs. Reviewer:
+`@alazarteka` (prepared by Claude Code).
 
 ## Pending owner review
 
