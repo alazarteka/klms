@@ -16,7 +16,7 @@ pub use courses::{
     is_notice_board,
 };
 pub use coursework::{assignments, attendance, grades, quizzes};
-pub use detail::{has_next_page, next_page_url, resource_detail, safe_html_preview, sesskey};
+pub use detail::{next_page_url, resource_detail, safe_html_preview, sesskey};
 pub use native_video::native_sources;
 
 pub use embedded_video::{embedded_activity, embedded_title};

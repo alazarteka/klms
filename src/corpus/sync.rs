@@ -4,7 +4,7 @@ use super::{
     query::{refresh_subject, row},
 };
 use crate::date::epoch_now as now;
-use crate::url::{Url, query_value};
+use crate::url::Url;
 use crate::{
     client::{KlmsClient, RemoteMetadata},
     error::AppError,
@@ -420,68 +420,41 @@ fn collect_board(
     let fail = |failures: &mut Vec<String>, message: &str| {
         failures.push(format!("{}: {message}", course.reference));
     };
-    let mut next = Some(start.to_owned());
-    let mut visited = HashSet::new();
-    for _ in 0..20 {
-        let Some(url) = next.take() else {
-            return (rows, failures);
-        };
-        if !visited.insert(url.clone()) {
-            fail(&mut failures, "notice pagination cycle detected");
-            break;
-        }
-        let page = match client.get(&url) {
-            Ok(page) => page,
+    let result = crate::board_pages::walk(client, start, |reference, post| {
+        let detail = client.get(&post.url).and_then(|response| {
+            parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")
+        });
+        let detail = match detail {
+            Ok(detail) => detail,
             Err(error) => {
-                fail(&mut failures, &error.message);
-                break;
+                failures.push(format!("{reference}: {}", error.message));
+                return;
             }
         };
-        let posts = match parse::board_posts(&page.text, &page.url, query_value(&page.url, "id")) {
-            Ok(posts) => posts,
-            Err(error) => {
-                fail(&mut failures, &error.message);
-                break;
-            }
-        };
-        for post in posts {
-            let Some(reference) = post.reference else {
-                continue;
-            };
-            let detail = client.get(&post.url).and_then(|response| {
-                parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")
-            });
-            let detail = match detail {
-                Ok(detail) => detail,
-                Err(error) => {
-                    failures.push(format!("{reference}: {}", error.message));
-                    continue;
-                }
-            };
-            rows.push(PendingResource {
-                reference,
-                kind: "notice".into(),
-                title: detail.title.clone(),
-                url: Some(detail.url.clone()),
-                text: Some(detail.text.clone()),
-                source: serde_json::to_value(&detail).unwrap_or(Value::Null),
-                observe: true,
-                complete: !detail.text_truncated && !detail.links_truncated,
-                representations_complete: !detail.links_truncated,
-                links: detail.links,
-                ..Default::default()
-            });
-        }
-        next = match parse::next_page_url(&page.text, base_url) {
-            Ok(next) => next,
-            Err(error) => {
-                fail(&mut failures, &error.message);
-                break;
-            }
-        };
-    }
-    if next.is_some() {
-        fail(&mut failures, "notice pagination exceeded 20 pages");
+        rows.push(PendingResource {
+            reference,
+            kind: "notice".into(),
+            title: detail.title.clone(),
+            url: Some(detail.url.clone()),
+            text: Some(detail.text.clone()),
+            source: serde_json::to_value(&detail).unwrap_or(Value::Null),
+            observe: true,
+            complete: !detail.text_truncated && !detail.links_truncated,
+            representations_complete: !detail.links_truncated,
+            links: detail.links,
+            ..Default::default()
+        });
+    });
+    match result {
+        Ok(true) => {}
+        Ok(false) => fail(
+            &mut failures,
+            &format!(
+                "board pagination exceeded {} pages",
+                crate::board_pages::PAGE_BUDGET
+            ),
+        ),
+        Err(error) => fail(&mut failures, &error.message),
     }
     (rows, failures)
 }

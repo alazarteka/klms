@@ -69,15 +69,17 @@ impl Ctx<'_> {
                 BoardsCommand::Posts { board, list } => {
                     let path = module_path(board, &["courseboard"])?;
                     client.validate_operand(&path)?;
-                    let response = client.get(&path)?;
-                    let board_id = query_value(&response.url, "id");
-                    let posts = parse::board_posts(&response.text, &response.url, board_id)?;
-                    let complete = !parse::has_next_page(&response.text);
+                    // Every page is read even under --limit: stopping early
+                    // would drop meta.total and report source_complete:false
+                    // for a board that is merely truncated locally.
+                    let mut posts = Vec::new();
+                    let exhausted =
+                        crate::board_pages::walk(client, &path, |_, post| posts.push(post))?;
                     listing(
                         "boards.posts",
                         posts,
                         list.limit,
-                        complete,
+                        exhausted,
                         |rows, avail| {
                             table(rows, avail, "Board posts", "REF\tPOSTED\tTITLE", |r| {
                                 row(&[cell(&r.reference, "-"), cell(&r.posted, "-"), &r.title])
@@ -207,15 +209,8 @@ impl Ctx<'_> {
                     "notice board contained no canonical module reference",
                 ));
             };
-            let response = self.client.get(&ResourceRef::parse(&board_ref)?.path())?;
-            source_complete &= !parse::has_next_page(&response.text);
-            let board_id = query_value(&response.url, "id");
-            for post in parse::board_posts(&response.text, &response.url, board_id)? {
-                let Some(reference) = post.reference else {
-                    return Err(AppError::shape(
-                        "notice post contained no canonical post reference",
-                    ));
-                };
+            let path = ResourceRef::parse(&board_ref)?.path();
+            source_complete &= crate::board_pages::walk(self.client, &path, |reference, post| {
                 rows.push(Notice {
                     reference,
                     board_ref: board_ref.clone(),
@@ -226,7 +221,7 @@ impl Ctx<'_> {
                     posted_text: post.posted,
                     url: post.url,
                 });
-            }
+            })?;
         }
         listing(
             "notices.list",

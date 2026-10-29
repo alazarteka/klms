@@ -7,12 +7,13 @@ modules it uses:
 ```text
 main         -> cli, commands, output, error
 cli          -> auth (argument enums), models (Semester)
-commands     -> cli, auth, client, course_pages, parse, corpus, update, spec,
+commands     -> cli, auth, client, board_pages, course_pages, parse, corpus, update, spec,
                 models, date, reference, private_fs, safe_url, url, http, output, error
 spec         -> cli, output, error
 update       -> client, private_fs, digest, output, error
-corpus       -> client, course_pages, parse, models, date, url, reference,
+corpus       -> client, board_pages, course_pages, parse, models, date, url, reference,
                 private_fs, digest, http (bounded reader), error
+board_pages  -> client, parse, models, reference, url, error
 course_pages -> client, parse, models, url, error
 auth         -> http, parse, url, date, private_fs, output, error
 client       -> auth (cookie jar only), http, parse, url, reference, private_fs, error
@@ -82,6 +83,9 @@ models, date, digest, private_fs, url, error -> no internal module dependencies
   else. Submodules: `auth`, `calendar`, `courses`, `coursework`, `detail`
   and `shared`, plus static `native_video`, `embedded_video` and Panopto `video`
   launch parsers.
+- `board_pages`: the one bounded board traversal shared by live board/notice
+  lists and library sync: board identity checks, cycle detection, post
+  deduplication, read policy on each next page, and the 20-page budget.
 - `course_pages`: course activities across every page KLMS splits a course
   into, merging the paged week format.
 - `models`, `reference`, `date`, `safe_url`, `error`, `spec`: typed records

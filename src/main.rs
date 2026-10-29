@@ -1,4 +1,5 @@
 mod auth;
+mod board_pages;
 mod cli;
 mod client;
 mod commands;

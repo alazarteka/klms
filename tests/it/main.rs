@@ -4,6 +4,7 @@
 #[path = "../fixture/mod.rs"]
 mod fixture;
 
+mod archive_completeness;
 mod auth_login;
 mod cli_contract;
 mod fixture_contract;

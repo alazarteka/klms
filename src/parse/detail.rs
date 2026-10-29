@@ -130,10 +130,6 @@ fn notice_content(
     ))
 }
 
-pub fn has_next_page(html: &str) -> bool {
-    has_any(&Html::parse_document(html), NEXT_PAGE_SELECTORS)
-}
-
 pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppError> {
     let document = Html::parse_document(html);
     let joined = NEXT_PAGE_SELECTORS
@@ -141,18 +137,67 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
         .map(|css| format!("{css}[href]"))
         .collect::<Vec<_>>()
         .join(", ");
-    let Some(href) = document
+    let href = document
         .select(&sel(&joined))
-        .find_map(|node| node.value().attr("href"))
-    else {
-        return Ok(None);
-    };
-    let url = resolve_http_url(base_url, href)
-        .ok_or_else(|| AppError::shape("invalid pagination URL"))?;
-    if url.origin() != base_url.origin() {
-        return Err(AppError::shape("pagination URL left the KLMS origin"));
+        .find_map(|node| node.value().attr("href"));
+    if let Some(href) = href {
+        let url = resolve_http_url(base_url, href)
+            .ok_or_else(|| AppError::shape("invalid pagination URL"))?;
+        if url.origin() != base_url.origin() {
+            return Err(AppError::shape("pagination URL left the KLMS origin"));
+        }
+        return Ok(Some(safe_url::display(&url)));
     }
-    Ok(Some(safe_url::display(&url)))
+    // Some board skins expose numbered links without a recognizable Next link.
+    // Resolve against the current page, and take the nearest forward page.
+    let current = query_id(base_url, &["page"])
+        .map(|page| page.parse::<u64>())
+        .transpose()
+        .map_err(|_| AppError::shape("invalid current board page number"))?
+        .unwrap_or(0);
+    let board = query_id(base_url, &["id"]);
+    let mut next: Option<(u64, Url)> = None;
+    for anchor in document.select(&sel(".paging a[href], .pagination a[href]")) {
+        if anchor.value().attr("aria-disabled") == Some("true")
+            || anchor.value().classes().any(|class| class == "disabled")
+            || anchor.ancestors().filter_map(ElementRef::wrap).any(|node| {
+                node.value().name() == "li"
+                    && node
+                        .value()
+                        .classes()
+                        .any(|class| class == "active" || class == "disabled")
+            })
+        {
+            continue;
+        }
+        let href = anchor.value().attr("href").expect("href selector");
+        let url = resolve_http_url(base_url, href)
+            .ok_or_else(|| AppError::shape("unrecognized board pagination control"))?;
+        let same_board = match (query_id(&url, &["id"]), &board) {
+            (Some(id), Some(board)) => id.trim_start_matches('0') == board.trim_start_matches('0'),
+            (None, None) => true,
+            _ => false,
+        };
+        if url.origin() != base_url.origin() || url.path() != base_url.path() || !same_board {
+            return Err(AppError::shape("pagination URL changed board identity"));
+        }
+        let page = query_id(&url, &["page"])
+            .ok_or_else(|| AppError::shape("pagination control had no page number"))?
+            .parse::<u64>()
+            .map_err(|_| AppError::shape("invalid board page number"))?;
+        if page > current && next.as_ref().is_none_or(|(number, _)| page < *number) {
+            next = Some((page, url));
+        }
+    }
+    if next.is_none()
+        && document
+            .select(&sel(&NEXT_PAGE_SELECTORS.join(", ")))
+            .next()
+            .is_some()
+    {
+        return Err(AppError::shape("next page control had no usable URL"));
+    }
+    Ok(next.map(|(_, url)| safe_url::display(&url)))
 }
 
 pub fn safe_html_preview(html: &str) -> String {
@@ -333,5 +378,53 @@ mod tests {
         );
         let external = "<a rel='next' href='https://external.example/page'>Next</a>";
         assert!(next_page_url(external, &base).is_err());
+    }
+
+    #[test]
+    fn numbered_pager_board_identity_ignores_leading_zeros() {
+        let base = Url::parse("https://klms.example/mod/courseboard/view.php?id=09").unwrap();
+        let pager = "<div class='paging'><strong>1</strong><a href='?id=9&amp;page=2'>2</a></div>";
+        assert_eq!(
+            next_page_url(pager, &base).unwrap().as_deref(),
+            Some("https://klms.example/mod/courseboard/view.php?id=9&page=2")
+        );
+        let other = "<div class='paging'><strong>1</strong><a href='?id=90&amp;page=2'>2</a></div>";
+        assert!(next_page_url(other, &base).is_err());
+    }
+
+    #[test]
+    fn reconstructed_observed_board_pager_and_synthetic_middle_and_final_pages() {
+        // Reconstructed from the observed DOM; this is not captured HTML.
+        let first = r##"<div class="pagination pagination-centered"><ul><li class="active"><a href="#">1</a></li><li><a href="https://klms.example/mod/courseboard/view.php?id=9&amp;page=2">2</a></li><li><a href="https://klms.example/mod/courseboard/view.php?id=9&amp;page=3">3</a></li><li><a href="https://klms.example/mod/courseboard/view.php?id=9&amp;page=4">4</a></li><li><a href="https://klms.example/mod/courseboard/view.php?id=9&amp;page=5">5</a></li></ul></div>"##;
+        let base = Url::parse("https://klms.example/mod/courseboard/view.php?id=9").unwrap();
+        assert_eq!(
+            next_page_url(first, &base).unwrap().unwrap(),
+            "https://klms.example/mod/courseboard/view.php?id=9&page=2"
+        );
+        // Synthetic middle/final variants: only the first-page DOM was observed.
+        for (page, expected) in [(3, Some(4)), (5, None)] {
+            let links = (1..=5)
+                .map(|n| {
+                    if n == page {
+                        format!("<li class='active'><a href='#'>{n}</a></li>")
+                    } else {
+                        format!("<li><a href='?id=9&amp;page={n}'>{n}</a></li>")
+                    }
+                })
+                .collect::<String>();
+            let html =
+                format!("<div class='pagination pagination-centered'><ul>{links}</ul></div>");
+            let url = Url::parse(&format!(
+                "https://klms.example/mod/courseboard/view.php?id=9&page={page}"
+            ))
+            .unwrap();
+            let found = next_page_url(&html, &url).unwrap();
+            assert_eq!(
+                found,
+                expected.map(|n| format!(
+                    "https://klms.example/mod/courseboard/view.php?id=9&page={n}"
+                ))
+            );
+        }
     }
 }
