@@ -6,7 +6,7 @@ not correctness, memory safety, or independent cryptographic validation.
 
 The store retains 139 exact-version exemptions from the existing baseline and
 3 older clap/clap_builder/rustls-webpki exemptions that anchor the retained delta audits.
-The 33 audit records retain their original authors and scope. Added on
+The 34 audit records retain their original authors and scope. Added on
 2026-10-17: the `clap_complete` 4.6.9 -> 4.6.11 delta audit, which replaces
 Dependabot's #22, and full audits of the five shipping crates that had been
 pending (see below). Exemptions are
@@ -26,6 +26,18 @@ The full diff was read: a built-in SPKI distrust list and `CertDistrusted`
 error, an aws-lc-rs-only FIPS flag removal, and manifest metadata. No build
 script and no new I/O. The 0.103.14 base itself remains an unaudited
 carry-over. Reviewer: `@alazarteka` (prepared by Claude Code).
+
+On 2026-10-29 Dependabot's zeroize 1.9.1 bump (#36) is covered by a
+`safe-to-run` delta audit of `zeroize` 1.9.0 -> 1.9.1. The full source diff was
+read and the archive checksum matches `Cargo.lock`. No build script, new
+dependency, feature, or I/O; changes are an opaque `Debug` for `Zeroizing`, a
+reordering of `Vec` zeroization, removal of internal `optimization_barrier`
+calls from the register-zeroing paths, and a `MaybeUninit` volatile read in
+the barrier fallback. Whether wiping stays reliable after the barrier removal
+is a security property outside `safe-to-run` and was not verified. The
+`zeroize` 1.9.0 exemption is retained unchanged as the delta anchor; no
+exemption was added or advanced. Reviewer: `@alazarteka` (prepared by Claude
+Code).
 
 ## Pending owner review
 

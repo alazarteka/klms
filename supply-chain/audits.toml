@@ -175,3 +175,9 @@ version = "0.2.15"
 who = "@alazarteka (review recorded by Codex)"
 criteria = "safe-to-run"
 version = "0.9.5"
+
+[[audits.zeroize]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+delta = "1.9.0 -> 1.9.1"
+notes = "Full diff of the exact crates.io archives read (1.9.0 vs 1.9.1; the 1.9.1 checksum matches the branch Cargo.lock). No build script, no new dependencies or features, no filesystem, network, process or environment access. Changes: Zeroizing's derived Debug is replaced by an opaque impl printing only the type name (less data exposure); Vec zeroization avoids double-zeroizing initialized elements and reorders spare_capacity_mut handling; internal optimization_barrier calls were removed from the x86 and aarch64 register-zeroing paths and several lib.rs impls; and the fallback read in barrier.rs now reads a MaybeUninit<u8> through read_volatile to avoid an uninitialized read (a small unsafe change). The tests/alloc.rs rewrite and README/CHANGELOG/lint edits are not shipped in dependents. Whether secrets are still reliably wiped after the barrier removal (a memory-safety and security property, outside safe-to-run) was not verified."
