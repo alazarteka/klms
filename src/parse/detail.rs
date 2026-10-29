@@ -155,6 +155,7 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
         .transpose()
         .map_err(|_| AppError::shape("invalid current board page number"))?
         .unwrap_or(0);
+    let board = query_id(base_url, &["id"]);
     let mut next: Option<(u64, Url)> = None;
     for anchor in document.select(&sel(".paging a[href], .pagination a[href]")) {
         if anchor.value().attr("aria-disabled") == Some("true")
@@ -172,13 +173,14 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
         let href = anchor.value().attr("href").expect("href selector");
         let url = resolve_http_url(base_url, href)
             .ok_or_else(|| AppError::shape("unrecognized board pagination control"))?;
-        if url.origin() != base_url.origin()
-            || url.path() != base_url.path()
-            || query_id(&url, &["id"]) != query_id(base_url, &["id"])
-        {
+        let same_board = match (query_id(&url, &["id"]), &board) {
+            (Some(id), Some(board)) => id.trim_start_matches('0') == board.trim_start_matches('0'),
+            (None, None) => true,
+            _ => false,
+        };
+        if url.origin() != base_url.origin() || url.path() != base_url.path() || !same_board {
             return Err(AppError::shape("pagination URL changed board identity"));
         }
-        crate::client::policy::read_url(&url)?;
         let page = query_id(&url, &["page"])
             .ok_or_else(|| AppError::shape("pagination control had no page number"))?
             .parse::<u64>()
@@ -194,7 +196,7 @@ pub fn next_page_url(html: &str, base_url: &Url) -> Result<Option<String>, AppEr
             .is_some()
     {
         return Err(AppError::shape("next page control had no usable URL"));
-    };
+    }
     Ok(next.map(|(_, url)| safe_url::display(&url)))
 }
 
@@ -376,6 +378,18 @@ mod tests {
         );
         let external = "<a rel='next' href='https://external.example/page'>Next</a>";
         assert!(next_page_url(external, &base).is_err());
+    }
+
+    #[test]
+    fn numbered_pager_board_identity_ignores_leading_zeros() {
+        let base = Url::parse("https://klms.example/mod/courseboard/view.php?id=09").unwrap();
+        let pager = "<div class='paging'><strong>1</strong><a href='?id=9&amp;page=2'>2</a></div>";
+        assert_eq!(
+            next_page_url(pager, &base).unwrap().as_deref(),
+            Some("https://klms.example/mod/courseboard/view.php?id=9&page=2")
+        );
+        let other = "<div class='paging'><strong>1</strong><a href='?id=90&amp;page=2'>2</a></div>";
+        assert!(next_page_url(other, &base).is_err());
     }
 
     #[test]

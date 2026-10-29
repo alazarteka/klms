@@ -420,10 +420,7 @@ fn collect_board(
     let fail = |failures: &mut Vec<String>, message: &str| {
         failures.push(format!("{}: {message}", course.reference));
     };
-    let result = crate::board_pages::walk(client, start, |post| {
-        let Some(reference) = post.reference else {
-            return;
-        };
+    let result = crate::board_pages::walk(client, start, |reference, post| {
         let detail = client.get(&post.url).and_then(|response| {
             parse::resource_detail(&response.text, base_url, &response.url, "courseboard-post")
         });
@@ -448,8 +445,16 @@ fn collect_board(
             ..Default::default()
         });
     });
-    if let Err(error) = result {
-        fail(&mut failures, &error.message);
+    match result {
+        Ok(true) => {}
+        Ok(false) => fail(
+            &mut failures,
+            &format!(
+                "board pagination exceeded {} pages",
+                crate::board_pages::PAGE_BUDGET
+            ),
+        ),
+        Err(error) => fail(&mut failures, &error.message),
     }
     (rows, failures)
 }

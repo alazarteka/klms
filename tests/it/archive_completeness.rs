@@ -219,45 +219,99 @@ fn numeric_previous_links_and_pinned_repeated_posts_are_handled_once() {
     );
 }
 
+/// Every listing page links to the next; with `cycle` every page links to `page=1`.
+/// Page N lists post 100+N so the budget case accumulates distinct rows.
+fn endless_board(cycle: bool) -> Server {
+    fixture::lib_server(move |request, _| {
+        if request.target == "/course/view.php?id=42" {
+            return Some(Response::html(fixture::notice_manifest()));
+        }
+        if request.target.starts_with("/mod/courseboard/view.php?") {
+            let page: usize = request
+                .target
+                .split("page=")
+                .nth(1)
+                .unwrap_or("1")
+                .parse()
+                .unwrap();
+            let next = if cycle { 1 } else { page + 1 };
+            let posts = fixture::NOTICE_LIST.replace("bwid=10", &format!("bwid={}", 100 + page));
+            return Some(Response::html(format!(
+                "{posts}<a rel='next' href='?id=9&amp;page={next}'>Next</a>"
+            )));
+        }
+        if request.target.contains("article.php") {
+            return Some(Response::html(article("Hello", "", "Body")));
+        }
+        None
+    })
+}
+
+fn board_page_requests(server: &Server) -> usize {
+    server
+        .requests()
+        .iter()
+        .filter(|line| line.contains("/courseboard/view.php"))
+        .count()
+}
+
 #[test]
-fn cycles_and_page_budget_are_explicit_failures() {
-    for cycle in [true, false] {
-        let server = fixture::lib_server(move |request, _| {
-            if request.target == "/course/view.php?id=42" {
-                return Some(Response::html(fixture::notice_manifest()));
-            }
-            if request.target.starts_with("/mod/courseboard/view.php?") {
-                let page: usize = request
-                    .target
-                    .split("page=")
-                    .nth(1)
-                    .unwrap_or("1")
-                    .parse()
-                    .unwrap();
-                let next = if cycle { 1 } else { page + 1 };
-                return Some(Response::html(board(&format!(
-                    "<a rel='next' href='?id=9&amp;page={next}'>Next</a>"
-                ))));
-            }
-            if request.target.contains("article.php") {
-                return Some(Response::html(article("Hello", "", "Body")));
-            }
-            None
-        });
-        let env = Env::at(&server);
-        assert_eq!(env.sync("--notices")["data"]["status"], "incomplete");
-        let requests = server.requests();
-        let pages = requests
-            .iter()
-            .filter(|line| line.contains("/courseboard/view.php"))
-            .count();
-        assert_eq!(pages, if cycle { 3 } else { 20 });
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|line| line.contains("article.php"))
-                .count(),
-            1
-        );
+fn pagination_cycles_fail_lists_and_leave_sync_incomplete() {
+    for command in ["notices list --course course:42", "boards posts board:9"] {
+        let server = endless_board(true);
+        let (_, error) = Env::at(&server).fail(command);
+        assert_eq!(error["code"], "UPSTREAM_SHAPE_CHANGED");
+        assert_eq!(error["message"], "board pagination cycle detected");
+        assert_eq!(board_page_requests(&server), 3);
     }
+    let server = endless_board(true);
+    let sync = Env::at(&server).sync("--notices");
+    assert_eq!(sync["data"]["status"], "incomplete");
+    let failures = sync["data"]["failures"].to_string();
+    assert!(
+        failures.contains("board pagination cycle detected"),
+        "{failures}"
+    );
+    assert_eq!(board_page_requests(&server), 3);
+    // The start page and `page=1` list the same post; it is read once before
+    // the repeated `page=1` is detected.
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|line| line.contains("article.php"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn page_budget_returns_partial_live_lists_and_leaves_sync_incomplete() {
+    for command in ["notices list --course course:42", "boards posts board:9"] {
+        let server = endless_board(false);
+        let result = Env::at(&server).ok(command);
+        assert_eq!(result["data"].as_array().unwrap().len(), 20);
+        assert_eq!(result["meta"]["complete"], false);
+        assert_eq!(result["meta"]["source_complete"], false);
+        assert_eq!(result["meta"]["total"], serde_json::Value::Null);
+        assert_eq!(board_page_requests(&server), 20);
+    }
+    let server = endless_board(false);
+    let sync = Env::at(&server).sync("--notices");
+    assert_eq!(sync["data"]["status"], "incomplete");
+    assert_eq!(sync["data"]["source_complete"], false);
+    let failures = sync["data"]["failures"].to_string();
+    assert!(
+        failures.contains("board pagination exceeded 20 pages"),
+        "{failures}"
+    );
+    assert_eq!(board_page_requests(&server), 20);
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|line| line.contains("article.php"))
+            .count(),
+        20
+    );
 }
