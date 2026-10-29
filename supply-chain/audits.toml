@@ -132,6 +132,12 @@ criteria = "safe-to-run"
 version = "0.7.1"
 notes = "No build.rs or proc macros; include_bytes! only embeds cfg(test) fixtures. On Linux the crate itself does no I/O: it calls rustls_native_certs::load_native_certs(), which reads SSL_CERT_FILE/SSL_CERT_DIR or the openssl-probe default CA bundles under /etc read-only, then verifies offline with webpki (no OCSP/CRL/AIA fetching). On macOS it builds in-memory SecCertificate/SecPolicy/SecTrust objects and calls SecTrustEvaluateWithError, with no keychain writes or prompts, though the OS trustd may fetch intermediates or revocation data. Its only unsafe on those targets reads the kCFAbsoluteTimeIntervalSince1970 constant; Windows/Android paths were grepped, not read. examples/update-certs.rs does network I/O and writes into the crate dir only when run explicitly."
 
+[[audits.rustls-webpki]]
+who = "Claude Code (review recorded for @alazarteka)"
+criteria = "safe-to-run"
+delta = "0.103.14 -> 0.103.16"
+notes = "Full diff of the two exact crates read (archive SHA-256 of 0.103.16 matches the Cargo.lock checksum). No build script; verification stays pure in-memory logic with no filesystem, network, process or environment access. Changes: (1) a new built-in distrust list, DISTRUSTED_SPKIS, of eight 118-byte DER SPKIs embedded with include_bytes!, checked in verify_cert against every certificate in a candidate path and against the trust anchor, returning the new Error::CertDistrusted (file names suggest Entrust-era intermediates; the blobs were not matched to an upstream source); (2) the aws-lc-rs backend drops the in_fips_submission flag so fips() depends only on try_fips_mode(), a backend this build does not use (ring is); (3) manifest-only docs.rs metadata, vcs sha and version bumps; (4) a unit test for the distrust logic. No new dependencies or features. The correctness of the RUSTSEC-2026-0382 fix was not independently verified."
+
 [[audits.sha2]]
 who = "Codex agent (task 01a05f8d-b5ae-70d0-bdf9-6598dca0ff11)"
 criteria = "safe-to-run"
