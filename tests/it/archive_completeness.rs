@@ -1,4 +1,4 @@
-//! Synthetic, loopback-only pagination regressions regressions.
+//! Synthetic, loopback-only pagination regressions.
 use crate::fixture::{
     self, Env, article,
     server::{Response, Server},
