@@ -1,5 +1,12 @@
 # klms
 
+> [!IMPORTANT]
+> Live KLMS integration and use of this client are paused pending clarification
+> of institutional policy. This is an unofficial project, not endorsed by KAIST.
+> Obtain appropriate institutional authorization before connecting to or using
+> the live KLMS service with this client. See the
+> [official October 28 KLMS notice](https://klms.kaist.ac.kr/mod/courseboard/article.php?id=32044&bwid=449261).
+
 `klms` is a terminal client for KAIST's Learning Management System (KLMS):
 what is due, course notices, grades and attendance, and course file downloads,
 plus an optional private local library. Activity reads may record views or
