@@ -18,7 +18,13 @@ use crate::error::AppError;
 
 pub use ureq::http::{HeaderMap, HeaderValue, Method, header::SET_COOKIE};
 
-pub const USER_AGENT: &str = concat!("klms/", env!("CARGO_PKG_VERSION"));
+/// KLMS rejects requests whose User-Agent does not start with `Mozilla/5.0`
+/// (HTTP 403 since November 2026), so the product token rides in a comment.
+pub const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (compatible; klms/",
+    env!("CARGO_PKG_VERSION"),
+    ")"
+);
 
 /// Builds an agent that reports every HTTP status as a normal response and
 /// leaves redirects to the caller. Each request picks its own proxy (see
@@ -397,6 +403,26 @@ mod tests {
                 "POST through {status}, not strict"
             );
         }
+    }
+
+    #[test]
+    fn sends_a_mozilla_user_agent_that_names_klms() {
+        let server = Server::new(|_| Served::bytes("text/plain", "ok"));
+        let request = Follow {
+            method: Method::GET,
+            url: Url::parse(&server.url()).unwrap(),
+            payload: None,
+            max_redirects: 0,
+            strict: false,
+        };
+        follow(&agent(Duration::from_secs(5), None), request, &mut AllowAll).unwrap();
+        let recorded = server.recorded();
+        let sent = recorded[0].header_value("user-agent").unwrap();
+        assert!(sent.starts_with("Mozilla/5.0 "), "{sent}");
+        assert!(
+            sent.contains(concat!("klms/", env!("CARGO_PKG_VERSION"))),
+            "{sent}"
+        );
     }
 
     #[test]
